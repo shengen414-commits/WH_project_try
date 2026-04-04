@@ -1,6 +1,8 @@
 # 1. 指定基础镜像：直接用配置好 Python 的官方镜像
 FROM python:3.10-slim
-
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 # 2. 设置容器内部的工作目录：接下来的操作都在这里进行
 WORKDIR /app
 
@@ -14,4 +16,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # 6. 容器启动时执行的命令
-CMD ["python", "app.py"]
+CMD ["python", "TestSerial.py"]

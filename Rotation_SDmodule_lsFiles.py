@@ -2,7 +2,7 @@ import serial
 import time
 
 # ================= 配置区 =================
-SERIAL_PORT = 'COM12'  # 请替换为你实际的串口号
+SERIAL_PORT = '/dev/ttyUSB0'  # 请替换为你实际的串口号
 BAUD_RATE = 115200
 # ==========================================
 
@@ -21,26 +21,27 @@ try:
     # 3. 接收并打印数据
     is_receiving = False
 
+    # ... 前面代码不变 ...
     while True:
         if ser.in_waiting > 0:
-            # 读取一行串口数据
             line = ser.readline().decode('utf-8', errors='ignore').strip()
             
-            # 检测起点标志
-            if line == "---FILE_LIST_START---":
+            if "---FILE_LIST_START---" in line:
                 is_receiving = True
-                print("================ SD 卡存储内容 ================")
+                print("\n================ SD 卡存储内容 ================")
                 continue
             
-            # 检测终点标志
-            if line == "---FILE_LIST_END---":
+            if "---FILE_LIST_END---" in line:
+                is_receiving = False
                 print("===============================================\n")
                 break
             
-            # 打印文件信息
             if is_receiving:
-                print(line)
-
+                # 🚀 关键：只有包含 [文件] 或 [文件夹] 的行才准进入显示区
+                if "[文件]" in line or "[文件夹]" in line:
+                    print(line)
+                    found_any_file = True
+                # 如果是“待机中”的干扰，直接丢弃，不打印
     ser.close()
     print("查询完成，串口已断开。")
 

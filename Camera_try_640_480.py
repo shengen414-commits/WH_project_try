@@ -3,143 +3,125 @@ import os
 import time
 import threading
 from collections import deque
+from flask import Flask, Response, render_template_string
 
 # =================================================================
-# 核心组件：高帧率相机后台读取线程
+# 核心：高帧率后台“黑匣子”线程
 # =================================================================
 class HighSpeedCamera:
-    def __init__(self, src=1, width=640, height=480, fps=200, buffer_time=2.0):
-        # 加回 CAP_DSHOW 保证启动速度
-        # 替换成 MSMF 框架
-        self.cap = cv2.VideoCapture(src, cv2.CAP_MSMF)
-        
-        # 强制格式和帧率
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+    def __init__(self, src=0, width=640, height=480, fps=210):
+        self.cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
+        # 强制开启高速模式
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        # 强制关闭自动曝光，手动设置一个极短的曝光值
+        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1) # 1 为手动模式
+        self.cap.set(cv2.CAP_PROP_EXPOSURE, 5)      # 设置为 5ms 或更低
         self.cap.set(cv2.CAP_PROP_FPS, fps)
         
-        # 计算需要的缓存总帧数 (200fps * 2s = 400帧)
-        self.buffer_size = int(fps * buffer_time)
+        # 内存缓存区：保留最近 2 秒的所有原始帧（210fps * 2s ≈ 420帧）
+        self.buffer_size = int(fps * 2.0)
         self.buffer = deque(maxlen=self.buffer_size)
         
         self.running = True
         self.real_fps = 0.0
-        
-        # 启动后台独立线程
+        self.is_saving = False
         self.thread = threading.Thread(target=self._update, daemon=True)
         self.thread.start()
 
     def _update(self):
-        # 这个循环在后台以极限速度狂奔，不受 UI 刷新率限制
         prev_time = time.time()
         frame_count = 0
-        
         while self.running:
             ret, frame = self.cap.read()
             if ret:
-                self.buffer.append(frame)
+                # 只有不在保存文件时才往里写，防止内存竞争
+                if not self.is_saving:
+                    self.buffer.append(frame)
                 frame_count += 1
-                
-                # 每抓取 20 帧计算一次真实读取速度
                 if frame_count % 20 == 0:
                     curr_time = time.time()
                     self.real_fps = 20 / (curr_time - prev_time)
                     prev_time = curr_time
 
     def get_latest_frame(self):
-        # 给 UI 线程提供最新的一帧用于预览
-        if len(self.buffer) > 0:
-            return self.buffer[-1].copy()
-        return None
+        return self.buffer[-1].copy() if self.buffer else None
 
-    def get_buffer_snapshot(self):
-        # 导出当前的完整内存快照（用于保存）
-        return list(self.buffer)
-
-    def stop(self):
-        self.running = False
-        self.thread.join()
-        self.cap.release()
-
-# =================================================================
-# 主程序：UI 界面与状态控制
-# =================================================================
-def get_next_capture_num():
-    existing_dirs = [d for d in os.listdir('.') if os.path.isdir(d) and d.startswith('Capture_')]
-    max_num = 0
-    for d in existing_dirs:
-        try:
-            num = int(d.split('_')[1])
-            if num > max_num: max_num = num
-        except ValueError:
-            pass
-    return max_num + 1
-
-print("🚀 正在启动双线程高速摄像系统...")
-# 初始化相机，保留 2 秒的缓存
-cam = HighSpeedCamera(src=0, width=640, height=480, fps=200, buffer_time=2.0)
-time.sleep(1) # 等待摄像头预热和线程启动
-
-state = "preview"
-wait_start_time = 0
-
-print("✅ 系统就绪！注意：现在的预览窗口看起来是 30/60fps，但后台是全速在抓取的。")
-
-while True:
-    # 1. 仅从后台抽一张图来做 UI 预览，就算这里卡住，后台照样在抓
-    frame = cam.get_latest_frame()
-    if frame is None:
-        continue
-
-    # 2. 绘制 UI 状态
-    cv2.putText(frame, f"Backend Cam FPS: {int(cam.real_fps)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-    
-    if state == "preview":
-        cv2.putText(frame, "Ready (Press 's' to trigger)", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    elif state == "waiting":
-        elapsed = time.time() - wait_start_time
-        remain = max(0, 2.0 - elapsed)
-        cv2.putText(frame, f"Saving in: {remain:.1f}s", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        if elapsed >= 2.0:
-            state = "saving"
-            
-    cv2.imshow('High Speed Camera Preview', frame)
-
-    # 3. 键盘事件控制
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord('s') and state == "preview":
-        state = "waiting"
-        wait_start_time = time.time()
-    elif key == ord('q'):
-        break
-
-    # 4. 触发保存 (从后台线程一次性把所有帧拿出来存硬盘)
-    if state == "saving":
-        # 冻结并获取缓存快照
-        frames_to_save = cam.get_buffer_snapshot() 
+    def save_slomo(self):
+        """将内存中的高速帧导出为慢动作视频"""
+        self.is_saving = True
+        frames = list(self.buffer)
+        if not frames: return "No frames in buffer"
         
-        capture_num = get_next_capture_num()
-        folder_name = f"Capture_{capture_num}"
-        video_name = f"Capture_{capture_num}_slomo.mp4"
-        os.makedirs(folder_name, exist_ok=True)
+        timestamp = int(time.time())
+        folder = f"Capture_{timestamp}"
+        os.makedirs(folder, exist_ok=True)
         
-        print(f"\n⚡ 抓取成功！获取到 {len(frames_to_save)} 帧画面，正在保存到 {folder_name}/ ...")
-        
-        # 存图
-        for i, f in enumerate(frames_to_save):
-            cv2.imwrite(f"{folder_name}/frame_{i:04d}.jpg", f)
-            
-        # 存慢动作视频
-        print(f"🎬 正在生成慢动作视频...")
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(video_name, fourcc, 30.0, (640, 480))
-        for f in frames_to_save:
+        # 导出视频（以 30fps 播放，实现约 7 倍慢动作）
+        out = cv2.VideoWriter(f"{folder}/slomo_210fps.mp4", 
+                             cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (640, 480))
+        for f in frames:
             out.write(f)
         out.release()
         
-        print("✅ 保存完毕！可以继续下一次测试。\n")
-        state = "preview"
+        self.is_saving = False
+        return f"Saved {len(frames)} frames to {folder}/"
 
-cam.stop()
-cv2.destroyAllWindows()
+# =================================================================
+# Flask 网页控制台
+# =================================================================
+app = Flask(__name__)
+# 注意：这里我们尝试开启 210 FPS 的后台采集！
+cam = HighSpeedCamera(src=0, fps=210)
+
+@app.route('/')
+def index():
+    # 网页前端：增加一个点击按钮发送请求到 /capture
+    return render_template_string('''
+        <html>
+            <body style="background: #222; color: white; text-align: center; font-family: sans-serif;">
+                <h1>🚗 汽车工程：高速视觉采集终端</h1>
+                <div style="margin-bottom: 20px;">
+                    <img src="/video_feed" style="border: 2px solid #00ff00; width: 640px;">
+                </div>
+                <button onclick="fetch('/capture')" style="padding: 15px 30px; font-size: 20px; cursor: pointer; background: #ff4444; color: white; border: none; border-radius: 5px;">
+                    📸 触发 2秒 高速抓取 (210 FPS)
+                </button>
+                <p id="status">系统就绪，后台实时帧率: {{ fps }}</p>
+                <script>
+                    setInterval(() => {
+                        fetch('/fps').then(r => r.text()).then(t => {
+                            document.getElementById('status').innerText = "后台实时帧率: " + t + " FPS";
+                        })
+                    }, 1000);
+                </script>
+            </body>
+        </html>
+    ''', fps=0)
+
+@app.route('/video_feed')
+def video_feed():
+    def generate():
+        while True:
+            frame = cam.get_latest_frame()
+            if frame is not None:
+                # 预览流：为了网络带宽，我们压缩并限制预览频率
+                ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n\r\n')
+            time.sleep(0.04) # 预览限制在 25fps
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/capture')
+def capture():
+    res = cam.save_slomo()
+    print(f"⚡ [EVENT]: {res}")
+    return res
+
+@app.route('/fps')
+def get_fps():
+    return f"{cam.real_fps:.1f}"
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, threaded=True)

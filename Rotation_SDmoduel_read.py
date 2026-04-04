@@ -6,7 +6,7 @@ import io
 import sys
 
 # ================= 配置区 =================
-SERIAL_PORT = 'COM12'  
+SERIAL_PORT = '/dev/ttyUSB0'  
 BAUD_RATE = 115200
 PPR = 12 # 你的编码器一圈产生的脉冲数，用于计算 RPM
 # ==========================================
@@ -28,21 +28,27 @@ try:
     raw_data = []
     is_receiving = False
 
+    # 修改 Rotation_SDmoduel_read.py 的读取循环
+    line_count = 0
     while True:
         if ser.in_waiting > 0:
             line = ser.readline().decode('utf-8', errors='ignore').strip()
             
-            if line == "---DATA_START---":
+            if "---DATA_START---" in line: # 使用 in 提高匹配容错率
                 is_receiving = True
-                print("成功检测到数据流起点，开始抓取 CSV 数据...")
+                print("成功检测到数据流起点，开始抓取...")
                 continue
             
-            if line == "---DATA_END---":
-                print("数据接收完毕！")
+            if "---DATA_END---" in line:
+                print(f"\n数据接收完毕！共抓取 {line_count} 行。")
                 break
             
             if is_receiving and "," in line:
                 raw_data.append(line)
+                line_count += 1
+                # 🚀 实时反馈：每收到 50 行打印一个点
+                if line_count % 50 == 0:
+                    print(".", end="", flush=True)
 
     # 4. 关闭串口
     ser.close()

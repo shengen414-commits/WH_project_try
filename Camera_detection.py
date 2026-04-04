@@ -1,7 +1,7 @@
 import cv2
 
 # 1. 打开摄像头 (如果你确认是外接摄像头，保持为 1 或改成 0 试试)
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
 
 if not cap.isOpened():
     print("❌ 摄像头没打开！")

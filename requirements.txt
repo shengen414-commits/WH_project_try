@@ -1,0 +1,4 @@
+pyserial
+numpy
+# 如果有绘图需求
+matplotlib
