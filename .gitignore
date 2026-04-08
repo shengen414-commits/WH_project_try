@@ -1,3 +1,4 @@
 *.mp4
-/home/admin123/WH_project_try/Car_Records/*
+Car_Records/*
 *.jpg
+venv/*

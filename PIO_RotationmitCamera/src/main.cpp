@@ -13,7 +13,7 @@ const int chipSelect = 5;      // SD卡 CS(片选) 引脚
 //CLK D18
 // --- 全局变量 ---
 volatile long pulseCount = 0;  
-long lastPrintTime = 0;        
+long lastPrintTime = 0;        hnvcytr 
 bool isRecording = false;      
 
 // 存储当前正在使用的文件名

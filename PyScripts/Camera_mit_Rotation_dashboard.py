@@ -39,7 +39,7 @@ history_buffer = deque(maxlen=10)
 def read_esp32_data():
     '''牺牲一定响应速度，换取高速下速度波动毛刺减少
     ESP32在激活录制的时候10ms一次传回，此时画出来的速度图会波动很大，因为脉冲只能取整，
-    10ms一次的向上向下圆整差的一个脉冲，也就是1/11ppr 每10ms差这么多圈数，在换算成一分钟RPM的时候带来的误差很大
+    10ms一次的向上向下圆整差的一个脉冲，也就是1/12ppr 每10ms差这么多圈数，在换算成一分钟RPM的时候带来的误差很大
     所以需要滤波处理，采用的是100ms 差分滑动窗口，累计过去100ms的脉冲数再算速度
     舍去了大概50ms的响应速度，得到高速下rpm的平滑，波动小'''
     global sensor_state
@@ -340,7 +340,7 @@ def index():
                 </div>
 
                 <script>
-                    const PPR = 11.0; // 编码器分辨率：每圈11个脉冲
+                    const PPR = 12.0; // 编码器分辨率：每圈12个脉冲
 
                     function toggleRightCam() {
                         const isChecked = document.getElementById('cam-toggle').checked;
