@@ -223,6 +223,9 @@ class HighSpeedCamera:
             filename = os.path.join(save_path, f"{timestamp_ns}.jpg")
             cv2.imwrite(filename, f, [cv2.IMWRITE_JPEG_QUALITY, 95])
         print(f"💾 [{self.name}] 图片保存完成！")
+        # 🚀 核心救命代码加在这里：强制同步磁盘！
+        os.sync()       
+        print(f"✅ [{self.name}] 磁盘同步完成，数据已绝对安全！")
 
     def get_latest_frame(self):
         if not self.is_active:
