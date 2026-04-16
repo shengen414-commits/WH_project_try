@@ -6,7 +6,7 @@ import serial
 import re
 import numpy as np
 from collections import deque
-from flask import Flask, Response, render_template_string, jsonify, request
+from flask import Flask, Response, render_template, jsonify, request
 
 # 确保录像保存根目录存在
 SAVE_DIR = "Car_Records"
@@ -259,191 +259,7 @@ cam_right = HighSpeedCamera(src=2, name="Right", fps=200)
 
 @app.route('/')
 def index():
-    return render_template_string('''
-        <html>
-            <head>
-                <title>双路高速感知终端</title>
-                //<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-                <style>
-                    body { background: #1a1a1a; color: #00ff00; font-family: monospace; text-align: center; margin: 0; padding: 20px;}
-                    .container { display: flex; justify-content: center; gap: 20px; padding: 10px; flex-wrap: wrap;}
-                    .camera-box { border: 2px solid #333; background: #000; padding: 10px; border-radius: 8px; transition: 0.3s; }
-                    img { width: 480px; height: 360px; background: #222; transition: 0.3s;}
-                    .single-mode img { width: 640px; height: 480px; }
-                    .stats { margin-top: 10px; font-size: 1.2em; }
-                    .top-bar { display: flex; justify-content: space-between; align-items: center; width: 90%; margin: 0 auto; }
-                    .toggle-container { background: #222; padding: 10px 20px; border-radius: 20px; border: 1px solid #444;}
-                    .switch { position: relative; display: inline-block; width: 60px; height: 34px; vertical-align: middle; margin-left: 10px;}
-                    .switch input { opacity: 0; width: 0; height: 0; }
-                    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .4s; border-radius: 34px;}
-                    .slider:before { position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%;}
-                    input:checked + .slider { background-color: #00aaff; }
-                    input:checked + .slider:before { transform: translateX(26px); }
-
-                    .dashboard { margin: 10px auto; width: 90%; border: 2px solid #00aaff; background: #001122; border-radius: 10px; padding: 20px; box-shadow: 0 0 15px rgba(0, 170, 255, 0.3); }
-                    .dash-metrics { display: flex; justify-content: space-around; margin-bottom: 20px; }
-                    .metric-box { background: rgba(0, 0, 0, 0.5); padding: 10px 30px; border-radius: 8px; border: 1px solid #333; min-width: 200px; }
-                    .metric-label { font-size: 1em; color: #888; }
-                    .metric-value { font-size: 2.5em; font-weight: bold; margin-top: 5px; }
-                    .val-pos { color: #00aaff; } 
-                    .val-spd { color: #ff8800; } 
-                    .charts-container { display: flex; justify-content: space-between; gap: 20px; height: 250px; }
-                    .chart-box { flex: 1; background: #0a0a0a; border: 1px solid #333; border-radius: 8px; padding: 10px; }
-
-                    .btn-group { margin-top: 20px; }
-                    button { background: #ff4444; color: white; border: none; padding: 15px 30px; font-size: 18px; font-weight: bold; cursor: pointer; border-radius: 5px; transition: 0.3s;}
-                    button:hover { background: #cc0000; transform: scale(1.05); }
-                    button:disabled { background: #555; cursor: not-allowed; transform: none; }
-                </style>
-            </head>
-            <body>
-                <div class="top-bar">
-                    <h1>🚗  CAR  </h1>
-                    <div class="toggle-container">
-                        <span>双目模式 (Right Cam)</span>
-                        <label class="switch">
-                            <input type="checkbox" id="cam-toggle" onchange="toggleRightCam()">
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                </div>
-                
-                <div class="dashboard">
-                    <div class="dash-metrics">
-                        <div class="metric-box">
-                            <div class="metric-label">累计圈数 (Revolutions)</div>
-                            <div class="metric-value val-pos" id="sensor-pos">0.00</div>
-                        </div>
-                        <div class="metric-box">
-                            <div class="metric-label">瞬时转速 (RPM)</div>
-                            <div class="metric-value val-spd" id="sensor-speed">0.0</div>
-                        </div>
-                    </div>
-                    <div class="charts-container">
-                        <div class="chart-box"><canvas id="posChart"></canvas></div>
-                        <div class="chart-box"><canvas id="speedChart"></canvas></div>
-                    </div>
-                </div>
-
-                <div class="container" id="video-container">
-                    <div class="camera-box single-mode" id="box-left">
-                        <h3>LEFT CAMERA</h3>
-                        <img src="/video_feed/left">
-                        <div class="stats" id="fps-left">FPS: 0.0</div>
-                    </div>
-                    <div class="camera-box" id="box-right" style="display: none;">
-                        <h3>RIGHT CAMERA</h3>
-                        <img src="/video_feed/right" id="img-right">
-                        <div class="stats" id="fps-right">STANDBY</div>
-                    </div>
-                </div>
-                
-                <div class="btn-group">
-                    <button id="rec-btn" onclick="startRecord()">🔴 记录多源融合数据 (3秒)</button>
-                </div>
-
-                <script>
-                    const PPR = 12.0; // 编码器分辨率：每圈12个脉冲
-
-                    function toggleRightCam() {
-                        const isChecked = document.getElementById('cam-toggle').checked;
-                        const rightBox = document.getElementById('box-right');
-                        const leftBox = document.getElementById('box-left');
-                        fetch(`/toggle_cam?state=${isChecked ? 'on' : 'off'}`);
-                        if (isChecked) {
-                            rightBox.style.display = 'block';
-                            leftBox.classList.remove('single-mode');
-                            document.getElementById('img-right').src = "/video_feed/right?" + new Date().getTime();
-                        } else {
-                            rightBox.style.display = 'none';
-                            leftBox.classList.add('single-mode');
-                            document.getElementById('fps-right').innerText = "STANDBY";
-                        }
-                    }
-
-                    const maxDataPoints = 50;
-                    let timeTicks = 0;
-                    const commonOptions = {
-                        responsive: true, maintainAspectRatio: false, animation: false,
-                        scales: { x: { display: false }, y: { grid: { color: '#333' }, ticks: { color: '#888' } } },
-                        plugins: { legend: { display: false } }
-                    };
-
-                    const posChart = new Chart(document.getElementById('posChart').getContext('2d'), {
-                        type: 'line',
-                        data: { labels: [], datasets: [{ label: 'Revolutions', data: [], borderColor: '#00aaff', borderWidth: 2, pointRadius: 0, tension: 0.1 }] },
-                        options: { ...commonOptions, plugins: { title: { display: true, text: 'Position (Revolutions)', color: '#00aaff' } } }
-                    });
-
-                    const speedChart = new Chart(document.getElementById('speedChart').getContext('2d'), {
-                        type: 'line',
-                        data: { labels: [], datasets: [{ label:'RPM', data: [], borderColor: '#ff8800', borderWidth: 2, pointRadius: 0, tension: 0.1 }] },
-                        options: { ...commonOptions, plugins: { title: { display: true, text: 'Speed (RPM)', color: '#ff8800' } } }
-                    });
-
-                    setInterval(() => {
-                        fetch('/fps_stats').then(r => r.json()).then(data => {
-                            document.getElementById('fps-left').innerText = "实时: " + data.left + " FPS";
-                            if (document.getElementById('cam-toggle').checked) {
-                                document.getElementById('fps-right').innerText = "实时: " + data.right + " FPS";
-                            }
-                        });
-                    }, 1000);
-
-                    // --- 核心：在此处进行单位换算 ---
-                    setInterval(() => {
-                        fetch('/sensor_stats').then(r => r.json()).then(data => {
-                            // 换算逻辑：
-                            // 1. 圈数 (Revs) = 总脉冲 / PPR
-                            const revolutions = (parseFloat(data.position) / PPR).toFixed(2);
-                            
-                            // 2. RPM = (脉冲/秒 / PPR) * 60秒
-                            const rpm = ((parseFloat(data.speed) / PPR) * 60).toFixed(1);
-
-                            document.getElementById('sensor-pos').innerText = revolutions;
-                            document.getElementById('sensor-speed').innerText = rpm;
-
-                            posChart.data.labels.push(timeTicks);
-                            posChart.data.datasets[0].data.push(revolutions);
-                            speedChart.data.labels.push(timeTicks);
-                            speedChart.data.datasets[0].data.push(rpm);
-
-                            if (posChart.data.labels.length > maxDataPoints) {
-                                posChart.data.labels.shift(); posChart.data.datasets[0].data.shift();
-                                speedChart.data.labels.shift(); speedChart.data.datasets[0].data.shift();
-                            }
-                            posChart.update(); speedChart.update();
-                            timeTicks++;
-                        });
-                    }, 100);
-
-                    function startRecord() {
-                        const btn = document.getElementById('rec-btn');
-                        btn.disabled = true;
-                        btn.innerText = "⏳ 正在抓取 (剩余 3 秒)...";
-                        fetch('/start_record').then(r => r.json()).then(data => {
-                            if(data.status === 'started') {
-                                let timeLeft = 3;
-                                let timer = setInterval(() => {
-                                    timeLeft -= 1;
-                                    if(timeLeft <= 0) {
-                                        clearInterval(timer);
-                                        btn.innerText = "💾 正在写入硬盘和SD卡...";
-                                        setTimeout(() => {
-                                            btn.disabled = false;
-                                            btn.innerText = "🔴 记录多源融合数据 (3秒)";
-                                        }, 2500); 
-                                    } else {
-                                        btn.innerText = `⏳ 正在抓取 (剩余 ${timeLeft} 秒)...`;
-                                    }
-                                }, 1000);
-                            }
-                        });
-                    }
-                </script>
-            </body>
-        </html>
-    ''')
+    return render_template('index.html')
 
 def gen_stream(camera):
     while True:
@@ -502,5 +318,27 @@ def start_record():
     
     return jsonify({"status": "started"})
 
+# --- 新增：接收前端油门控制指令 ---
+@app.route('/set_throttle')
+def set_throttle():
+    # 默认油门为 1500 (中位/停止)
+    val_str = request.args.get('val', '1500') 
+    try:
+        val = int(val_str)
+        # 安全断言保护
+        if 1000 <= val <= 2000:
+            if esp32_serial and esp32_serial.is_open:
+                # 按照 ESP32 设定的协议，发送 "T1600\n"
+                command = f"T{val}\n"
+                esp32_serial.write(command.encode('utf-8'))
+                print(f"🎮 下发油门指令: {val} us")
+                return jsonify({"status": "success", "throttle": val})
+            else:
+                return jsonify({"status": "error", "message": "串口未连接"}), 500
+        else:
+            return jsonify({"status": "error", "message": "油门值越界"}), 400
+    except ValueError:
+        return jsonify({"status": "error", "message": "无效的油门数值"}), 400
+    
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)

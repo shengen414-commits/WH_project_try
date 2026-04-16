@@ -69,10 +69,7 @@ void initSDLogger() {
 }
 
 // --- 对外功能 2: 处理电脑指令 ---
-void handleSerialCommands() {
-  if (Serial.available() > 0) {
-    char incomingChar = Serial.read();
-
+void handleSerialCommands(char incomingChar) {
     if (incomingChar == 's' || incomingChar == 'S') {
       if (!isRecording) { 
         createNewFileName(); 
@@ -91,12 +88,14 @@ void handleSerialCommands() {
         }
       }
     } 
+
     else if (incomingChar == 'p' || incomingChar == 'P') {
       if (isRecording) { 
         isRecording = false;
         Serial.println("\n>>> 收到指令，已停止记录。可以安全拔出SD卡。");
       }
     }
+
     else if (incomingChar == 'r' || incomingChar == 'R') {
       if (!isRecording) { 
         if (currentFileName == "") {
@@ -139,7 +138,6 @@ void handleSerialCommands() {
       }
     }
   }
-}
 
 // --- 对外功能 3: 定时打印和记录数据 ---
 void handleDataLogging() {

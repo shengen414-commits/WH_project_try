@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>双路高速感知终端</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="top-bar">
+        <h1>🚗 CAR</h1>
+        <div class="toggle-container">
+            <span>双目模式 (Right Cam)</span>
+            <label class="switch">
+                <input type="checkbox" id="cam-toggle" onchange="toggleRightCam()">
+                <span class="slider"></span>
+            </label>
+        </div>
+    </div>
+    
+    <div class="dashboard">
+        <div class="dash-metrics">
+            <div class="metric-box">
+                <div class="metric-label">累计圈数 (Revolutions)</div>
+                <div class="metric-value val-pos" id="sensor-pos">0.00</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-label">瞬时转速 (RPM)</div>
+                <div class="metric-value val-spd" id="sensor-speed">0.0</div>
+            </div>
+        </div>
+        <div class="charts-container">
+            <div class="chart-box"><canvas id="posChart"></canvas></div>
+            <div class="chart-box"><canvas id="speedChart"></canvas></div>
+        </div>
+    </div>
+
+    <div class="container" id="video-container">
+        <div class="camera-box single-mode" id="box-left">
+            <h3>LEFT CAMERA</h3>
+            <img src="/video_feed/left">
+            <div class="stats" id="fps-left">FPS: 0.0</div>
+        </div>
+        <div class="camera-box" id="box-right" style="display: none;">
+            <h3>RIGHT CAMERA</h3>
+            <img src="/video_feed/right" id="img-right">
+            <div class="stats" id="fps-right">STANDBY</div>
+        </div>
+    </div>
+    
+    <div class="btn-group">
+        <button id="rec-btn" onclick="startRecord()">🔴 记录多源融合数据 (3秒)</button>
+    </div>
+
+    <div class="control-panel">
+        <h2 style="margin:0; color:#00aaff;">🎮 线控底盘驱动台 (Drive-by-Wire)</h2>
+        <div class="joystick-wrapper">
+            <div class="throttle-label">前进<br>(Forward)</div>
+            <div class="joystick-track" id="joy-track">
+                <div class="joystick-center-line"></div>
+                <div class="joystick-knob" id="joy-knob"></div>
+            </div>
+            <div class="throttle-label">倒退<br>(Reverse)</div>
+        </div>
+        <div>PWM 输出指令: <span id="throttle-val" class="throttle-display">1500</span> <span style="color:#888;">us</span></div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
