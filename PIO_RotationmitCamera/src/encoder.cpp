@@ -9,8 +9,8 @@
 volatile long pulseCount = 0; 
 
 // 【定义引脚】（设为私有，不想让 main.cpp 知道引脚具体是几）
-const int encoderPinA = 13; 
-const int encoderPinB = 12; 
+const int encoderPinA = 26; 
+const int encoderPinB = 25; 
 //3.3Vcc
 
 // 【中断服务函数 (ISR)】

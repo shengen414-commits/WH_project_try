@@ -19,7 +19,9 @@ sensor_state = {
     "position": 0,
     "speed_pps": 0.0,
     "last_time_ms": 0,
-    "last_pos": 0
+    "last_pos": 0,
+    "mode": "WEB",      # 新增：当前控制权
+    "throttle": 1500    # 新增：当前真实油门
 }
 
 try:
@@ -47,7 +49,8 @@ def read_esp32_data():
         return
 
     pattern = re.compile(r"时间:\s*(\d+)\s*ms\s*\|\s*位置:\s*(-?\d+)")
-
+    drive_pattern = re.compile(r"\[DRIVE\] 模式:\s*(RC|WEB)\s*\|\s*油门:\s*(\d+)")
+    
     while True:
         try:
             # 防积压机制
@@ -98,6 +101,12 @@ def read_esp32_data():
                     sensor_state["speed_pps"] = smoothed_speed
                     sensor_state["last_time_ms"] = curr_time_ms
                     sensor_state["last_pos"] = curr_pos
+                else:
+                    #   新增：如果不是传感器数据，看看是不是驱动状态数据！
+                    match_drive = drive_pattern.search(line)
+                    if match_drive:
+                        sensor_state["mode"] = match_drive.group(1)
+                        sensor_state["throttle"] = int(match_drive.group(2))
         except Exception as e:
             time.sleep(0.1)
 
@@ -286,7 +295,9 @@ def fps_stats():
 def sensor_stats():
     return jsonify({
         "position": sensor_state["position"],
-        "speed": f"{sensor_state['speed_pps']:.1f}"
+        "speed": f"{sensor_state['speed_pps']:.1f}",
+        "mode": sensor_state["mode"],         # 🚀 新增
+        "throttle": sensor_state["throttle"]  # 🚀 新增
     })
 
 # --- 新增：接收前端开关右摄像头的指令 ---

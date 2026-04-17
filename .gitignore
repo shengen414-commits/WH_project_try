@@ -3,3 +3,4 @@ Car_Records/*
 *.jpg
 venv/*
 YOLOv10-N/*
+*.sh

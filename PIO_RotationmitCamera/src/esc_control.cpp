@@ -10,6 +10,9 @@ Servo myESC;            // 实例化 Servo 对象
 volatile unsigned long rcRiseTime = 0;
 volatile int rcPulseWidth = 1500;
 volatile unsigned long lastRcValidTime = 0;
+int rcActiveCount = 0; // 🚀 新增：连续有效动作计数器
+
+unsigned long lastDriveStatusTime = 0; // 🚀 新增：状态播报计时器
 
 // --- 控制权状态机 ---
 enum ControlMode { WEB_MODE, RC_MODE };
@@ -45,7 +48,7 @@ void initESC() {
     myESC.writeMicroseconds(1500);
     
     // 🚀 初始化遥控器引脚并挂载双边沿中断 (CHANGE)
-    pinMode(rcPin, INPUT);
+    pinMode(rcPin, INPUT_PULLDOWN);
     attachInterrupt(digitalPinToInterrupt(rcPin), rcInterrupt, CHANGE);
 
     Serial.println(">>> [模块加载] 电调(ESC)与遥控接收机(D27)初始化完成");
@@ -79,12 +82,20 @@ void updateESC() {
         // 2. 遥控器死区(Deadband)判断：中位通常是1500，手抖或微调会有波动。
         // 如果脉宽越过 1450~1550 这个死区，说明人手确实在推摇杆！
         if (rcPulseWidth < 1450 || rcPulseWidth > 1550) {
-            if (currentMode != RC_MODE) {
-                Serial.println("⚠️ [警告] 检测到物理遥控器动作，已强制切为【遥控模式】！");
-                currentMode = RC_MODE; 
+            rcActiveCount++; // 每次发现越界，计数器 +1
+            if (rcActiveCount > 3) {
+                if (currentMode != RC_MODE) {
+                    Serial.println("⚠️ [警告] 检测到持续物理遥控动作，已强制切为【遥控模式】！");
+                    currentMode = RC_MODE; 
+                }
             }
         }
-
+        else {
+            // 只要数值掉回 1450~1550 的死区，立刻清零计数器！
+            // 这样偶尔一个干扰毛刺根本凑不够 3 次，就会被无视。
+            rcActiveCount = 0;
+        }
+        
         // 3. 如果当前处于遥控模式，底层油门死死咬住遥控器的值
         if (currentMode == RC_MODE) {
             myESC.writeMicroseconds(rcPulseWidth);
@@ -98,5 +109,15 @@ void updateESC() {
             webThrottle = 1500;
             myESC.writeMicroseconds(1500); // 强制归中刹车
         }
+        rcActiveCount = 0; // 没信号也要清零
+    }
+
+    // 🚀 新增：向 Python 汇报底层状态 (每 100ms 播报一次)
+    if (millis() - lastDriveStatusTime > 100) {
+        Serial.print("[DRIVE] 模式: ");
+        Serial.print(currentMode == RC_MODE ? "RC" : "WEB");
+        Serial.print(" | 油门: ");
+        Serial.println(currentMode == RC_MODE ? rcPulseWidth : webThrottle);
+        lastDriveStatusTime = millis();
     }
 }

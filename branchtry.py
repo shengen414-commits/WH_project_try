@@ -1,2 +1,3 @@
-https://espressif.github.io/arduino-esp32/package_esp32_index.json
-http://arduino.taichi-maker.com/package_esp8266com_index.json
+data = [0,3,8,14,25,36,41]
+
+print([(41/7 *i)-data[i-1] for i in range(1,8)])

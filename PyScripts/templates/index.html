@@ -53,6 +53,10 @@
 
     <div class="control-panel">
         <h2 style="margin:0; color:#00aaff;">🎮 线控底盘驱动台 (Drive-by-Wire)</h2>
+        <div id="rc-warning" style="display: none; background: #cc0000; color: #fff; padding: 10px; border-radius: 8px; font-weight: bold; margin-bottom: 15px; text-align: center; font-size: 1.1em; animation: flash 1.5s infinite;">
+            ⚠️ 物理遥控器强制接管中！网页控制已锁定
+        </div>
+
         <div class="joystick-wrapper">
             <div class="throttle-label">前进<br>(Forward)</div>
             <div class="joystick-track" id="joy-track">
@@ -61,7 +65,18 @@
             </div>
             <div class="throttle-label">倒退<br>(Reverse)</div>
         </div>
+
+        <div class="slider-wrapper">
+            <span style="color:#888; font-weight:bold; font-size: 1.1em;">定速巡航: </span>
+            <input type="range" id="throttle-slider" min="1000" max="2000" value="1500" step="10">
+        </div>
+        
         <div>PWM 输出指令: <span id="throttle-val" class="throttle-display">1500</span> <span style="color:#888;">us</span></div>
+
+        <div style="margin-top: 20px; gap: 20px; display: flex; justify-content: center;">
+            <button class="btn-neutral" onclick="setThrottle(1500)">归中 (Neutral)</button>
+            <button class="btn-estop" onclick="setThrottle(1500)">🚨 紧急刹车 (E-STOP)</button>
+        </div>
     </div>
 
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
