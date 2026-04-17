@@ -10,6 +10,7 @@ Servo myESC;            // 实例化 Servo 对象
 volatile unsigned long rcRiseTime = 0;
 volatile int rcPulseWidth = 1500;
 volatile unsigned long lastRcValidTime = 0;
+volatile bool newRcData = false; // 🚀 新增：标记是否收到了【新】的一帧脉冲
 int rcActiveCount = 0; // 🚀 新增：连续有效动作计数器
 
 unsigned long lastDriveStatusTime = 0; // 🚀 新增：状态播报计时器
@@ -29,6 +30,8 @@ void IRAM_ATTR rcInterrupt() {
         if (width > 900 && width < 2100) {
             rcPulseWidth = width;
             lastRcValidTime = millis(); // 刷新“心跳”时间
+            newRcData = true; // 🚀 新增：只有产生了新的有效脉宽，才标记为有新数据
+
         }
     }
 }
@@ -79,21 +82,27 @@ void updateESC() {
     bool isRcActive = (millis() - lastRcValidTime) < 500;
 
     if (isRcActive) {
-        // 2. 遥控器死区(Deadband)判断：中位通常是1500，手抖或微调会有波动。
-        // 如果脉宽越过 1450~1550 这个死区，说明人手确实在推摇杆！
-        if (rcPulseWidth < 1450 || rcPulseWidth > 1550) {
-            rcActiveCount++; // 每次发现越界，计数器 +1
-            if (rcActiveCount > 3) {
-                if (currentMode != RC_MODE) {
-                    Serial.println("⚠️ [警告] 检测到持续物理遥控动作，已强制切为【遥控模式】！");
-                    currentMode = RC_MODE; 
+        if (newRcData) {
+            newRcData = false;
+
+            // 判断这【新的一帧】是不是在死区外
+            // 2. 遥控器死区(Deadband)判断：中位通常是1500，手抖或微调会有波动。
+            // 如果脉宽越过 1450~1550 这个死区，说明人手确实在推摇杆！
+            if (rcPulseWidth < 1450 || rcPulseWidth > 1550) {
+                rcActiveCount++; // 每次发现越界，计数器 +1
+                if (rcActiveCount > 3) {
+                    if (currentMode != RC_MODE) {
+                        Serial.println("⚠️ [警告] 检测到持续物理遥控动作，已强制切为【遥控模式】！");
+                        currentMode = RC_MODE; 
+                    }
                 }
             }
-        }
-        else {
-            // 只要数值掉回 1450~1550 的死区，立刻清零计数器！
-            // 这样偶尔一个干扰毛刺根本凑不够 3 次，就会被无视。
-            rcActiveCount = 0;
+            else {
+                // 只要有一帧掉回中位，立刻清零！
+                // 只要数值掉回 1450~1550 的死区，立刻清零计数器！
+                // 这样偶尔一个干扰毛刺根本凑不够 3 次，就会被无视。
+                rcActiveCount = 0;
+            }
         }
         
         // 3. 如果当前处于遥控模式，底层油门死死咬住遥控器的值
