@@ -162,6 +162,10 @@ class HighSpeedCamera:
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             # 注释掉 FPS 设置以防触发驱动重置 (根据你之前的硬件反馈)
             self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+            
+            # 🚀 极其关键的漏网之鱼：强行把底层缓存池设为 1，拒绝积压历史画面！
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
             self.available = True
             print(f"✅ [{self.name}] 摄像头硬件已连接并初始化。")
 
@@ -274,7 +278,10 @@ def gen_stream(camera):
     while True:
         frame = camera.get_latest_frame()
         if frame is not None:
-            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            # 🚀 降维打击：长宽缩小一半，极大减轻网络和手机浏览器的解码负担
+            small_frame = cv2.resize(frame, (320, 240))
+            
+            ret, buffer = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
             yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n\r\n')
         # 休眠时减慢轮询速率节省 CPU
         time.sleep(0.04 if camera.is_active else 0.5) 
