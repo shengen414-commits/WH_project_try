@@ -12,7 +12,7 @@ BAUD_RATE = 115200
 
 # 请务必确认这两个数值！
 MOTOR_PPR = 12       # 传动轴（电机）编码器一圈的脉冲数
-WHEEL_PPR = 11       # 车轮编码器一圈的脉冲数 (如果是单磁铁请写1，如果是原装编码器请写实际线数)
+WHEEL_PPR = 12       # 车轮编码器一圈的脉冲数 (统一为 12 PPR)
 
 try:
     ser = serial.Serial(PORT, BAUD_RATE, timeout=0.1)

@@ -1,0 +1,18 @@
+services:
+  wh-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wh_dashboard
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    devices:
+      - /dev/video0:/dev/video0
+      - /dev/video2:/dev/video2
+      - /dev/ttyUSB0:/dev/ttyUSB0
+    volumes:
+      - ./:/app
+    environment:
+      PYTHONUNBUFFERED: "1"
+    command: ["python", "PyScripts/Camera_mit_Rotation_dashboard.py"]

@@ -1,4 +1,5 @@
-pyserial
+flask
 numpy
-# 如果有绘图需求
+opencv-python-headless
 matplotlib
+pyserial

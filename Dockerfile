@@ -1,19 +1,28 @@
-# 1. 指定基础镜像：直接用配置好 Python 的官方镜像
 FROM python:3.10-slim
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-# 2. 设置容器内部的工作目录：接下来的操作都在这里进行
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
 WORKDIR /app
 
-# 3. 将本地电脑的依赖文件拷贝到容器里
-COPY requirements.txt .
+# OpenCV on slim images usually needs a few runtime libraries.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libusb-1.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
-# 4. 在容器里安装依赖库
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt ./
 
-# 5. 将当前目录下的所有代码拷贝到容器的 /app 目录下
+RUN pip install --upgrade pip \
+    && pip install -r requirements.txt
+
 COPY . .
 
-# 6. 容器启动时执行的命令
-CMD ["python", "TestSerial.py"]
+EXPOSE 5000
+
+CMD ["python", "PyScripts/Camera_mit_Rotation_dashboard.py"]
