@@ -14,11 +14,15 @@ volatile bool newRcData = false; // 🚀 新增：标记是否收到了【新】
 int rcActiveCount = 0; // 🚀 新增：连续有效动作计数器
 
 unsigned long lastDriveStatusTime = 0; // 🚀 新增：状态播报计时器
+const unsigned long WEB_COMMAND_TIMEOUT_MS = 1200;
+const unsigned long ESTOP_LATCH_MS = 1000;
 
 // --- 控制权状态机 ---
 enum ControlMode { WEB_MODE, RC_MODE };
 ControlMode currentMode = WEB_MODE; // 默认网页控制
 int webThrottle = 1500;             // 记录网页下发的油门值
+unsigned long lastWebCommandTime = 0;
+unsigned long estopLatchedUntil = 0;
 
 // 🚀 核心硬件中断：精准捕捉 D27 引脚的电平变化，计算 PWM 脉宽
 void IRAM_ATTR rcInterrupt() {
@@ -40,7 +44,11 @@ void handleESCCommand(char cmd) {
     // 🚀 新增：最高优先级急停指令
     if (cmd == 'E' || cmd == 'e') {
         // 1. 第一时间切断动力，物理电调归中
-        setESCThrottle(1500);
+        webThrottle = 1500;
+        currentMode = WEB_MODE;
+        estopLatchedUntil = millis() + ESTOP_LATCH_MS;
+        lastWebCommandTime = 0;
+        myESC.writeMicroseconds(1500);
         
         // 2. 核心魔法：清空单片机硬件串口缓冲区里的所有积压旧指令！
         // 就像把下水道彻底疏通，那些还没执行的 T1800, T1900 全部被丢弃。
@@ -53,12 +61,18 @@ void handleESCCommand(char cmd) {
     // 普通油门指令保持不变
     else if (cmd == 'T' || cmd == 't') {
         int throttleValue = Serial.parseInt(); 
+        if (millis() < estopLatchedUntil) {
+            Serial.println("[E-STOP] 忽略急停保护窗口内的普通油门指令");
+            return;
+        }
         setESCThrottle(throttleValue);
     }
 }
 
 // --- 初始化函数 ---
 void initESC() {
+    Serial.setTimeout(20);
+
     // 为 ESP32 分配底层定时器
     ESP32PWM::allocateTimer(0);
     
@@ -81,6 +95,7 @@ void initESC() {
 // --- 控制函数 ---
 void setESCThrottle(int pwmValue) {
     webThrottle = constrain(pwmValue, 1000, 2000);
+    lastWebCommandTime = millis();
     currentMode = WEB_MODE; // 只要网页发来新指令，瞬间抢回控制权
     myESC.writeMicroseconds(webThrottle);
     
@@ -88,19 +103,21 @@ void setESCThrottle(int pwmValue) {
     Serial.println(webThrottle);
 }
 
-// 🚀 新增：电调模块的指令认领中心
-void handleESCCommand(char cmd) {
-    if (cmd == 'T' || cmd == 't') {
-        // 既然确认是 'T'，说明后面的数字是属于我的，我来读取！
-        int throttleValue = Serial.parseInt(); 
-        setESCThrottle(throttleValue);
-    }
-}
-
 // 🚀 新增：持续监控与接管逻辑
 void updateESC() {
     // 1. 判断接收机是否存活 (如果超过 500ms 没收到脉冲，说明遥控器关机或信号丢失)
     bool isRcActive = (millis() - lastRcValidTime) < 500;
+
+    if (millis() < estopLatchedUntil) {
+        myESC.writeMicroseconds(1500);
+        rcActiveCount = 0;
+
+        if (millis() - lastDriveStatusTime > 100) {
+            Serial.println("[DRIVE] 模式: WEB | 油门: 1500");
+            lastDriveStatusTime = millis();
+        }
+        return;
+    }
 
     if (isRcActive) {
         if (newRcData) {
@@ -140,6 +157,14 @@ void updateESC() {
             myESC.writeMicroseconds(1500); // 强制归中刹车
         }
         rcActiveCount = 0; // 没信号也要清零
+    }
+
+    if (currentMode == WEB_MODE && webThrottle != 1500 && lastWebCommandTime > 0 &&
+        millis() - lastWebCommandTime > WEB_COMMAND_TIMEOUT_MS) {
+        Serial.println("🚨 [网页失联保护] 超过 1200ms 未收到网页油门心跳，自动归中！");
+        webThrottle = 1500;
+        myESC.writeMicroseconds(1500);
+        lastWebCommandTime = 0;
     }
 
     // 🚀 新增：向 Python 汇报底层状态 (每 100ms 播报一次)

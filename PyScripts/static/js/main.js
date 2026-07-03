@@ -1,4 +1,5 @@
 const PPR = 12.0; // 编码器分辨率
+let isRcMode = false;
 
 // --- 摄像头切换逻辑 ---
 function toggleRightCam() {
@@ -72,8 +73,9 @@ setInterval(() => {
         const serverMode = data.mode;
         const serverThrottle = parseInt(data.throttle);
         const rcWarning = document.getElementById('rc-warning');
+        isRcMode = (serverMode === 'RC');
 
-        if (serverMode === 'RC') {
+        if (isRcMode) {
             // 遥控器夺权了！显示红条警告
             rcWarning.style.display = 'block';
             
@@ -132,6 +134,20 @@ let lastSendTime = 0;
 // ==========================================
 let isSending = false;      // 网络锁：当前是否正在发数据？
 let pendingThrottle = null; // 暂存区：记录最新的油门值
+let activeThrottleController = null;
+let lastHeartbeatTime = 0;
+
+function fetchWithTimeout(url, options = {}, timeoutMs = 700) {
+    const controller = options.controller || new AbortController();
+    const { controller: _controller, ...fetchOptions } = options;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    return fetch(url, {
+        cache: 'no-store',
+        ...fetchOptions,
+        signal: controller.signal,
+    }).finally(() => clearTimeout(timeoutId));
+}
 
 function sendThrottleCommand(val) {
     pendingThrottle = val; // 永远用最新值覆盖暂存区
@@ -150,12 +166,17 @@ function flushThrottleQueue() {
     pendingThrottle = null; 
     
     isSending = true; // 上锁！
+    activeThrottleController = new AbortController();
     
     // 发起 HTTP 请求
-    fetch(`/set_throttle?val=${valToSend}`)
+    fetchWithTimeout(`/set_throttle?val=${valToSend}`, {
+        method: 'POST',
+        controller: activeThrottleController,
+    }, 700)
         .then(response => {
             // 请求完成，解锁！
             isSending = false; 
+            activeThrottleController = null;
             
             // 🚀 核心：如果在我们发送的这零点几秒内，用户又拖了滑块（暂存区不为空）
             // 那就休息 100 毫秒后，再发一次最新的！
@@ -166,6 +187,10 @@ function flushThrottleQueue() {
         .catch(error => {
             console.error("指令下发失败:", error);
             isSending = false; // 报错也要解锁，防止死锁
+            activeThrottleController = null;
+            if (pendingThrottle !== null) {
+                setTimeout(flushThrottleQueue, 100);
+            }
         });
 }
 
@@ -175,18 +200,25 @@ function flushThrottleQueue() {
 function triggerEStop() {
     // 1. 强行清空节流阀的暂存区，掐断还没发出的网络请求
     pendingThrottle = null; 
+    if (activeThrottleController) {
+        activeThrottleController.abort();
+        activeThrottleController = null;
+    }
+    isSending = false;
     
     // 2. 将网页 UI 的滑块、数字、摇杆瞬间打回 1500 中位
-    updateDriveState(1500, 'system');
+    updateDriveState(1500, 'system', false);
     
     // 3. 呼叫后端的专属急停接口
-    fetch('/e_stop').then(() => {
+    fetchWithTimeout('/e_stop', { method: 'POST' }, 700).then(() => {
         console.log("🚨 急停指令已送达底层！");
+    }).catch(error => {
+        console.error("急停指令发送失败:", error);
     });
 }
 
 // 👑 核心状态机：同步滑块、摇杆和显示器
-function updateDriveState(pwm, source) {
+function updateDriveState(pwm, source, shouldSend = true) {
     // 1. 更新数字和颜色
     throttleDisplay.innerText = pwm;
     if(pwm > 1550) throttleDisplay.style.color = '#ff8800';
@@ -207,7 +239,9 @@ function updateDriveState(pwm, source) {
     }
 
     // 4. 下发底层指令
-    sendThrottleCommand(pwm);
+    if (shouldSend) {
+        sendThrottleCommand(pwm);
+    }
 }
 
 // === 监听：定速巡航滑块 ===
@@ -255,6 +289,14 @@ document.addEventListener('touchend', stopDrag);
 function setThrottle(val) {
     updateDriveState(val, 'system');
 }
+
+setInterval(() => {
+    const pwm = parseInt(slider.value, 10);
+    if (!document.hidden && !isDragging && !isRcMode && pwm !== 1500 && Date.now() - lastHeartbeatTime > 250) {
+        lastHeartbeatTime = Date.now();
+        sendThrottleCommand(pwm);
+    }
+}, 300);
 
 // 👻 幽灵同步函数：专门负责让UI跟着底层跑，但不向Python发指令
 function syncUIFromRemote(pwm) {

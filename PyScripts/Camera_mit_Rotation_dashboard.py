@@ -25,7 +25,7 @@ sensor_state = {
 }
 
 try:
-    esp32_serial = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+    esp32_serial = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.1, write_timeout=0.05)
     esp32_serial.reset_input_buffer() 
     print("已清空启动积压数据！")
     print("✅ 成功连接到 ESP32 霍尔传感器模块！")
@@ -37,6 +37,8 @@ except Exception as e:
 
 # 🚀 增加一个用于存储高频历史轨迹的队列 (记录过去10次的点)
 history_buffer = deque(maxlen=10) 
+serial_write_lock = threading.Lock()
+estop_ignore_until = 0.0
 
 def read_esp32_data():
     '''牺牲一定响应速度，换取高速下速度波动毛刺减少
@@ -328,27 +330,34 @@ def start_record():
     print(f"📢 开始录制批次: {session_id} (单目/双目模式已自动识别)")
     
     if esp32_serial:
-        esp32_serial.write(b's') 
+        with serial_write_lock:
+            esp32_serial.write(b's') 
         def stop_esp_recording():
             time.sleep(3.0) 
-            esp32_serial.write(b'p') 
+            with serial_write_lock:
+                esp32_serial.write(b'p') 
         threading.Thread(target=stop_esp_recording, daemon=True).start()
     
     return jsonify({"status": "started"})
 
 # --- 新增：接收前端油门控制指令 ---
-@app.route('/set_throttle')
+@app.route('/set_throttle', methods=['GET', 'POST'])
 def set_throttle():
+    global estop_ignore_until
     # 默认油门为 1500 (中位/停止)
     val_str = request.args.get('val', '1500') 
     try:
         val = int(val_str)
         # 安全断言保护
         if 1000 <= val <= 2000:
+            if time.monotonic() < estop_ignore_until:
+                print(f"🛡️ 急停保护窗口内丢弃普通油门指令: {val} us")
+                return jsonify({"status": "ignored", "reason": "estop_active", "throttle": 1500})
             if esp32_serial and esp32_serial.is_open:
                 # 按照 ESP32 设定的协议，发送 "T1600\n"
                 command = f"T{val}\n"
-                esp32_serial.write(command.encode('utf-8'))
+                with serial_write_lock:
+                    esp32_serial.write(command.encode('utf-8'))
                 print(f"🎮 下发油门指令: {val} us")
                 return jsonify({"status": "success", "throttle": val})
             else:
@@ -359,16 +368,19 @@ def set_throttle():
         return jsonify({"status": "error", "message": "无效的油门数值"}), 400
     
 
-@app.route('/e_stop')
+@app.route('/e_stop', methods=['GET', 'POST'])
 def e_stop():
     """最高优先级：硬件级紧急刹车"""
+    global estop_ignore_until
     if esp32_serial and esp32_serial.is_open:
-        # 🚀 1. 瞬间清空 Python 操作系统层面的所有发送和接收排队队列
-        esp32_serial.reset_output_buffer()
-        esp32_serial.reset_input_buffer()
-        
-        # 🚀 2. 发送专属的最高优先级单字符急停指令 'E' (不用 T1500)
-        esp32_serial.write(b'E\n')
+        estop_ignore_until = time.monotonic() + 1.0
+        with serial_write_lock:
+            # 🚀 1. 瞬间清空 Python 操作系统层面的所有发送和接收排队队列
+            esp32_serial.reset_output_buffer()
+            esp32_serial.reset_input_buffer()
+            
+            # 🚀 2. 发送专属的最高优先级单字符急停指令 'E' (不用 T1500)
+            esp32_serial.write(b'E\n')
         
         print("🚨 [最高警戒] 触发物理级紧急刹车，已清空所有积压指令！")
         return jsonify({"status": "success", "throttle": 1500})
