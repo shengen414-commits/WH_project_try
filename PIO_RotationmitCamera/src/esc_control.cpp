@@ -36,6 +36,27 @@ void IRAM_ATTR rcInterrupt() {
     }
 }
 
+void handleESCCommand(char cmd) {
+    // 🚀 新增：最高优先级急停指令
+    if (cmd == 'E' || cmd == 'e') {
+        // 1. 第一时间切断动力，物理电调归中
+        setESCThrottle(1500);
+        
+        // 2. 核心魔法：清空单片机硬件串口缓冲区里的所有积压旧指令！
+        // 就像把下水道彻底疏通，那些还没执行的 T1800, T1900 全部被丢弃。
+        while (Serial.available() > 0) {
+            Serial.read(); 
+        }
+        
+        Serial.println("\n[E-STOP] 🚨 收到急停指令，动力已切断，接收队列已清空！");
+    }
+    // 普通油门指令保持不变
+    else if (cmd == 'T' || cmd == 't') {
+        int throttleValue = Serial.parseInt(); 
+        setESCThrottle(throttleValue);
+    }
+}
+
 // --- 初始化函数 ---
 void initESC() {
     // 为 ESP32 分配底层定时器

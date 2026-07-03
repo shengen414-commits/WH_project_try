@@ -358,5 +358,22 @@ def set_throttle():
     except ValueError:
         return jsonify({"status": "error", "message": "无效的油门数值"}), 400
     
+
+@app.route('/e_stop')
+def e_stop():
+    """最高优先级：硬件级紧急刹车"""
+    if esp32_serial and esp32_serial.is_open:
+        # 🚀 1. 瞬间清空 Python 操作系统层面的所有发送和接收排队队列
+        esp32_serial.reset_output_buffer()
+        esp32_serial.reset_input_buffer()
+        
+        # 🚀 2. 发送专属的最高优先级单字符急停指令 'E' (不用 T1500)
+        esp32_serial.write(b'E\n')
+        
+        print("🚨 [最高警戒] 触发物理级紧急刹车，已清空所有积压指令！")
+        return jsonify({"status": "success", "throttle": 1500})
+    else:
+        return jsonify({"status": "error", "message": "串口未连接"}), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)

@@ -127,13 +127,62 @@ const maxTop = 160;
 const minTop = 0;    
 let lastSendTime = 0;
 
-// 网络节流阀 (防止拖动太快卡死 Flask 和串口)
+// ==========================================
+// 发送引擎：防堵塞 + 丢帧保最新
+// ==========================================
+let isSending = false;      // 网络锁：当前是否正在发数据？
+let pendingThrottle = null; // 暂存区：记录最新的油门值
+
 function sendThrottleCommand(val) {
-    const now = Date.now();
-    if (now - lastSendTime > 50) { 
-        fetch(`/set_throttle?val=${val}`);
-        lastSendTime = now;
+    pendingThrottle = val; // 永远用最新值覆盖暂存区
+    
+    // 如果网络通道是空闲的，立刻开火！如果正在忙，就随它去，暂存区已经更新了
+    if (!isSending) {
+        flushThrottleQueue();
     }
+}
+
+function flushThrottleQueue() {
+    if (pendingThrottle === null) return;
+    
+    // 把暂存区的值拿出来准备发送，并清空暂存区
+    let valToSend = pendingThrottle;
+    pendingThrottle = null; 
+    
+    isSending = true; // 上锁！
+    
+    // 发起 HTTP 请求
+    fetch(`/set_throttle?val=${valToSend}`)
+        .then(response => {
+            // 请求完成，解锁！
+            isSending = false; 
+            
+            // 🚀 核心：如果在我们发送的这零点几秒内，用户又拖了滑块（暂存区不为空）
+            // 那就休息 100 毫秒后，再发一次最新的！
+            if (pendingThrottle !== null) {
+                setTimeout(flushThrottleQueue, 100);
+            }
+        })
+        .catch(error => {
+            console.error("指令下发失败:", error);
+            isSending = false; // 报错也要解锁，防止死锁
+        });
+}
+
+// ==========================================
+// 🚨 紧急刹车专属逻辑
+// ==========================================
+function triggerEStop() {
+    // 1. 强行清空节流阀的暂存区，掐断还没发出的网络请求
+    pendingThrottle = null; 
+    
+    // 2. 将网页 UI 的滑块、数字、摇杆瞬间打回 1500 中位
+    updateDriveState(1500, 'system');
+    
+    // 3. 呼叫后端的专属急停接口
+    fetch('/e_stop').then(() => {
+        console.log("🚨 急停指令已送达底层！");
+    });
 }
 
 // 👑 核心状态机：同步滑块、摇杆和显示器
