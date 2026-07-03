@@ -1,4 +1,7 @@
 import cv2
+import bisect
+import csv
+import json
 import os
 import time
 import threading
@@ -11,6 +14,13 @@ from flask import Flask, Response, render_template, jsonify, request
 # 确保录像保存根目录存在
 SAVE_DIR = "Car_Records"
 os.makedirs(SAVE_DIR, exist_ok=True)
+PPR = 12.0
+KMH_PER_RPM = 0.01
+SD_COPY_SAFE_THROTTLE_DELTA = 20
+SD_COPY_STOP_SPEED_PPS_THRESHOLD = 1.0
+SD_COPY_STOP_STABLE_SEC = 1.2
+SD_COPY_WAIT_LOG_SEC = 5.0
+SD_COPY_TIMEOUT_SEC = 8.0
 
 # =================================================================
 # 传感器后台数据读取与速度计算线程
@@ -38,7 +48,251 @@ except Exception as e:
 # 🚀 增加一个用于存储高频历史轨迹的队列 (记录过去10次的点)
 history_buffer = deque(maxlen=10) 
 serial_write_lock = threading.Lock()
+serial_transfer_active = threading.Event()
+record_workflow_active = threading.Event()
 estop_ignore_until = 0.0
+
+def is_drive_neutral():
+    return abs(int(sensor_state.get("throttle", 1500)) - 1500) <= SD_COPY_SAFE_THROTTLE_DELTA
+
+def is_car_stopped():
+    return is_drive_neutral() and abs(float(sensor_state.get("speed_pps", 0.0))) <= SD_COPY_STOP_SPEED_PPS_THRESHOLD
+
+def wait_until_car_fully_stopped(session_id):
+    stable_since = None
+    last_log_time = 0.0
+
+    while True:
+        now = time.time()
+        if is_car_stopped():
+            if stable_since is None:
+                stable_since = now
+            elif now - stable_since >= SD_COPY_STOP_STABLE_SEC:
+                return
+        else:
+            stable_since = None
+
+        if now - last_log_time >= SD_COPY_WAIT_LOG_SEC:
+            print(
+                f"⏳ 批次 {session_id} 等待车辆完全停稳后复制SD数据 "
+                f"(speed_pps={sensor_state.get('speed_pps', 0.0):.2f}, throttle={sensor_state.get('throttle', 1500)})"
+            )
+            last_log_time = now
+
+        time.sleep(0.1)
+
+def build_image_index(session_dir, camera_name):
+    camera_dir = os.path.join(session_dir, camera_name)
+    image_index = []
+    if not os.path.isdir(camera_dir):
+        return image_index
+
+    for name in os.listdir(camera_dir):
+        stem, ext = os.path.splitext(name)
+        if ext.lower() != ".jpg" or not stem.isdigit():
+            continue
+        timestamp_ns = int(stem)
+        image_index.append((timestamp_ns, os.path.join(camera_name, name)))
+
+    image_index.sort(key=lambda item: item[0])
+    return image_index
+
+def find_nearest_image(timestamp_ns, image_index):
+    if not image_index:
+        return "", ""
+
+    timestamps = [item[0] for item in image_index]
+    insert_at = bisect.bisect_left(timestamps, timestamp_ns)
+    candidates = []
+    if insert_at < len(image_index):
+        candidates.append(image_index[insert_at])
+    if insert_at > 0:
+        candidates.append(image_index[insert_at - 1])
+
+    image_ts, image_path = min(candidates, key=lambda item: abs(item[0] - timestamp_ns))
+    delta_ms = (image_ts - timestamp_ns) / 1_000_000.0
+    return image_path, f"{delta_ms:.3f}"
+
+def read_raw_sensor_rows(raw_csv_path):
+    rows = []
+    with open(raw_csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                rows.append({
+                    "esp32_time_ms": int(row["Time_ms"]),
+                    "position": int(row["Position"]),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+    return rows
+
+def write_enhanced_sensor_csv(session_id, raw_csv_path, source_file, record_start_ns, record_stop_ns):
+    session_dir = os.path.join(SAVE_DIR, session_id)
+    enhanced_csv = os.path.join(session_dir, "sensor_data_enhanced.csv")
+    sync_meta_path = os.path.join(session_dir, "sync_meta.json")
+    rows = read_raw_sensor_rows(raw_csv_path)
+
+    if not rows:
+        print(f"⚠️ 批次 {session_id} 的原始传感器CSV为空，无法生成增强版。")
+        return False
+
+    esp_first_ms = rows[0]["esp32_time_ms"]
+    esp_last_ms = rows[-1]["esp32_time_ms"]
+    duration_ms = max(esp_last_ms - esp_first_ms, 1)
+    record_duration_ns = max(record_stop_ns - record_start_ns, 1)
+    ns_per_esp_ms = record_duration_ns / duration_ms
+
+    left_images = build_image_index(session_dir, "Left")
+    right_images = build_image_index(session_dir, "Right")
+
+    fieldnames = [
+        "esp32_time_ms",
+        "esp32_elapsed_ms",
+        "python_time_ns_est",
+        "python_elapsed_ms_est",
+        "position",
+        "rpm",
+        "kmh",
+        "left_image",
+        "left_image_delta_ms",
+        "right_image",
+        "right_image_delta_ms",
+    ]
+
+    previous_row = None
+    with open(enhanced_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in rows:
+            esp_elapsed_ms = row["esp32_time_ms"] - esp_first_ms
+            python_time_ns_est = int(record_start_ns + esp_elapsed_ms * ns_per_esp_ms)
+
+            rpm = 0.0
+            if previous_row is not None:
+                dt_ms = row["esp32_time_ms"] - previous_row["esp32_time_ms"]
+                if dt_ms > 0:
+                    delta_pos = row["position"] - previous_row["position"]
+                    pulses_per_sec = delta_pos / (dt_ms / 1000.0)
+                    rpm = (pulses_per_sec / PPR) * 60.0
+
+            kmh = abs(rpm) * KMH_PER_RPM
+            left_image, left_delta_ms = find_nearest_image(python_time_ns_est, left_images)
+            right_image, right_delta_ms = find_nearest_image(python_time_ns_est, right_images)
+
+            writer.writerow({
+                "esp32_time_ms": row["esp32_time_ms"],
+                "esp32_elapsed_ms": esp_elapsed_ms,
+                "python_time_ns_est": python_time_ns_est,
+                "python_elapsed_ms_est": f"{(python_time_ns_est - record_start_ns) / 1_000_000.0:.3f}",
+                "position": row["position"],
+                "rpm": f"{rpm:.3f}",
+                "kmh": f"{kmh:.3f}",
+                "left_image": left_image,
+                "left_image_delta_ms": left_delta_ms,
+                "right_image": right_image,
+                "right_image_delta_ms": right_delta_ms,
+            })
+            previous_row = row
+
+    sync_meta = {
+        "session_id": session_id,
+        "raw_sensor_csv": "sensor_data.csv",
+        "enhanced_sensor_csv": "sensor_data_enhanced.csv",
+        "source_sd_file": source_file,
+        "python_record_start_ns": record_start_ns,
+        "python_record_stop_ns": record_stop_ns,
+        "esp32_first_time_ms": esp_first_ms,
+        "esp32_last_time_ms": esp_last_ms,
+        "esp32_duration_ms": duration_ms,
+        "mapping": "linear: first ESP32 row -> python_record_start_ns, last ESP32 row -> python_record_stop_ns",
+        "ppr": PPR,
+        "kmh_per_rpm": KMH_PER_RPM,
+        "left_image_count": len(left_images),
+        "right_image_count": len(right_images),
+    }
+    with open(sync_meta_path, "w", encoding="utf-8") as f:
+        json.dump(sync_meta, f, ensure_ascii=False, indent=2)
+
+    print(f"✅ 增强版传感器数据已生成: {enhanced_csv}")
+    return True
+
+def copy_latest_sd_log_to_session(session_id, record_start_ns, record_stop_ns):
+    """Stop-time helper: pull the latest ESP32 SD CSV into this recording folder."""
+    if esp32_serial is None or not esp32_serial.is_open:
+        print("⚠️ SD数据复制跳过：ESP32串口未连接")
+        return False
+
+    session_dir = os.path.join(SAVE_DIR, session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    target_csv = os.path.join(session_dir, "sensor_data.csv")
+    source_note = os.path.join(session_dir, "sensor_data_source.txt")
+
+    wait_until_car_fully_stopped(session_id)
+
+    serial_transfer_active.set()
+    time.sleep(0.15)
+
+    source_file = "unknown"
+    data_chunks = []
+    data_started = False
+    data_finished = False
+
+    try:
+        with serial_write_lock:
+            esp32_serial.reset_input_buffer()
+            esp32_serial.write(b'r')
+            esp32_serial.flush()
+
+            deadline = time.time() + SD_COPY_TIMEOUT_SEC
+            while time.time() < deadline:
+                raw_line = esp32_serial.readline()
+                if not raw_line:
+                    continue
+
+                decoded_line = raw_line.decode('utf-8', errors='ignore').strip()
+                source_match = re.search(r"/?data\d+\.csv", decoded_line)
+                if source_match:
+                    source_file = source_match.group(0)
+
+                if decoded_line == "---DATA_START---":
+                    data_started = True
+                    data_chunks = []
+                    continue
+
+                if decoded_line == "---DATA_END---":
+                    data_finished = True
+                    break
+
+                if data_started:
+                    data_chunks.append(raw_line)
+
+        if not data_started or not data_finished:
+            print("⚠️ SD数据复制失败：没有收到完整 DATA_START/DATA_END 数据段")
+            with open(source_note, "w", encoding="utf-8") as f:
+                f.write("SD copy failed: incomplete serial transfer.\n")
+            return False
+
+        with open(target_csv, "wb") as f:
+            f.writelines(data_chunks)
+        with open(source_note, "w", encoding="utf-8") as f:
+            f.write(f"Copied from ESP32 SD file: {source_file}\n")
+            f.write(f"Copied at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+        write_enhanced_sensor_csv(session_id, target_csv, source_file, record_start_ns, record_stop_ns)
+        print(f"✅ SD传感器数据已复制到: {target_csv} (来源: {source_file})")
+        return True
+    except Exception as e:
+        print(f"⚠️ SD数据复制异常: {e}")
+        try:
+            with open(source_note, "w", encoding="utf-8") as f:
+                f.write(f"SD copy failed: {e}\n")
+        except Exception:
+            pass
+        return False
+    finally:
+        serial_transfer_active.clear()
 
 def read_esp32_data():
     '''牺牲一定响应速度，换取高速下速度波动毛刺减少
@@ -55,6 +309,10 @@ def read_esp32_data():
     
     while True:
         try:
+            if serial_transfer_active.is_set():
+                time.sleep(0.02)
+                continue
+
             # 防积压机制
             if esp32_serial.in_waiting > 1000:
                 esp32_serial.reset_input_buffer()
@@ -319,6 +577,9 @@ def toggle_cam():
 
 @app.route('/start_record')
 def start_record():
+    if esp32_serial and record_workflow_active.is_set():
+        return jsonify({"status": "busy", "message": "上一批传感器数据还在等待停稳或复制SD数据"}), 409
+
     session_id = time.strftime("%Y%m%d_%H%M%S")
     # 左相机必定录制
     cam_left.start_record(session_id=session_id, duration_sec=3)
@@ -330,12 +591,20 @@ def start_record():
     print(f"📢 开始录制批次: {session_id} (单目/双目模式已自动识别)")
     
     if esp32_serial:
+        record_workflow_active.set()
         with serial_write_lock:
+            sensor_record_start_ns = time.time_ns()
             esp32_serial.write(b's') 
         def stop_esp_recording():
-            time.sleep(3.0) 
-            with serial_write_lock:
-                esp32_serial.write(b'p') 
+            try:
+                time.sleep(3.0) 
+                with serial_write_lock:
+                    sensor_record_stop_ns = time.time_ns()
+                    esp32_serial.write(b'p') 
+                time.sleep(0.2)
+                copy_latest_sd_log_to_session(session_id, sensor_record_start_ns, sensor_record_stop_ns)
+            finally:
+                record_workflow_active.clear()
         threading.Thread(target=stop_esp_recording, daemon=True).start()
     
     return jsonify({"status": "started"})
@@ -350,6 +619,9 @@ def set_throttle():
         val = int(val_str)
         # 安全断言保护
         if 1000 <= val <= 2000:
+            if serial_transfer_active.is_set():
+                print(f"🛡️ SD数据复制期间丢弃普通油门指令: {val} us")
+                return jsonify({"status": "ignored", "reason": "sd_copy_active", "throttle": sensor_state["throttle"]}), 409
             if time.monotonic() < estop_ignore_until:
                 print(f"🛡️ 急停保护窗口内丢弃普通油门指令: {val} us")
                 return jsonify({"status": "ignored", "reason": "estop_active", "throttle": 1500})
@@ -372,6 +644,8 @@ def set_throttle():
 def e_stop():
     """最高优先级：硬件级紧急刹车"""
     global estop_ignore_until
+    if serial_transfer_active.is_set():
+        return jsonify({"status": "busy", "message": "SD数据正在复制，串口暂时被占用", "throttle": 1500}), 409
     if esp32_serial and esp32_serial.is_open:
         estop_ignore_until = time.monotonic() + 1.0
         with serial_write_lock:

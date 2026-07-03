@@ -27,10 +27,39 @@
                 <div class="metric-label">瞬时转速 (RPM)</div>
                 <div class="metric-value val-spd" id="sensor-speed">0.0</div>
             </div>
+            <div class="metric-box">
+                <div class="metric-label">瞬时时速 (km/h)</div>
+                <div class="metric-value val-kmh" id="sensor-kmh">0.00</div>
+                <div class="metric-subvalue">MAX <span id="sensor-max-kmh">0.00</span> km/h</div>
+            </div>
         </div>
-        <div class="charts-container">
-            <div class="chart-box"><canvas id="posChart"></canvas></div>
-            <div class="chart-box"><canvas id="speedChart"></canvas></div>
+        <div class="chart-toggle-panel">
+            <label class="chart-toggle">
+                <span class="toggle-name val-pos">Revolutions</span>
+                <span class="switch">
+                    <input type="checkbox" class="chart-toggle-input" data-chart-target="pos" checked>
+                    <span class="slider"></span>
+                </span>
+            </label>
+            <label class="chart-toggle">
+                <span class="toggle-name val-spd">RPM</span>
+                <span class="switch">
+                    <input type="checkbox" class="chart-toggle-input" data-chart-target="rpm" checked>
+                    <span class="slider"></span>
+                </span>
+            </label>
+            <label class="chart-toggle">
+                <span class="toggle-name val-kmh">km/h</span>
+                <span class="switch">
+                    <input type="checkbox" class="chart-toggle-input" data-chart-target="kmh" checked>
+                    <span class="slider"></span>
+                </span>
+            </label>
+        </div>
+        <div class="charts-container" id="charts-container">
+            <div class="chart-box" data-chart-box="pos"><canvas id="posChart"></canvas></div>
+            <div class="chart-box" data-chart-box="rpm"><canvas id="speedChart"></canvas></div>
+            <div class="chart-box" data-chart-box="kmh"><canvas id="kmhChart"></canvas></div>
         </div>
     </div>
 

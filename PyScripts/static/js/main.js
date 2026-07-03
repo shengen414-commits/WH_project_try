@@ -1,5 +1,7 @@
 const PPR = 12.0; // 编码器分辨率
+const KMH_PER_RPM = 0.29; // 时速换算系数：km/h = abs(RPM) * KMH_PER_RPM
 let isRcMode = false;
+let maxKmh = 0.0;
 
 // --- 摄像头切换逻辑 ---
 function toggleRightCam() {
@@ -39,6 +41,72 @@ const speedChart = new Chart(document.getElementById('speedChart').getContext('2
     options: { ...commonOptions, plugins: { title: { display: true, text: 'Speed (RPM)', color: '#ff8800' } } }
 });
 
+const kmhChart = new Chart(document.getElementById('kmhChart').getContext('2d'), {
+    type: 'line',
+    data: { labels: [], datasets: [{ label:'km/h', data: [], borderColor: '#00ff88', borderWidth: 2, pointRadius: 0, tension: 0.1 }] },
+    options: { ...commonOptions, plugins: { title: { display: true, text: 'Vehicle Speed (km/h)', color: '#00ff88' } } }
+});
+
+const chartVisibilityStorageKey = 'whDashboardChartVisibility';
+const chartByTarget = {
+    pos: posChart,
+    rpm: speedChart,
+    kmh: kmhChart,
+};
+
+function loadChartVisibility() {
+    try {
+        const savedVisibility = JSON.parse(localStorage.getItem(chartVisibilityStorageKey) || '{}');
+        document.querySelectorAll('.chart-toggle-input').forEach(input => {
+            const target = input.dataset.chartTarget;
+            if (typeof savedVisibility[target] === 'boolean') {
+                input.checked = savedVisibility[target];
+            }
+        });
+    } catch (error) {
+        console.warn('图表显示设置读取失败:', error);
+    }
+}
+
+function syncChartVisibility() {
+    const chartContainer = document.getElementById('charts-container');
+    let visibleCount = 0;
+    const visibleTargets = [];
+    const visibilityState = {};
+
+    document.querySelectorAll('.chart-toggle-input').forEach(input => {
+        const target = input.dataset.chartTarget;
+        const chartBox = document.querySelector(`[data-chart-box="${target}"]`);
+        if (!chartBox) return;
+
+        visibilityState[target] = input.checked;
+        chartBox.classList.toggle('chart-hidden', !input.checked);
+        if (input.checked) {
+            visibleCount += 1;
+            visibleTargets.push(target);
+        }
+    });
+
+    try {
+        localStorage.setItem(chartVisibilityStorageKey, JSON.stringify(visibilityState));
+    } catch (error) {
+        console.warn('图表显示设置保存失败:', error);
+    }
+    chartContainer.classList.toggle('charts-collapsed', visibleCount === 0);
+    requestAnimationFrame(() => {
+        visibleTargets.forEach(target => {
+            chartByTarget[target].resize();
+            chartByTarget[target].update('none');
+        });
+    });
+}
+
+document.querySelectorAll('.chart-toggle-input').forEach(input => {
+    input.addEventListener('change', syncChartVisibility);
+});
+loadChartVisibility();
+syncChartVisibility();
+
 // --- 后台数据轮询 ---
 setInterval(() => {
     fetch('/fps_stats').then(r => r.json()).then(data => {
@@ -52,21 +120,30 @@ setInterval(() => {
 setInterval(() => {
     fetch('/sensor_stats').then(r => r.json()).then(data => {
         const revolutions = (parseFloat(data.position) / PPR).toFixed(2);
-        const rpm = ((parseFloat(data.speed) / PPR) * 60).toFixed(1);
+        const rpmValue = (parseFloat(data.speed) / PPR) * 60;
+        const rpm = rpmValue.toFixed(1);
+        const kmhValue = Math.abs(rpmValue) * KMH_PER_RPM;
+        const kmh = kmhValue.toFixed(2);
+        maxKmh = Math.max(maxKmh, kmhValue);
 
         document.getElementById('sensor-pos').innerText = revolutions;
         document.getElementById('sensor-speed').innerText = rpm;
+        document.getElementById('sensor-kmh').innerText = kmh;
+        document.getElementById('sensor-max-kmh').innerText = maxKmh.toFixed(2);
 
         posChart.data.labels.push(timeTicks);
         posChart.data.datasets[0].data.push(revolutions);
         speedChart.data.labels.push(timeTicks);
         speedChart.data.datasets[0].data.push(rpm);
+        kmhChart.data.labels.push(timeTicks);
+        kmhChart.data.datasets[0].data.push(kmh);
 
         if (posChart.data.labels.length > maxDataPoints) {
             posChart.data.labels.shift(); posChart.data.datasets[0].data.shift();
             speedChart.data.labels.shift(); speedChart.data.datasets[0].data.shift();
+            kmhChart.data.labels.shift(); kmhChart.data.datasets[0].data.shift();
         }
-        posChart.update(); speedChart.update();
+        posChart.update(); speedChart.update(); kmhChart.update();
         timeTicks++;
 
         // 双向同步逻辑
@@ -102,7 +179,7 @@ function startRecord() {
                 timeLeft -= 1;
                 if(timeLeft <= 0) {
                     clearInterval(timer);
-                    btn.innerText = "💾 正在写入硬盘和SD卡...";
+                    btn.innerText = "💾 等待停稳并复制SD数据...";
                     setTimeout(() => {
                         btn.disabled = false;
                         btn.innerText = "🔴 记录多源融合数据 (3秒)";
@@ -111,7 +188,14 @@ function startRecord() {
                     btn.innerText = `⏳ 正在抓取 (剩余 ${timeLeft} 秒)...`;
                 }
             }, 1000);
+        } else {
+            btn.disabled = false;
+            btn.innerText = "🔴 记录多源融合数据 (3秒)";
         }
+    }).catch(error => {
+        console.error("记录启动失败:", error);
+        btn.disabled = false;
+        btn.innerText = "🔴 记录多源融合数据 (3秒)";
     });
 }
 
