@@ -9,9 +9,14 @@
     <div class="top-bar">
         <h1>🚗 CAR</h1>
         <div class="toggle-container">
-            <span>双目模式 (Right Cam)</span>
+            <span>Left Cam</span>
             <label class="switch">
-                <input type="checkbox" id="cam-toggle" onchange="toggleRightCam()">
+                <input type="checkbox" id="cam-toggle-left" onchange="toggleCamera('left')" checked>
+                <span class="slider"></span>
+            </label>
+            <span>Right Cam</span>
+            <label class="switch">
+                <input type="checkbox" id="cam-toggle-right" onchange="toggleCamera('right')">
                 <span class="slider"></span>
             </label>
         </div>
@@ -66,7 +71,7 @@
     <div class="container" id="video-container">
         <div class="camera-box single-mode" id="box-left">
             <h3>LEFT CAMERA</h3>
-            <img src="/video_feed/left">
+            <img src="/video_feed/left" id="img-left">
             <div class="stats" id="fps-left">FPS: 0.0</div>
         </div>
         <div class="camera-box" id="box-right" style="display: none;">
@@ -78,6 +83,8 @@
     
     <div class="btn-group">
         <button id="rec-btn" onclick="startRecord()">🔴 记录多源融合数据 (3秒)</button>
+        <button id="speed-rec-btn" class="btn-speed-record" onclick="toggleSpeedRecord()">📈 开始速度记录</button>
+        <div class="speed-record-status" id="speed-record-status">速度记录: 空闲 | 上限 10 min</div>
     </div>
 
     <div class="control-panel">

@@ -1,24 +1,66 @@
 const PPR = 12.0; // 编码器分辨率
-const KMH_PER_RPM = 0.29; // 时速换算系数：km/h = abs(RPM) * KMH_PER_RPM
+const KMH_PER_RPM = 0.007173; // 时速换算系数：km/h = abs(RPM) * KMH_PER_RPM
 let isRcMode = false;
 let maxKmh = 0.0;
 
 // --- 摄像头切换逻辑 ---
-function toggleRightCam() {
-    const isChecked = document.getElementById('cam-toggle').checked;
-    const rightBox = document.getElementById('box-right');
+function syncCameraLayout() {
+    const leftOn = document.getElementById('cam-toggle-left').checked;
+    const rightOn = document.getElementById('cam-toggle-right').checked;
+    const videoContainer = document.getElementById('video-container');
     const leftBox = document.getElementById('box-left');
-    fetch(`/toggle_cam?state=${isChecked ? 'on' : 'off'}`);
-    if (isChecked) {
-        rightBox.style.display = 'block';
-        leftBox.classList.remove('single-mode');
-        document.getElementById('img-right').src = "/video_feed/right?" + new Date().getTime();
-    } else {
-        rightBox.style.display = 'none';
-        leftBox.classList.add('single-mode');
+    const rightBox = document.getElementById('box-right');
+    const leftImg = document.getElementById('img-left');
+    const rightImg = document.getElementById('img-right');
+    const visibleCount = (leftOn ? 1 : 0) + (rightOn ? 1 : 0);
+
+    videoContainer.style.display = visibleCount > 0 ? 'flex' : 'none';
+    leftBox.style.display = leftOn ? 'block' : 'none';
+    rightBox.style.display = rightOn ? 'block' : 'none';
+
+    if (leftOn && !leftImg.getAttribute('src')) {
+        leftImg.src = `/video_feed/left?${Date.now()}`;
+    } else if (!leftOn) {
+        leftImg.removeAttribute('src');
+        document.getElementById('fps-left').innerText = "STANDBY";
+    }
+
+    if (rightOn && !rightImg.getAttribute('src')) {
+        rightImg.src = `/video_feed/right?${Date.now()}`;
+    } else if (!rightOn) {
+        rightImg.removeAttribute('src');
         document.getElementById('fps-right').innerText = "STANDBY";
     }
+
+    leftBox.classList.toggle('single-mode', visibleCount === 1 && leftOn);
+    rightBox.classList.toggle('single-mode', visibleCount === 1 && rightOn);
 }
+
+function toggleCamera(camera) {
+    const isLeft = camera === 'left';
+    const checkbox = document.getElementById(isLeft ? 'cam-toggle-left' : 'cam-toggle-right');
+    const isChecked = checkbox.checked;
+    const img = document.getElementById(isLeft ? 'img-left' : 'img-right');
+    const fps = document.getElementById(isLeft ? 'fps-left' : 'fps-right');
+    const feedPath = isLeft ? '/video_feed/left' : '/video_feed/right';
+
+    fetch(`/toggle_cam?camera=${camera}&state=${isChecked ? 'on' : 'off'}`);
+
+    if (isChecked) {
+        img.src = `${feedPath}?${Date.now()}`;
+    } else {
+        img.removeAttribute('src');
+        fps.innerText = "STANDBY";
+    }
+
+    syncCameraLayout();
+}
+
+function toggleRightCam() {
+    toggleCamera('right');
+}
+
+syncCameraLayout();
 
 // --- 图表初始化逻辑 ---
 const maxDataPoints = 50;
@@ -110,8 +152,10 @@ syncChartVisibility();
 // --- 后台数据轮询 ---
 setInterval(() => {
     fetch('/fps_stats').then(r => r.json()).then(data => {
-        document.getElementById('fps-left').innerText = "实时: " + data.left + " FPS";
-        if (document.getElementById('cam-toggle').checked) {
+        if (document.getElementById('cam-toggle-left').checked) {
+            document.getElementById('fps-left').innerText = "实时: " + data.left + " FPS";
+        }
+        if (document.getElementById('cam-toggle-right').checked) {
             document.getElementById('fps-right').innerText = "实时: " + data.right + " FPS";
         }
     });
@@ -198,6 +242,64 @@ function startRecord() {
         btn.innerText = "🔴 记录多源融合数据 (3秒)";
     });
 }
+
+let speedRecordActive = false;
+
+function formatDuration(seconds) {
+    const totalSeconds = Math.max(0, Math.floor(seconds || 0));
+    const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+    const secs = (totalSeconds % 60).toString().padStart(2, '0');
+    return `${minutes}:${secs}`;
+}
+
+function updateSpeedRecordUI(data) {
+    const btn = document.getElementById('speed-rec-btn');
+    const status = document.getElementById('speed-record-status');
+    if (!btn || !status) return;
+
+    speedRecordActive = !!data.active;
+    btn.classList.toggle('recording', speedRecordActive);
+    btn.innerText = speedRecordActive ? "⏹ 停止速度记录" : "📈 开始速度记录";
+
+    const elapsed = formatDuration(data.elapsed_sec || 0);
+    const maxDuration = formatDuration(data.max_duration_sec || 600);
+    const samples = data.sample_count || 0;
+
+    if (speedRecordActive) {
+        status.innerText = `速度记录: 记录中 ${elapsed} / ${maxDuration} | ${samples} samples`;
+    } else if (data.file_path) {
+        status.innerText = `速度记录: 已停止 ${elapsed} | ${samples} samples | ${data.stop_reason || 'stopped'}`;
+    } else {
+        status.innerText = `速度记录: 空闲 | 上限 ${maxDuration}`;
+    }
+}
+
+function refreshSpeedRecordStatus() {
+    fetch('/speed_record/status', { cache: 'no-store' })
+        .then(r => r.json())
+        .then(updateSpeedRecordUI)
+        .catch(error => console.error("速度记录状态读取失败:", error));
+}
+
+function toggleSpeedRecord() {
+    const btn = document.getElementById('speed-rec-btn');
+    const endpoint = speedRecordActive ? '/speed_record/stop' : '/speed_record/start';
+    btn.disabled = true;
+
+    fetch(endpoint, { method: 'POST', cache: 'no-store' })
+        .then(r => r.json())
+        .then(updateSpeedRecordUI)
+        .catch(error => {
+            console.error("速度记录切换失败:", error);
+            refreshSpeedRecordStatus();
+        })
+        .finally(() => {
+            btn.disabled = false;
+        });
+}
+
+setInterval(refreshSpeedRecordStatus, 1000);
+refreshSpeedRecordStatus();
 
 // ==========================================
 // 线控摇杆与定速巡航双模逻辑

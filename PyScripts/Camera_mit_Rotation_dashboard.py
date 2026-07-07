@@ -9,13 +9,18 @@ import serial
 import re
 import numpy as np
 from collections import deque
+from datetime import datetime
 from flask import Flask, Response, render_template, jsonify, request
 
 # 确保录像保存根目录存在
 SAVE_DIR = "Car_Records"
 os.makedirs(SAVE_DIR, exist_ok=True)
 PPR = 12.0
-KMH_PER_RPM = 0.01
+KMH_PER_RPM = 0.007173
+SPEED_RECORD_DIR = os.path.join(SAVE_DIR, "Speed_Records")
+os.makedirs(SPEED_RECORD_DIR, exist_ok=True)
+SPEED_RECORD_SAMPLE_INTERVAL_SEC = 0.02
+SPEED_RECORD_MAX_DURATION_SEC = 10 * 60
 SD_COPY_SAFE_THROTTLE_DELTA = 20
 SD_COPY_STOP_SPEED_PPS_THRESHOLD = 1.0
 SD_COPY_STOP_STABLE_SEC = 1.2
@@ -50,6 +55,20 @@ history_buffer = deque(maxlen=10)
 serial_write_lock = threading.Lock()
 serial_transfer_active = threading.Event()
 record_workflow_active = threading.Event()
+speed_record_lock = threading.Lock()
+speed_record_state = {
+    "active": False,
+    "session_id": None,
+    "file_path": None,
+    "started_at_ns": None,
+    "started_at_iso": None,
+    "stopped_at_ns": None,
+    "stopped_at_iso": None,
+    "sample_count": 0,
+    "stop_reason": None,
+    "stop_event": None,
+    "thread": None,
+}
 estop_ignore_until = 0.0
 
 def is_drive_neutral():
@@ -57,6 +76,172 @@ def is_drive_neutral():
 
 def is_car_stopped():
     return is_drive_neutral() and abs(float(sensor_state.get("speed_pps", 0.0))) <= SD_COPY_STOP_SPEED_PPS_THRESHOLD
+
+def get_current_speed_metrics():
+    speed_pps = float(sensor_state.get("speed_pps", 0.0))
+    rpm = (speed_pps / PPR) * 60.0
+    kmh = abs(rpm) * KMH_PER_RPM
+    return {
+        "position": int(sensor_state.get("position", 0)),
+        "speed_pps": speed_pps,
+        "rpm": rpm,
+        "kmh": kmh,
+        "mode": sensor_state.get("mode", "WEB"),
+        "throttle": int(sensor_state.get("throttle", 1500)),
+    }
+
+def speed_record_worker(session_id, file_path, started_at_ns, started_at_iso, stop_event):
+    fieldnames = [
+        "iso_time",
+        "unix_time_ns",
+        "elapsed_ms",
+        "rpm",
+        "kmh",
+        "position",
+        "speed_pps",
+        "throttle",
+        "mode",
+    ]
+    stop_reason = "manual_stop"
+    sample_count = 0
+
+    try:
+        with open(file_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+            while not stop_event.is_set():
+                now_ns = time.time_ns()
+                elapsed_sec = (now_ns - started_at_ns) / 1_000_000_000.0
+                if elapsed_sec >= SPEED_RECORD_MAX_DURATION_SEC:
+                    stop_reason = "max_duration"
+                    break
+
+                metrics = get_current_speed_metrics()
+                writer.writerow({
+                    "iso_time": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                    "unix_time_ns": now_ns,
+                    "elapsed_ms": f"{elapsed_sec * 1000.0:.3f}",
+                    "rpm": f"{metrics['rpm']:.3f}",
+                    "kmh": f"{metrics['kmh']:.3f}",
+                    "position": metrics["position"],
+                    "speed_pps": f"{metrics['speed_pps']:.3f}",
+                    "throttle": metrics["throttle"],
+                    "mode": metrics["mode"],
+                })
+                f.flush()
+                sample_count += 1
+
+                with speed_record_lock:
+                    if speed_record_state.get("session_id") == session_id:
+                        speed_record_state["sample_count"] = sample_count
+
+                stop_event.wait(SPEED_RECORD_SAMPLE_INTERVAL_SEC)
+    except Exception as e:
+        stop_reason = f"error: {e}"
+        print(f"⚠️ 速度记录异常: {e}")
+    finally:
+        stopped_at_ns = time.time_ns()
+        stopped_at_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        with speed_record_lock:
+            if speed_record_state.get("session_id") == session_id:
+                speed_record_state.update({
+                    "active": False,
+                    "stopped_at_ns": stopped_at_ns,
+                    "stopped_at_iso": stopped_at_iso,
+                    "sample_count": sample_count,
+                    "stop_reason": stop_reason,
+                    "stop_event": None,
+                    "thread": None,
+                })
+        print(f"✅ 速度记录结束: {file_path} ({sample_count} samples, reason={stop_reason})")
+
+def speed_record_public_state():
+    with speed_record_lock:
+        started_at_ns = speed_record_state.get("started_at_ns")
+        elapsed_sec = 0.0
+        if speed_record_state.get("active") and started_at_ns:
+            elapsed_sec = (time.time_ns() - started_at_ns) / 1_000_000_000.0
+        elif started_at_ns and speed_record_state.get("stopped_at_ns"):
+            elapsed_sec = (speed_record_state["stopped_at_ns"] - started_at_ns) / 1_000_000_000.0
+
+        return {
+            "active": speed_record_state["active"],
+            "session_id": speed_record_state["session_id"],
+            "file_path": speed_record_state["file_path"],
+            "started_at_iso": speed_record_state["started_at_iso"],
+            "stopped_at_iso": speed_record_state["stopped_at_iso"],
+            "elapsed_sec": round(elapsed_sec, 3),
+            "max_duration_sec": SPEED_RECORD_MAX_DURATION_SEC,
+            "sample_count": speed_record_state["sample_count"],
+            "stop_reason": speed_record_state["stop_reason"],
+        }
+
+def start_speed_recording():
+    with speed_record_lock:
+        if speed_record_state["active"]:
+            already_active = True
+        else:
+            already_active = False
+
+        if already_active:
+            worker = None
+        else:
+            session_id = time.strftime("%Y%m%d_%H%M%S")
+            file_name = f"speed_record_{session_id}.csv"
+            file_path = os.path.join(SPEED_RECORD_DIR, file_name)
+            started_at_ns = time.time_ns()
+            started_at_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
+            stop_event = threading.Event()
+
+            worker = threading.Thread(
+                target=speed_record_worker,
+                args=(session_id, file_path, started_at_ns, started_at_iso, stop_event),
+                daemon=True,
+            )
+            speed_record_state.update({
+                "active": True,
+                "session_id": session_id,
+                "file_path": file_path,
+                "started_at_ns": started_at_ns,
+                "started_at_iso": started_at_iso,
+                "stopped_at_ns": None,
+                "stopped_at_iso": None,
+                "sample_count": 0,
+                "stop_reason": None,
+                "stop_event": stop_event,
+                "thread": worker,
+            })
+
+    if already_active:
+        return False, speed_record_public_state()
+
+    if worker:
+        worker.start()
+
+    print(f"🔴 速度记录开始: {file_path}")
+    return True, speed_record_public_state()
+
+def stop_speed_recording():
+    with speed_record_lock:
+        if not speed_record_state["active"]:
+            was_active = False
+            stop_event = None
+            worker = None
+        else:
+            was_active = True
+            stop_event = speed_record_state["stop_event"]
+            worker = speed_record_state["thread"]
+
+    if not was_active:
+        return False, speed_record_public_state()
+
+    if stop_event:
+        stop_event.set()
+    if worker:
+        worker.join(timeout=2.0)
+
+    return True, speed_record_public_state()
 
 def wait_until_car_fully_stopped(session_id):
     stable_since = None
@@ -567,13 +752,35 @@ def sensor_stats():
         "throttle": sensor_state["throttle"]  # 🚀 新增
     })
 
+@app.route('/speed_record/start', methods=['POST'])
+def speed_record_start():
+    started, state = start_speed_recording()
+    status = "started" if started else "already_running"
+    return jsonify({"status": status, **state}), (200 if started else 409)
+
+@app.route('/speed_record/stop', methods=['POST'])
+def speed_record_stop():
+    stopped, state = stop_speed_recording()
+    status = "stopped" if stopped else "idle"
+    return jsonify({"status": status, **state})
+
+@app.route('/speed_record/status')
+def speed_record_status():
+    return jsonify({"status": "ok", **speed_record_public_state()})
+
 # --- 新增：接收前端开关右摄像头的指令 ---
 @app.route('/toggle_cam')
 def toggle_cam():
     state_str = request.args.get('state', 'off')
+    camera_name = request.args.get('camera', 'right')
     is_on = (state_str == 'on')
-    cam_right.set_active(is_on)
-    return jsonify({"status": "success", "right_active": is_on})
+    if camera_name == 'left':
+        cam_left.set_active(is_on)
+        return jsonify({"status": "success", "camera": "left", "left_active": is_on})
+    if camera_name == 'right':
+        cam_right.set_active(is_on)
+        return jsonify({"status": "success", "camera": "right", "right_active": is_on})
+    return jsonify({"status": "error", "message": "unknown camera"}), 400
 
 @app.route('/start_record')
 def start_record():
