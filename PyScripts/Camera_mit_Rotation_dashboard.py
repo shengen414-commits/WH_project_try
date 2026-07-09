@@ -26,6 +26,9 @@ SD_COPY_STOP_SPEED_PPS_THRESHOLD = 1.0
 SD_COPY_STOP_STABLE_SEC = 1.2
 SD_COPY_WAIT_LOG_SEC = 5.0
 SD_COPY_TIMEOUT_SEC = 8.0
+SERIAL_INPUT_FLUSH_THRESHOLD = 8192
+SERIAL_DEBUG_PRINT = True
+SERIAL_DEBUG_MIN_INTERVAL_SEC = 0.5
 
 # =================================================================
 # 传感器后台数据读取与速度计算线程
@@ -36,7 +39,12 @@ sensor_state = {
     "last_time_ms": 0,
     "last_pos": 0,
     "mode": "WEB",      # 新增：当前控制权
-    "throttle": 1500    # 新增：当前真实油门
+    "throttle": 1500,   # 新增：当前真实油门
+    "last_serial_line": "",
+    "last_serial_rx_wall": 0.0,
+    "serial_line_count": 0,
+    "serial_flush_count": 0,
+    "last_drive_line": "",
 }
 
 try:
@@ -512,8 +520,9 @@ def read_esp32_data():
     if esp32_serial is None:
         return
 
-    pattern = re.compile(r"时间:\s*(\d+)\s*ms\s*\|\s*位置:\s*(-?\d+)")
-    drive_pattern = re.compile(r"\[DRIVE\] 模式:\s*(RC|WEB)\s*\|\s*油门:\s*(\d+)")
+    pattern = re.compile(r"(\d+)\s*ms\s*\|\D*(-?\d+)")
+    drive_pattern = re.compile(r"\[DRIVE\].*?\b(RC|WEB)\b.*?(\d{3,4})")
+    last_debug_print = 0.0
 
     while True:
         try:
@@ -522,12 +531,21 @@ def read_esp32_data():
                 continue
 
             # 防积压机制
-            if esp32_serial.in_waiting > 1000:
+            if esp32_serial.in_waiting > SERIAL_INPUT_FLUSH_THRESHOLD:
+                sensor_state["serial_flush_count"] += 1
+                print(f"⚠️ Serial RX backlog cleared: {esp32_serial.in_waiting} bytes")
                 esp32_serial.reset_input_buffer()
                 continue
 
             if esp32_serial.in_waiting > 0:
                 line = esp32_serial.readline().decode('utf-8', errors='ignore').strip()
+                now_wall = time.time()
+                sensor_state["last_serial_line"] = line
+                sensor_state["last_serial_rx_wall"] = now_wall
+                sensor_state["serial_line_count"] += 1
+                if SERIAL_DEBUG_PRINT and now_wall - last_debug_print >= SERIAL_DEBUG_MIN_INTERVAL_SEC:
+                    print(f"ESP32 >> {line}")
+                    last_debug_print = now_wall
                 match = pattern.search(line)
                 if match:
                     curr_time_ms = int(match.group(1))
@@ -579,6 +597,7 @@ def read_esp32_data():
                     if match_drive:
                         sensor_state["mode"] = match_drive.group(1)
                         sensor_state["throttle"] = int(match_drive.group(2))
+                        sensor_state["last_drive_line"] = line
         except Exception as e:
             time.sleep(0.1)
 
@@ -895,6 +914,9 @@ def set_throttle():
             return jsonify({"status": "error", "message": "油门值越界"}), 400
     except ValueError:
         return jsonify({"status": "error", "message": "无效的油门数值"}), 400
+    except Exception as e:
+        print(f"⚠️ set_throttle failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route('/e_stop', methods=['GET', 'POST'])

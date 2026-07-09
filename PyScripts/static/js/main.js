@@ -322,8 +322,12 @@ let isSending = false;      // 网络锁：当前是否正在发数据？
 let pendingThrottle = null; // 暂存区：记录最新的油门值
 let activeThrottleController = null;
 let lastHeartbeatTime = 0;
+let throttleRequestStartedAt = 0;
+const THROTTLE_FETCH_TIMEOUT_MS = 900;
+const THROTTLE_SEND_RECOVER_MS = 1200;
+const THROTTLE_HEARTBEAT_MS = 250;
 
-function fetchWithTimeout(url, options = {}, timeoutMs = 700) {
+function fetchWithTimeout(url, options = {}, timeoutMs = THROTTLE_FETCH_TIMEOUT_MS) {
     const controller = options.controller || new AbortController();
     const { controller: _controller, ...fetchOptions } = options;
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -335,8 +339,22 @@ function fetchWithTimeout(url, options = {}, timeoutMs = 700) {
     }).finally(() => clearTimeout(timeoutId));
 }
 
+function recoverStaleThrottleRequest() {
+    if (!isSending || throttleRequestStartedAt === 0) return;
+    if (Date.now() - throttleRequestStartedAt <= THROTTLE_SEND_RECOVER_MS) return;
+
+    console.warn("Throttle request watchdog recovered a stuck send.");
+    if (activeThrottleController) {
+        activeThrottleController.abort();
+    }
+    activeThrottleController = null;
+    isSending = false;
+    throttleRequestStartedAt = 0;
+}
+
 function sendThrottleCommand(val) {
     pendingThrottle = val; // 永远用最新值覆盖暂存区
+    recoverStaleThrottleRequest();
     
     // 如果网络通道是空闲的，立刻开火！如果正在忙，就随它去，暂存区已经更新了
     if (!isSending) {
@@ -345,6 +363,8 @@ function sendThrottleCommand(val) {
 }
 
 function flushThrottleQueue() {
+    recoverStaleThrottleRequest();
+    if (isSending) return;
     if (pendingThrottle === null) return;
     
     // 把暂存区的值拿出来准备发送，并清空暂存区
@@ -353,6 +373,7 @@ function flushThrottleQueue() {
     
     isSending = true; // 上锁！
     activeThrottleController = new AbortController();
+    throttleRequestStartedAt = Date.now();
     
     // 发起 HTTP 请求
     fetchWithTimeout(`/set_throttle?val=${valToSend}`, {
@@ -363,6 +384,7 @@ function flushThrottleQueue() {
             // 请求完成，解锁！
             isSending = false; 
             activeThrottleController = null;
+            throttleRequestStartedAt = 0;
             
             // 🚀 核心：如果在我们发送的这零点几秒内，用户又拖了滑块（暂存区不为空）
             // 那就休息 100 毫秒后，再发一次最新的！
@@ -374,6 +396,7 @@ function flushThrottleQueue() {
             console.error("指令下发失败:", error);
             isSending = false; // 报错也要解锁，防止死锁
             activeThrottleController = null;
+            throttleRequestStartedAt = 0;
             if (pendingThrottle !== null) {
                 setTimeout(flushThrottleQueue, 100);
             }
@@ -391,12 +414,13 @@ function triggerEStop() {
         activeThrottleController = null;
     }
     isSending = false;
+    throttleRequestStartedAt = 0;
     
     // 2. 将网页 UI 的滑块、数字、摇杆瞬间打回 1500 中位
     updateDriveState(1500, 'system', false);
     
     // 3. 呼叫后端的专属急停接口
-    fetchWithTimeout('/e_stop', { method: 'POST' }, 700).then(() => {
+    fetchWithTimeout('/e_stop', { method: 'POST' }, THROTTLE_FETCH_TIMEOUT_MS).then(() => {
         console.log("🚨 急停指令已送达底层！");
     }).catch(error => {
         console.error("急停指令发送失败:", error);
@@ -478,7 +502,8 @@ function setThrottle(val) {
 
 setInterval(() => {
     const pwm = parseInt(slider.value, 10);
-    if (!document.hidden && !isDragging && !isRcMode && pwm !== 1500 && Date.now() - lastHeartbeatTime > 250) {
+    recoverStaleThrottleRequest();
+    if (!document.hidden && !isRcMode && pwm !== 1500 && Date.now() - lastHeartbeatTime > THROTTLE_HEARTBEAT_MS) {
         lastHeartbeatTime = Date.now();
         sendThrottleCommand(pwm);
     }

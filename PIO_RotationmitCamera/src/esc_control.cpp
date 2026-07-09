@@ -14,7 +14,7 @@ volatile bool newRcData = false; // 🚀 新增：标记是否收到了【新】
 int rcActiveCount = 0; // 🚀 新增：连续有效动作计数器
 
 unsigned long lastDriveStatusTime = 0; // 🚀 新增：状态播报计时器
-const unsigned long WEB_COMMAND_TIMEOUT_MS = 1200;
+const unsigned long WEB_COMMAND_TIMEOUT_MS = 2500;
 const unsigned long ESTOP_LATCH_MS = 1000;
 
 // --- 控制权状态机 ---
@@ -161,7 +161,7 @@ void updateESC() {
 
     if (currentMode == WEB_MODE && webThrottle != 1500 && lastWebCommandTime > 0 &&
         millis() - lastWebCommandTime > WEB_COMMAND_TIMEOUT_MS) {
-        Serial.println("🚨 [网页失联保护] 超过 1200ms 未收到网页油门心跳，自动归中！");
+        Serial.println("🚨 [网页失联保护] 超过 2500ms 未收到网页油门心跳，自动归中！");
         webThrottle = 1500;
         myESC.writeMicroseconds(1500);
         lastWebCommandTime = 0;
