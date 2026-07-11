@@ -319,6 +319,12 @@ let lastSendTime = 0;
 const THROTTLE_MIN = 1000;
 const THROTTLE_MAX = 2000;
 const THROTTLE_NEUTRAL = 1500;
+const BRAKE_REVERSE_DURATION_MS = 2000;
+const BRAKE_REVERSE_MIN_DELTA = 80;
+const BRAKE_REVERSE_MAX_DELTA = 300;
+const BRAKE_REVERSE_DEADBAND_DELTA = 50;
+let brakeSequenceUntil = 0;
+let brakeNeutralTimer = null;
 
 // ==========================================
 // 发送引擎：防堵塞 + 丢帧保最新
@@ -357,7 +363,24 @@ function recoverStaleThrottleRequest() {
     throttleRequestStartedAt = 0;
 }
 
+function isBrakeSequenceActive() {
+    return Date.now() < brakeSequenceUntil;
+}
+
+function calculateReverseBrakePwm(currentPwm) {
+    const pwm = clampThrottleValue(currentPwm, THROTTLE_NEUTRAL);
+    const delta = pwm - THROTTLE_NEUTRAL;
+    if (Math.abs(delta) <= BRAKE_REVERSE_DEADBAND_DELTA) {
+        return THROTTLE_NEUTRAL;
+    }
+
+    let reverseDelta = Math.round(Math.abs(delta) * BRAKE_REVERSE_MAX_DELTA / (THROTTLE_MAX - THROTTLE_NEUTRAL));
+    reverseDelta = Math.max(BRAKE_REVERSE_MIN_DELTA, Math.min(BRAKE_REVERSE_MAX_DELTA, reverseDelta));
+    return delta > 0 ? THROTTLE_NEUTRAL - reverseDelta : THROTTLE_NEUTRAL + reverseDelta;
+}
+
 function sendThrottleCommand(val) {
+    if (isBrakeSequenceActive()) return;
     pendingThrottle = val; // 永远用最新值覆盖暂存区
     recoverStaleThrottleRequest();
     
@@ -412,6 +435,9 @@ function flushThrottleQueue() {
 // 🚨 紧急刹车专属逻辑
 // ==========================================
 function triggerEStop() {
+    const sourcePwm = clampThrottleValue(slider.value, THROTTLE_NEUTRAL);
+    const brakePwm = calculateReverseBrakePwm(sourcePwm);
+
     // 1. 强行清空节流阀的暂存区，掐断还没发出的网络请求
     pendingThrottle = null; 
     if (activeThrottleController) {
@@ -420,15 +446,33 @@ function triggerEStop() {
     }
     isSending = false;
     throttleRequestStartedAt = 0;
+    brakeSequenceUntil = Date.now() + BRAKE_REVERSE_DURATION_MS;
+    numericOutputToggle.checked = false;
+    if (brakeNeutralTimer) {
+        clearTimeout(brakeNeutralTimer);
+    }
     
-    // 2. 将网页 UI 的滑块、数字、摇杆瞬间打回 1500 中位
-    updateDriveState(THROTTLE_NEUTRAL, 'system', false);
+    // 2. 将网页 UI 瞬间打到反向制动 PWM，2 秒后归中
+    updateDriveState(brakePwm, 'system', false);
+    brakeNeutralTimer = setTimeout(() => {
+        if (!isBrakeSequenceActive()) {
+            updateDriveState(THROTTLE_NEUTRAL, 'system', false);
+            brakeNeutralTimer = null;
+        }
+    }, BRAKE_REVERSE_DURATION_MS);
     
     // 3. 呼叫后端的专属急停接口
-    fetchWithTimeout('/e_stop', { method: 'POST' }, THROTTLE_FETCH_TIMEOUT_MS).then(() => {
-        console.log("🚨 急停指令已送达底层！");
+    fetchWithTimeout('/e_stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ val: sourcePwm })
+    }, THROTTLE_FETCH_TIMEOUT_MS).then(response => response.json()).then(data => {
+        if (typeof data.brake_pwm === 'number') {
+            updateDriveState(data.brake_pwm, 'system', false);
+        }
+        console.log("🚨 反向制动指令已送达底层！", data);
     }).catch(error => {
-        console.error("急停指令发送失败:", error);
+        console.error("反向制动指令发送失败:", error);
     });
 }
 
@@ -562,7 +606,7 @@ function setThrottle(val) {
 setInterval(() => {
     const pwm = parseInt(slider.value, 10);
     recoverStaleThrottleRequest();
-    if (!document.hidden && !isRcMode && pwm !== THROTTLE_NEUTRAL && Date.now() - lastHeartbeatTime > THROTTLE_HEARTBEAT_MS) {
+    if (!document.hidden && !isRcMode && !isBrakeSequenceActive() && pwm !== THROTTLE_NEUTRAL && Date.now() - lastHeartbeatTime > THROTTLE_HEARTBEAT_MS) {
         lastHeartbeatTime = Date.now();
         sendThrottleCommand(pwm);
     }

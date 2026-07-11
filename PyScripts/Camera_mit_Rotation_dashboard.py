@@ -29,6 +29,10 @@ SD_COPY_TIMEOUT_SEC = 8.0
 SERIAL_INPUT_FLUSH_THRESHOLD = 8192
 SERIAL_DEBUG_PRINT = True
 SERIAL_DEBUG_MIN_INTERVAL_SEC = 0.5
+BRAKE_REVERSE_DURATION_SEC = 2.0
+BRAKE_REVERSE_MIN_DELTA = 80
+BRAKE_REVERSE_MAX_DELTA = 300
+BRAKE_REVERSE_DEADBAND_DELTA = 50
 
 # =================================================================
 # 传感器后台数据读取与速度计算线程
@@ -63,6 +67,9 @@ history_buffer = deque(maxlen=10)
 serial_write_lock = threading.Lock()
 serial_transfer_active = threading.Event()
 record_workflow_active = threading.Event()
+brake_sequence_active = threading.Event()
+brake_sequence_lock = threading.Lock()
+brake_sequence_token = 0
 speed_record_lock = threading.Lock()
 speed_record_state = {
     "active": False,
@@ -86,6 +93,30 @@ def is_drive_neutral():
 
 def is_car_stopped():
     return is_drive_neutral() and abs(float(sensor_state.get("speed_pps", 0.0))) <= SD_COPY_STOP_SPEED_PPS_THRESHOLD
+
+
+def clamp_throttle_value(value, fallback=1500):
+    try:
+        return max(1000, min(2000, int(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def calculate_reverse_brake_pwm(current_pwm):
+    current_pwm = clamp_throttle_value(current_pwm)
+    delta = current_pwm - 1500
+    if abs(delta) <= BRAKE_REVERSE_DEADBAND_DELTA:
+        return 1500
+
+    reverse_delta = int(round(abs(delta) * BRAKE_REVERSE_MAX_DELTA / 500.0))
+    reverse_delta = max(BRAKE_REVERSE_MIN_DELTA, min(BRAKE_REVERSE_MAX_DELTA, reverse_delta))
+    return 1500 - reverse_delta if delta > 0 else 1500 + reverse_delta
+
+
+def write_esp32_throttle(pwm):
+    command = f"T{clamp_throttle_value(pwm)}\n"
+    with serial_write_lock:
+        esp32_serial.write(command.encode('utf-8'))
 
 
 def get_current_speed_metrics():
@@ -898,14 +929,15 @@ def set_throttle():
             if serial_transfer_active.is_set():
                 print(f"🛡️ SD数据复制期间丢弃普通油门指令: {val} us")
                 return jsonify({"status": "ignored", "reason": "sd_copy_active", "throttle": sensor_state["throttle"]}), 409
+            if brake_sequence_active.is_set():
+                print(f"🛡️ 反向制动期间丢弃普通油门指令: {val} us")
+                return jsonify({"status": "ignored", "reason": "brake_sequence_active", "throttle": sensor_state["throttle"]}), 409
             if time.monotonic() < estop_ignore_until:
                 print(f"🛡️ 急停保护窗口内丢弃普通油门指令: {val} us")
                 return jsonify({"status": "ignored", "reason": "estop_active", "throttle": 1500})
             if esp32_serial and esp32_serial.is_open:
                 # 按照 ESP32 设定的协议，发送 "T1600\n"
-                command = f"T{val}\n"
-                with serial_write_lock:
-                    esp32_serial.write(command.encode('utf-8'))
+                write_esp32_throttle(val)
                 print(f"🎮 下发油门指令: {val} us")
                 return jsonify({"status": "success", "throttle": val})
             else:
@@ -919,24 +951,68 @@ def set_throttle():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+def reverse_brake_sequence(token, source_pwm, brake_pwm):
+    try:
+        write_esp32_throttle(brake_pwm)
+        sensor_state["throttle"] = brake_pwm
+        print(f"🚨 [反向制动] 已下发 {brake_pwm} us，来源油门 {source_pwm} us")
+        time.sleep(BRAKE_REVERSE_DURATION_SEC)
+
+        with brake_sequence_lock:
+            if token != brake_sequence_token:
+                return
+
+        write_esp32_throttle(1500)
+        sensor_state["throttle"] = 1500
+        print("✅ [反向制动] 2秒结束，已归中 1500 us")
+    except Exception as e:
+        print(f"⚠️ reverse_brake_sequence failed: {e}")
+    finally:
+        with brake_sequence_lock:
+            if token == brake_sequence_token:
+                brake_sequence_active.clear()
+
+
 @app.route('/e_stop', methods=['GET', 'POST'])
 def e_stop():
-    """最高优先级：硬件级紧急刹车"""
-    global estop_ignore_until
+    """最高优先级：按当前方向反向小PWM制动2秒后归中。"""
+    global estop_ignore_until, brake_sequence_token
     if serial_transfer_active.is_set():
         return jsonify({"status": "busy", "message": "SD数据正在复制，串口暂时被占用", "throttle": 1500}), 409
     if esp32_serial and esp32_serial.is_open:
-        estop_ignore_until = time.monotonic() + 1.0
+        payload = request.get_json(silent=True) or {}
+        requested_pwm = clamp_throttle_value(
+            request.args.get('val') or payload.get('val'),
+            clamp_throttle_value(sensor_state.get("throttle", 1500))
+        )
+        sensed_pwm = clamp_throttle_value(sensor_state.get("throttle", 1500))
+        source_pwm = requested_pwm if abs(requested_pwm - 1500) >= abs(sensed_pwm - 1500) else sensed_pwm
+        brake_pwm = calculate_reverse_brake_pwm(source_pwm)
+        estop_ignore_until = time.monotonic() + BRAKE_REVERSE_DURATION_SEC + 0.3
+
+        with brake_sequence_lock:
+            brake_sequence_token += 1
+            token = brake_sequence_token
+            brake_sequence_active.set()
+
         with serial_write_lock:
-            # 🚀 1. 瞬间清空 Python 操作系统层面的所有发送和接收排队队列
             esp32_serial.reset_output_buffer()
             esp32_serial.reset_input_buffer()
 
-            # 🚀 2. 发送专属的最高优先级单字符急停指令 'E' (不用 T1500)
-            esp32_serial.write(b'E\n')
+        threading.Thread(
+            target=reverse_brake_sequence,
+            args=(token, source_pwm, brake_pwm),
+            daemon=True
+        ).start()
 
-        print("🚨 [最高警戒] 触发物理级紧急刹车，已清空所有积压指令！")
-        return jsonify({"status": "success", "throttle": 1500})
+        print(f"🚨 [反向制动] source={source_pwm} us -> brake={brake_pwm} us, {BRAKE_REVERSE_DURATION_SEC:.1f}s 后归中")
+        return jsonify({
+            "status": "success",
+            "source_pwm": source_pwm,
+            "brake_pwm": brake_pwm,
+            "duration_sec": BRAKE_REVERSE_DURATION_SEC,
+            "throttle": brake_pwm
+        })
     else:
         return jsonify({"status": "error", "message": "串口未连接"}), 500
 
