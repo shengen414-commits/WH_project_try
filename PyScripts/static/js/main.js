@@ -307,6 +307,8 @@ refreshSpeedRecordStatus();
 const knob = document.getElementById('joy-knob');
 const slider = document.getElementById('throttle-slider');
 const throttleDisplay = document.getElementById('throttle-val');
+const throttleInput = document.getElementById('throttle-input');
+const numericOutputToggle = document.getElementById('numeric-output-toggle');
 
 let isDragging = false;
 let startY = 0;
@@ -314,6 +316,9 @@ let currentTop = 80;
 const maxTop = 160;  
 const minTop = 0;    
 let lastSendTime = 0;
+const THROTTLE_MIN = 1000;
+const THROTTLE_MAX = 2000;
+const THROTTLE_NEUTRAL = 1500;
 
 // ==========================================
 // 发送引擎：防堵塞 + 丢帧保最新
@@ -417,7 +422,7 @@ function triggerEStop() {
     throttleRequestStartedAt = 0;
     
     // 2. 将网页 UI 的滑块、数字、摇杆瞬间打回 1500 中位
-    updateDriveState(1500, 'system', false);
+    updateDriveState(THROTTLE_NEUTRAL, 'system', false);
     
     // 3. 呼叫后端的专属急停接口
     fetchWithTimeout('/e_stop', { method: 'POST' }, THROTTLE_FETCH_TIMEOUT_MS).then(() => {
@@ -427,22 +432,46 @@ function triggerEStop() {
     });
 }
 
+function clampThrottleValue(value, fallback = THROTTLE_NEUTRAL) {
+    const parsed = parseInt(value, 10);
+    if (Number.isNaN(parsed)) return fallback;
+    return Math.max(THROTTLE_MIN, Math.min(THROTTLE_MAX, parsed));
+}
+
+function readNumericThrottleValue() {
+    const pwm = clampThrottleValue(throttleInput.value, THROTTLE_NEUTRAL);
+    throttleInput.value = pwm;
+    return pwm;
+}
+
+function toggleNumericThrottleOutput() {
+    if (numericOutputToggle.checked) {
+        updateDriveState(readNumericThrottleValue(), 'numeric');
+    } else {
+        updateDriveState(THROTTLE_NEUTRAL, 'system');
+    }
+}
+
 // 👑 核心状态机：同步滑块、摇杆和显示器
 function updateDriveState(pwm, source, shouldSend = true) {
+    pwm = clampThrottleValue(pwm, THROTTLE_NEUTRAL);
+
     // 1. 更新数字和颜色
     throttleDisplay.innerText = pwm;
     if(pwm > 1550) throttleDisplay.style.color = '#ff8800';
     else if(pwm < 1450) throttleDisplay.style.color = '#00aaff';
     else throttleDisplay.style.color = '#ffffff';
 
-    // 2. 如果是摇杆在动，让滑块跟着动
-    if (source === 'joystick' || source === 'system') {
+    throttleInput.value = pwm;
+
+    // 2. 如果不是滑块自己在动，让滑块跟着动
+    if (source !== 'slider') {
         slider.value = pwm;
     }
 
-    // 3. 如果是滑块在动，让物理摇杆跟着动
-    if (source === 'slider' || source === 'system') {
-        let y = Math.round((2000 - pwm) / 1000 * maxTop);
+    // 3. 如果不是摇杆自己在动，让物理摇杆跟着动
+    if (source !== 'joystick') {
+        let y = Math.round((THROTTLE_MAX - pwm) / (THROTTLE_MAX - THROTTLE_MIN) * maxTop);
         knob.style.transition = 'top 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
         knob.style.top = y + 'px';
         currentTop = y;
@@ -459,6 +488,36 @@ slider.addEventListener('input', function() {
     updateDriveState(this.value, 'slider');
 });
 
+throttleInput.addEventListener('input', function() {
+    const rawValue = this.value.trim();
+    if (rawValue === '') {
+        if (numericOutputToggle.checked) {
+            updateDriveState(THROTTLE_NEUTRAL, 'numeric');
+        }
+        return;
+    }
+
+    const parsed = parseInt(rawValue, 10);
+    if (Number.isNaN(parsed)) return;
+
+    if (parsed > THROTTLE_MAX) {
+        this.value = THROTTLE_MAX;
+    } else if (rawValue.length >= 4 && parsed < THROTTLE_MIN) {
+        this.value = THROTTLE_MIN;
+    }
+
+    if (numericOutputToggle.checked && this.value.length >= 4) {
+        updateDriveState(clampThrottleValue(this.value), 'numeric');
+    }
+});
+
+throttleInput.addEventListener('change', function() {
+    const pwm = readNumericThrottleValue();
+    if (numericOutputToggle.checked) {
+        updateDriveState(pwm, 'numeric');
+    }
+});
+
 // === 监听：物理摇杆 ===
 function startDrag(clientY) {
     isDragging = true;
@@ -473,7 +532,7 @@ function onDrag(clientY) {
     currentTop = y;
     knob.style.top = y + 'px'; // 实时改变物理位置
     
-    let pwm = Math.round(2000 - (y / maxTop) * 1000);
+    let pwm = Math.round(THROTTLE_MAX - (y / maxTop) * (THROTTLE_MAX - THROTTLE_MIN));
     updateDriveState(pwm, 'joystick');
 }
 
@@ -481,7 +540,7 @@ function stopDrag() {
     if (isDragging) {
         isDragging = false;
         // 松开摇杆：解除一切巡航，瞬间归中！
-        updateDriveState(1500, 'system'); 
+        updateDriveState(THROTTLE_NEUTRAL, 'system'); 
     }
 }
 
@@ -503,7 +562,7 @@ function setThrottle(val) {
 setInterval(() => {
     const pwm = parseInt(slider.value, 10);
     recoverStaleThrottleRequest();
-    if (!document.hidden && !isRcMode && pwm !== 1500 && Date.now() - lastHeartbeatTime > THROTTLE_HEARTBEAT_MS) {
+    if (!document.hidden && !isRcMode && pwm !== THROTTLE_NEUTRAL && Date.now() - lastHeartbeatTime > THROTTLE_HEARTBEAT_MS) {
         lastHeartbeatTime = Date.now();
         sendThrottleCommand(pwm);
     }
@@ -511,14 +570,17 @@ setInterval(() => {
 
 // 👻 幽灵同步函数：专门负责让UI跟着底层跑，但不向Python发指令
 function syncUIFromRemote(pwm) {
+    pwm = clampThrottleValue(pwm, THROTTLE_NEUTRAL);
+
     throttleDisplay.innerText = pwm;
     if(pwm > 1550) throttleDisplay.style.color = '#ff8800';
     else if(pwm < 1450) throttleDisplay.style.color = '#00aaff';
     else throttleDisplay.style.color = '#ffffff';
 
     slider.value = pwm;
+    throttleInput.value = pwm;
 
-    let y = Math.round((2000 - pwm) / 1000 * maxTop);
+    let y = Math.round((THROTTLE_MAX - pwm) / (THROTTLE_MAX - THROTTLE_MIN) * maxTop);
     knob.style.transition = 'top 0.1s linear'; // 让同步看起来极其丝滑跟手
     knob.style.top = y + 'px';
     currentTop = y;
