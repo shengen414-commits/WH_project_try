@@ -337,8 +337,8 @@ let throttleRequestStartedAt = 0;
 const THROTTLE_FETCH_TIMEOUT_MS = 900;
 const THROTTLE_SEND_RECOVER_MS = 1200;
 const THROTTLE_HEARTBEAT_MS = 250;
-const NUMERIC_RESEND_DELAY_MS = 120;
-let numericResendTimer = null;
+const NUMERIC_CONFIRM_DELAYS_MS = [250, 700];
+let numericResendTimers = [];
 
 function fetchWithTimeout(url, options = {}, timeoutMs = THROTTLE_FETCH_TIMEOUT_MS) {
     const controller = options.controller || new AbortController();
@@ -392,20 +392,26 @@ function sendThrottleCommand(val) {
     }
 }
 
+function clearNumericThrottleResends() {
+    numericResendTimers.forEach(timer => clearTimeout(timer));
+    numericResendTimers = [];
+}
+
 function scheduleNumericThrottleResend(pwm) {
-    if (numericResendTimer) {
-        clearTimeout(numericResendTimer);
-    }
+    clearNumericThrottleResends();
 
-    numericResendTimer = setTimeout(() => {
-        numericResendTimer = null;
-        if (!numericOutputToggle.checked || isBrakeSequenceActive()) return;
+    NUMERIC_CONFIRM_DELAYS_MS.forEach(delayMs => {
+        const timer = setTimeout(() => {
+            numericResendTimers = numericResendTimers.filter(activeTimer => activeTimer !== timer);
+            if (!numericOutputToggle.checked || isBrakeSequenceActive()) return;
 
-        const currentPwm = clampThrottleValue(throttleInput.value, THROTTLE_NEUTRAL);
-        if (currentPwm === pwm) {
-            sendThrottleCommand(pwm);
-        }
-    }, NUMERIC_RESEND_DELAY_MS);
+            const currentPwm = clampThrottleValue(throttleInput.value, THROTTLE_NEUTRAL);
+            if (currentPwm === pwm) {
+                sendThrottleCommand(pwm);
+            }
+        }, delayMs);
+        numericResendTimers.push(timer);
+    });
 }
 
 function flushThrottleQueue() {
@@ -466,10 +472,7 @@ function triggerEStop() {
     throttleRequestStartedAt = 0;
     brakeSequenceUntil = Date.now() + BRAKE_REVERSE_DURATION_MS;
     numericOutputToggle.checked = false;
-    if (numericResendTimer) {
-        clearTimeout(numericResendTimer);
-        numericResendTimer = null;
-    }
+    clearNumericThrottleResends();
     if (brakeNeutralTimer) {
         clearTimeout(brakeNeutralTimer);
     }
@@ -514,10 +517,7 @@ function toggleNumericThrottleOutput() {
     if (numericOutputToggle.checked) {
         updateDriveState(readNumericThrottleValue(), 'numeric');
     } else {
-        if (numericResendTimer) {
-            clearTimeout(numericResendTimer);
-            numericResendTimer = null;
-        }
+        clearNumericThrottleResends();
         updateDriveState(THROTTLE_NEUTRAL, 'system');
     }
 }
