@@ -19,7 +19,7 @@ PPR = 12.0
 KMH_PER_RPM = 0.007173
 SPEED_RECORD_DIR = os.path.join(SAVE_DIR, "Speed_Records")
 os.makedirs(SPEED_RECORD_DIR, exist_ok=True)
-SPEED_RECORD_SAMPLE_INTERVAL_SEC = 0.005  # 速度记录采样间隔
+SPEED_RECORD_SAMPLE_INTERVAL_SEC = 0.01  # 速度记录到csv采样间隔,esp32的传感器采样长度在ESP32代码中更改
 SPEED_RECORD_MAX_DURATION_SEC = 10 * 60
 SD_COPY_SAFE_THROTTLE_DELTA = 20
 SD_COPY_STOP_SPEED_PPS_THRESHOLD = 1.0
@@ -83,6 +83,7 @@ speed_record_state = {
     "stop_reason": None,
     "stop_event": None,
     "thread": None,
+    "esp32_recording": False,
 }
 estop_ignore_until = 0.0
 
@@ -133,7 +134,7 @@ def get_current_speed_metrics():
     }
 
 
-def speed_record_worker(session_id, file_path, started_at_ns, started_at_iso, stop_event):
+def speed_record_worker(session_id, file_path, started_at_ns, started_at_iso, stop_event, esp32_recording_started):
     fieldnames = [
         "iso_time",
         "unix_time_ns",
@@ -184,6 +185,16 @@ def speed_record_worker(session_id, file_path, started_at_ns, started_at_iso, st
         stop_reason = f"error: {e}"
         print(f"⚠️ 速度记录异常: {e}")
     finally:
+        if esp32_recording_started:
+            try:
+                if esp32_serial and esp32_serial.is_open:
+                    with serial_write_lock:
+                        esp32_serial.write(b'p')
+            except Exception as e:
+                print(f"⚠️ 速度记录停止ESP32录制失败: {e}")
+            finally:
+                record_workflow_active.clear()
+
         stopped_at_ns = time.time_ns()
         stopped_at_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
         with speed_record_lock:
@@ -196,6 +207,7 @@ def speed_record_worker(session_id, file_path, started_at_ns, started_at_iso, st
                     "stop_reason": stop_reason,
                     "stop_event": None,
                     "thread": None,
+                    "esp32_recording": False,
                 })
         print(
             f"✅ 速度记录结束: {file_path} ({sample_count} samples, reason={stop_reason})")
@@ -221,10 +233,26 @@ def speed_record_public_state():
             "max_duration_sec": SPEED_RECORD_MAX_DURATION_SEC,
             "sample_count": speed_record_state["sample_count"],
             "stop_reason": speed_record_state["stop_reason"],
+            "esp32_recording": speed_record_state.get("esp32_recording", False),
         }
 
 
 def start_speed_recording():
+    if esp32_serial and esp32_serial.is_open and record_workflow_active.is_set():
+        return False, speed_record_public_state()
+
+    esp32_recording_started = False
+    if esp32_serial and esp32_serial.is_open:
+        try:
+            with serial_write_lock:
+                esp32_serial.write(b's')
+            record_workflow_active.set()
+            esp32_recording_started = True
+        except Exception as e:
+            print(f"⚠️ 速度记录启动ESP32录制失败: {e}")
+            record_workflow_active.clear()
+            return False, speed_record_public_state()
+
     with speed_record_lock:
         if speed_record_state["active"]:
             already_active = True
@@ -244,7 +272,7 @@ def start_speed_recording():
             worker = threading.Thread(
                 target=speed_record_worker,
                 args=(session_id, file_path, started_at_ns,
-                      started_at_iso, stop_event),
+                      started_at_iso, stop_event, esp32_recording_started),
                 daemon=True,
             )
             speed_record_state.update({
@@ -259,9 +287,16 @@ def start_speed_recording():
                 "stop_reason": None,
                 "stop_event": stop_event,
                 "thread": worker,
+                "esp32_recording": esp32_recording_started,
             })
 
     if already_active:
+        if esp32_recording_started:
+            try:
+                with serial_write_lock:
+                    esp32_serial.write(b'p')
+            finally:
+                record_workflow_active.clear()
         return False, speed_record_public_state()
 
     if worker:

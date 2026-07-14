@@ -337,6 +337,8 @@ let throttleRequestStartedAt = 0;
 const THROTTLE_FETCH_TIMEOUT_MS = 900;
 const THROTTLE_SEND_RECOVER_MS = 1200;
 const THROTTLE_HEARTBEAT_MS = 250;
+const NUMERIC_RESEND_DELAY_MS = 120;
+let numericResendTimer = null;
 
 function fetchWithTimeout(url, options = {}, timeoutMs = THROTTLE_FETCH_TIMEOUT_MS) {
     const controller = options.controller || new AbortController();
@@ -388,6 +390,22 @@ function sendThrottleCommand(val) {
     if (!isSending) {
         flushThrottleQueue();
     }
+}
+
+function scheduleNumericThrottleResend(pwm) {
+    if (numericResendTimer) {
+        clearTimeout(numericResendTimer);
+    }
+
+    numericResendTimer = setTimeout(() => {
+        numericResendTimer = null;
+        if (!numericOutputToggle.checked || isBrakeSequenceActive()) return;
+
+        const currentPwm = clampThrottleValue(throttleInput.value, THROTTLE_NEUTRAL);
+        if (currentPwm === pwm) {
+            sendThrottleCommand(pwm);
+        }
+    }, NUMERIC_RESEND_DELAY_MS);
 }
 
 function flushThrottleQueue() {
@@ -448,6 +466,10 @@ function triggerEStop() {
     throttleRequestStartedAt = 0;
     brakeSequenceUntil = Date.now() + BRAKE_REVERSE_DURATION_MS;
     numericOutputToggle.checked = false;
+    if (numericResendTimer) {
+        clearTimeout(numericResendTimer);
+        numericResendTimer = null;
+    }
     if (brakeNeutralTimer) {
         clearTimeout(brakeNeutralTimer);
     }
@@ -492,6 +514,10 @@ function toggleNumericThrottleOutput() {
     if (numericOutputToggle.checked) {
         updateDriveState(readNumericThrottleValue(), 'numeric');
     } else {
+        if (numericResendTimer) {
+            clearTimeout(numericResendTimer);
+            numericResendTimer = null;
+        }
         updateDriveState(THROTTLE_NEUTRAL, 'system');
     }
 }
@@ -524,6 +550,9 @@ function updateDriveState(pwm, source, shouldSend = true) {
     // 4. 下发底层指令
     if (shouldSend) {
         sendThrottleCommand(pwm);
+        if (source === 'numeric' && numericOutputToggle.checked) {
+            scheduleNumericThrottleResend(pwm);
+        }
     }
 }
 
