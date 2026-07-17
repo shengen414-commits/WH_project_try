@@ -116,6 +116,11 @@
                 <span class="slider"></span>
             </label>
             <span class="numeric-output-label">输出</span>
+            <label class="switch numeric-boost-switch" title="仅填数输出：启动时短暂提高PWM，随后回到设定值">
+                <input type="checkbox" id="numeric-boost-toggle" onchange="toggleNumericBoost()">
+                <span class="slider"></span>
+            </label>
+            <span class="numeric-output-label">增速</span>
         </div>
         
         <div>PWM 输出指令: <span id="throttle-val" class="throttle-display">1500</span> <span style="color:#888;">us</span></div>
@@ -126,6 +131,6 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='js/main.js') }}?v=20260714-numeric-resend"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}?v=20260717-numeric-boost"></script>
 </body>
 </html>

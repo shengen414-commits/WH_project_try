@@ -19,6 +19,11 @@ const unsigned long ESTOP_LATCH_MS = 1000;
 const int ESC_NEUTRAL_PWM = 1500;
 const int ESC_DIRECTION_DEADBAND_US = 50;
 const unsigned long ESC_DIRECTION_CHANGE_NEUTRAL_MS = 200;
+const float ESC_BOOST_MULTIPLIER = 1.3f;//启动段增速倍率(pwm-1500)*rate+-1500
+const unsigned long ESC_BOOST_RAMP_MS = 250;//启动段增速渐升时间
+const unsigned long ESC_BOOST_HOLD_MS = 1000;//启动段增速维持时间
+const int ESC_BOOST_FORWARD_LIMIT = 1900;
+const int ESC_BOOST_REVERSE_LIMIT = 1100;//增速段PWM上下限
 
 // --- 控制权状态机 ---
 enum ControlMode { WEB_MODE, RC_MODE };
@@ -30,6 +35,10 @@ int appliedEscDirection = 0;
 bool directionChangePending = false;
 int pendingEscPwm = ESC_NEUTRAL_PWM;
 unsigned long directionChangeReleaseAt = 0;
+bool escBoostActive = false;
+int escBoostBasePwm = ESC_NEUTRAL_PWM;
+int escBoostPeakPwm = ESC_NEUTRAL_PWM;
+unsigned long escBoostStartedAt = 0;
 
 // 🚀 核心硬件中断：精准捕捉 D27 引脚的电平变化，计算 PWM 脉宽
 int getEscDirection(int pwmValue) {
@@ -43,10 +52,18 @@ int getEscDirection(int pwmValue) {
 }
 
 void forceEscNeutralOutput() {
+    escBoostActive = false;
     directionChangePending = false;
     pendingEscPwm = ESC_NEUTRAL_PWM;
     appliedEscDirection = 0;
     myESC.writeMicroseconds(ESC_NEUTRAL_PWM);
+}
+
+void cancelESCBoost() {
+    escBoostActive = false;
+    escBoostBasePwm = ESC_NEUTRAL_PWM;
+    escBoostPeakPwm = ESC_NEUTRAL_PWM;
+    escBoostStartedAt = 0;
 }
 
 void requestEscOutput(int pwmValue) {
@@ -122,6 +139,14 @@ void handleESCCommand(char cmd) {
         }
         setESCThrottle(throttleValue);
     }
+    else if (cmd == 'B' || cmd == 'b') {
+        int throttleValue = Serial.parseInt();
+        if (millis() < estopLatchedUntil) {
+            Serial.println("[E-STOP] Ignored boost command during protection window");
+            return;
+        }
+        startESCBoost(throttleValue);
+    }
 }
 
 // --- 初始化函数 ---
@@ -149,13 +174,72 @@ void initESC() {
 
 // --- 控制函数 ---
 void setESCThrottle(int pwmValue) {
-    webThrottle = constrain(pwmValue, 1000, 2000);
+    int requestedPwm = constrain(pwmValue, 1000, 2000);
+    bool keepCurrentBoost = escBoostActive && requestedPwm == escBoostBasePwm;
+    webThrottle = requestedPwm;
     lastWebCommandTime = millis();
     currentMode = WEB_MODE; // 只要网页发来新指令，瞬间抢回控制权
+    if (keepCurrentBoost) {
+        return;
+    }
+    cancelESCBoost();
     requestEscOutput(webThrottle);
     
     Serial.print(">>> [网页接管] 油门: ");
     Serial.println(webThrottle);
+}
+
+void startESCBoost(int pwmValue) {
+    webThrottle = constrain(pwmValue, 1000, 2000);
+    lastWebCommandTime = millis();
+    currentMode = WEB_MODE;
+
+    int delta = webThrottle - ESC_NEUTRAL_PWM;
+    if (abs(delta) <= ESC_DIRECTION_DEADBAND_US) {
+        cancelESCBoost();
+        requestEscOutput(webThrottle);
+        return;
+    }
+
+    int boostedDelta = (int)roundf(delta * ESC_BOOST_MULTIPLIER);
+    escBoostBasePwm = webThrottle;
+    escBoostPeakPwm = ESC_NEUTRAL_PWM + boostedDelta;
+    if (delta > 0) {
+        escBoostPeakPwm = min(escBoostPeakPwm, ESC_BOOST_FORWARD_LIMIT);
+    } else {
+        escBoostPeakPwm = max(escBoostPeakPwm, ESC_BOOST_REVERSE_LIMIT);
+    }
+    escBoostStartedAt = millis();
+    escBoostActive = escBoostPeakPwm != escBoostBasePwm;
+    requestEscOutput(escBoostBasePwm);
+
+    Serial.print(">>> [NUMERIC BOOST] base: ");
+    Serial.print(escBoostBasePwm);
+    Serial.print(" | peak: ");
+    Serial.println(escBoostPeakPwm);
+}
+
+void updateESCBoost() {
+    if (!escBoostActive || currentMode != WEB_MODE) {
+        return;
+    }
+
+    unsigned long elapsed = millis() - escBoostStartedAt;
+    if (elapsed < ESC_BOOST_RAMP_MS) {
+        long peakOffset = escBoostPeakPwm - escBoostBasePwm;
+        int rampPwm = escBoostBasePwm + (int)(peakOffset * elapsed / ESC_BOOST_RAMP_MS);
+        requestEscOutput(rampPwm);
+        return;
+    }
+
+    if (elapsed < ESC_BOOST_RAMP_MS + ESC_BOOST_HOLD_MS) {
+        requestEscOutput(escBoostPeakPwm);
+        return;
+    }
+
+    escBoostActive = false;
+    requestEscOutput(escBoostBasePwm);
+    Serial.println(">>> [NUMERIC BOOST] complete, restored base PWM");
 }
 
 // 🚀 新增：持续监控与接管逻辑
@@ -187,6 +271,7 @@ void updateESC() {
                     if (currentMode != RC_MODE) {
                         Serial.println("⚠️ [警告] 检测到持续物理遥控动作，已强制切为【遥控模式】！");
                         currentMode = RC_MODE; 
+                        cancelESCBoost();
                     }
                 }
             }
@@ -214,7 +299,9 @@ void updateESC() {
         rcActiveCount = 0; // 没信号也要清零
     }
 
-    if (currentMode == WEB_MODE && directionChangePending) {
+    if (currentMode == WEB_MODE && escBoostActive) {
+        updateESCBoost();
+    } else if (currentMode == WEB_MODE && directionChangePending) {
         requestEscOutput(webThrottle);
     }
 

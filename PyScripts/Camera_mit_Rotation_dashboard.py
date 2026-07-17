@@ -120,6 +120,12 @@ def write_esp32_throttle(pwm):
         esp32_serial.write(command.encode('utf-8'))
 
 
+def write_esp32_boost(pwm):
+    command = f"B{clamp_throttle_value(pwm)}\n"
+    with serial_write_lock:
+        esp32_serial.write(command.encode('utf-8'))
+
+
 def get_current_speed_metrics():
     speed_pps = float(sensor_state.get("speed_pps", 0.0))
     rpm = (speed_pps / PPR) * 60.0
@@ -957,6 +963,7 @@ def set_throttle():
     global estop_ignore_until
     # 默认油门为 1500 (中位/停止)
     val_str = request.args.get('val', '1500')
+    boost_enabled = request.args.get('boost', '0').lower() in ('1', 'true', 'yes', 'on')
     try:
         val = int(val_str)
         # 安全断言保护
@@ -972,9 +979,13 @@ def set_throttle():
                 return jsonify({"status": "ignored", "reason": "estop_active", "throttle": 1500})
             if esp32_serial and esp32_serial.is_open:
                 # 按照 ESP32 设定的协议，发送 "T1600\n"
-                write_esp32_throttle(val)
-                print(f"🎮 下发油门指令: {val} us")
-                return jsonify({"status": "success", "throttle": val})
+                if boost_enabled:
+                    write_esp32_boost(val)
+                    print(f"🚀 下发填数增速指令: {val} us")
+                else:
+                    write_esp32_throttle(val)
+                    print(f"🎮 下发油门指令: {val} us")
+                return jsonify({"status": "success", "throttle": val, "boost": boost_enabled})
             else:
                 return jsonify({"status": "error", "message": "串口未连接"}), 500
         else:

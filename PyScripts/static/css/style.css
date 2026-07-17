@@ -64,5 +64,6 @@ button:disabled { background: #555; cursor: not-allowed; transform: none; }
 #throttle-input:focus { border-color: #00aaff; box-shadow: 0 0 10px rgba(0, 170, 255, 0.35); }
 #throttle-input::placeholder { color: #777; opacity: 1; }
 .numeric-output-switch { margin-left: 4px; }
+.numeric-boost-switch { margin-left: 8px; }
 
 @keyframes flash { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
