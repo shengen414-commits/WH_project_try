@@ -15,6 +15,8 @@ from flask import Flask, Response, render_template, jsonify, request
 # 确保录像保存根目录存在
 SAVE_DIR = "Car_Records"
 os.makedirs(SAVE_DIR, exist_ok=True)
+SNAPSHOT_DIR = os.path.join(SAVE_DIR, "Snapshots")
+os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 PPR = 12.0
 KMH_PER_RPM = 0.007173
 SPEED_RECORD_DIR = os.path.join(SAVE_DIR, "Speed_Records")
@@ -26,10 +28,11 @@ SD_COPY_STOP_SPEED_PPS_THRESHOLD = 1.0
 SD_COPY_STOP_STABLE_SEC = 1.2
 SD_COPY_WAIT_LOG_SEC = 5.0
 SD_COPY_TIMEOUT_SEC = 8.0
-SERIAL_INPUT_FLUSH_THRESHOLD = 8192
+SERIAL_INPUT_FLUSH_THRESHOLD = 2048
+SERIAL_IDLE_SLEEP_SEC = 0.001
 SERIAL_DEBUG_PRINT = True
 SERIAL_DEBUG_MIN_INTERVAL_SEC = 0.5
-BRAKE_REVERSE_DURATION_SEC = 2.0
+BRAKE_REVERSE_DURATION_SEC = 2.00
 BRAKE_REVERSE_MIN_DELTA = 80
 BRAKE_REVERSE_MAX_DELTA = 300
 BRAKE_REVERSE_DEADBAND_DELTA = 50
@@ -65,6 +68,8 @@ except Exception as e:
 # 🚀 增加一个用于存储高频历史轨迹的队列 (记录过去10次的点)
 history_buffer = deque(maxlen=10)
 serial_write_lock = threading.Lock()
+record_command_lock = threading.Lock()
+snapshot_lock = threading.Lock()
 serial_transfer_active = threading.Event()
 record_workflow_active = threading.Event()
 brake_sequence_active = threading.Event()
@@ -124,6 +129,32 @@ def write_esp32_boost(pwm):
     command = f"B{clamp_throttle_value(pwm)}\n"
     with serial_write_lock:
         esp32_serial.write(command.encode('utf-8'))
+
+
+def write_esp32_record_command(command, clear_stale_input=True):
+    """Send one SD-record command without mixing it with stale serial traffic."""
+    if command not in (b's', b'p'):
+        raise ValueError(f"unsupported record command: {command!r}")
+    if esp32_serial is None or not esp32_serial.is_open:
+        raise RuntimeError("ESP32 serial port is not open")
+
+    with serial_write_lock:
+        stale_bytes = esp32_serial.in_waiting
+        if clear_stale_input and stale_bytes:
+            esp32_serial.reset_input_buffer()
+            sensor_state["serial_flush_count"] += 1
+            print(
+                f"Discarded {stale_bytes} stale ESP32 RX bytes before "
+                f"record command {command.decode('ascii')!r}"
+            )
+
+        # Complete older outbound data first, then wait until this record
+        # command has reached the USB serial driver.
+        esp32_serial.flush()
+        esp32_serial.write(command)
+        esp32_serial.flush()
+        sent_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        print(f"[{sent_at}] ESP32 TX record command: {command.decode('ascii')!r}")
 
 
 def get_current_speed_metrics():
@@ -194,8 +225,7 @@ def speed_record_worker(session_id, file_path, started_at_ns, started_at_iso, st
         if esp32_recording_started:
             try:
                 if esp32_serial and esp32_serial.is_open:
-                    with serial_write_lock:
-                        esp32_serial.write(b'p')
+                    write_esp32_record_command(b'p')
             except Exception as e:
                 print(f"⚠️ 速度记录停止ESP32录制失败: {e}")
             finally:
@@ -244,43 +274,40 @@ def speed_record_public_state():
 
 
 def start_speed_recording():
-    if esp32_serial and esp32_serial.is_open and record_workflow_active.is_set():
-        return False, speed_record_public_state()
-
-    esp32_recording_started = False
-    if esp32_serial and esp32_serial.is_open:
-        try:
-            with serial_write_lock:
-                esp32_serial.write(b's')
-            record_workflow_active.set()
-            esp32_recording_started = True
-        except Exception as e:
-            print(f"⚠️ 速度记录启动ESP32录制失败: {e}")
-            record_workflow_active.clear()
+    with record_command_lock:
+        with speed_record_lock:
+            already_active = speed_record_state["active"]
+        if already_active:
             return False, speed_record_public_state()
 
-    with speed_record_lock:
-        if speed_record_state["active"]:
-            already_active = True
-        else:
-            already_active = False
+        if esp32_serial and esp32_serial.is_open and record_workflow_active.is_set():
+            return False, speed_record_public_state()
 
-        if already_active:
-            worker = None
-        else:
-            session_id = time.strftime("%Y%m%d_%H%M%S")
-            file_name = f"speed_record_{session_id}.csv"
-            file_path = os.path.join(SPEED_RECORD_DIR, file_name)
-            started_at_ns = time.time_ns()
-            started_at_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
-            stop_event = threading.Event()
+        esp32_recording_started = False
+        if esp32_serial and esp32_serial.is_open:
+            try:
+                write_esp32_record_command(b's')
+                record_workflow_active.set()
+                esp32_recording_started = True
+            except Exception as e:
+                print(f"⚠️ 速度记录启动ESP32录制失败: {e}")
+                record_workflow_active.clear()
+                return False, speed_record_public_state()
 
-            worker = threading.Thread(
-                target=speed_record_worker,
-                args=(session_id, file_path, started_at_ns,
-                      started_at_iso, stop_event, esp32_recording_started),
-                daemon=True,
-            )
+        session_id = time.strftime("%Y%m%d_%H%M%S")
+        file_name = f"speed_record_{session_id}.csv"
+        file_path = os.path.join(SPEED_RECORD_DIR, file_name)
+        started_at_ns = time.time_ns()
+        started_at_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        stop_event = threading.Event()
+
+        worker = threading.Thread(
+            target=speed_record_worker,
+            args=(session_id, file_path, started_at_ns,
+                  started_at_iso, stop_event, esp32_recording_started),
+            daemon=True,
+        )
+        with speed_record_lock:
             speed_record_state.update({
                 "active": True,
                 "session_id": session_id,
@@ -295,17 +322,6 @@ def start_speed_recording():
                 "thread": worker,
                 "esp32_recording": esp32_recording_started,
             })
-
-    if already_active:
-        if esp32_recording_started:
-            try:
-                with serial_write_lock:
-                    esp32_serial.write(b'p')
-            finally:
-                record_workflow_active.clear()
-        return False, speed_record_public_state()
-
-    if worker:
         worker.start()
 
     print(f"🔴 速度记录开始: {file_path}")
@@ -313,23 +329,19 @@ def start_speed_recording():
 
 
 def stop_speed_recording():
-    with speed_record_lock:
-        if not speed_record_state["active"]:
-            was_active = False
-            stop_event = None
-            worker = None
-        else:
-            was_active = True
-            stop_event = speed_record_state["stop_event"]
-            worker = speed_record_state["thread"]
+    with record_command_lock:
+        with speed_record_lock:
+            is_active = speed_record_state["active"]
+            stop_event = speed_record_state["stop_event"] if is_active else None
+            worker = speed_record_state["thread"] if is_active else None
 
-    if not was_active:
-        return False, speed_record_public_state()
+        if not is_active:
+            return False, speed_record_public_state()
 
-    if stop_event:
-        stop_event.set()
-    if worker:
-        worker.join(timeout=2.0)
+        if stop_event:
+            stop_event.set()
+        if worker:
+            worker.join(timeout=2.0)
 
     return True, speed_record_public_state()
 
@@ -603,20 +615,29 @@ def read_esp32_data():
                 continue
 
             # 防积压机制
-            if esp32_serial.in_waiting > SERIAL_INPUT_FLUSH_THRESHOLD:
+            with serial_write_lock:
+                pending_bytes = esp32_serial.in_waiting
+                backlog_cleared = pending_bytes > SERIAL_INPUT_FLUSH_THRESHOLD
+                if backlog_cleared:
+                    esp32_serial.reset_input_buffer()
+
+            if backlog_cleared:
                 sensor_state["serial_flush_count"] += 1
-                print(f"⚠️ Serial RX backlog cleared: {esp32_serial.in_waiting} bytes")
-                esp32_serial.reset_input_buffer()
+                print(f"⚠️ Serial RX backlog cleared: {pending_bytes} bytes")
                 continue
 
-            if esp32_serial.in_waiting > 0:
-                line = esp32_serial.readline().decode('utf-8', errors='ignore').strip()
+            if pending_bytes > 0:
+                with serial_write_lock:
+                    raw_line = esp32_serial.readline()
+                line = raw_line.decode('utf-8', errors='ignore').strip()
                 now_wall = time.time()
                 sensor_state["last_serial_line"] = line
                 sensor_state["last_serial_rx_wall"] = now_wall
                 sensor_state["serial_line_count"] += 1
                 if SERIAL_DEBUG_PRINT and now_wall - last_debug_print >= SERIAL_DEBUG_MIN_INTERVAL_SEC:
-                    print(f"ESP32 >> {line}")
+                    received_at = datetime.fromtimestamp(now_wall).astimezone().isoformat(
+                        timespec="milliseconds")
+                    print(f"[{received_at}] ESP32 RX >> {line}")
                     last_debug_print = now_wall
                 match = pattern.search(line)
                 if match:
@@ -670,6 +691,10 @@ def read_esp32_data():
                         sensor_state["mode"] = match_drive.group(1)
                         sensor_state["throttle"] = int(match_drive.group(2))
                         sensor_state["last_drive_line"] = line
+            else:
+                # Avoid a tight Python loop monopolizing the GIL while the
+                # ESP32 is quiet. 1 ms is still well below its 10 ms sample interval.
+                time.sleep(SERIAL_IDLE_SLEEP_SEC)
         except Exception as e:
             time.sleep(0.1)
 
@@ -682,7 +707,7 @@ threading.Thread(target=read_esp32_data, daemon=True).start()
 
 
 class HighSpeedCamera:
-    def __init__(self, src=0, name="Cam", fps=200):
+    def __init__(self, src=0, name="Cam", fps=210):
         # 初始化时稍微错峰，防止 USB 带宽瞬间冲顶
         if "Right" in name:
             time.sleep(1.0)
@@ -700,6 +725,7 @@ class HighSpeedCamera:
         self.is_active = False if name == "Right" else True
 
         self.buffer = deque(maxlen=int(fps * 2.0))
+        self.latest_frame_ns = 0
         self.running = True
         self.real_fps = 0.0
 
@@ -744,6 +770,7 @@ class HighSpeedCamera:
             self.cap.release()
             self.cap = None
         self.buffer.clear()
+        self.latest_frame_ns = 0
         self.real_fps = 0.0
         print(f"💤 [{self.name}] 摄像头已释放硬件，进入休眠。")
 
@@ -780,13 +807,16 @@ class HighSpeedCamera:
             if ret:
                 curr_ns = time.time_ns()
                 self.buffer.append(frame)
+                self.latest_frame_ns = curr_ns
 
                 if self.is_recording:
                     self.record_frames.append((curr_ns, frame.copy()))
                     if len(self.record_frames) >= self.record_target_count:
                         self.is_recording = False
+                        frames_to_save = self.record_frames
+                        self.record_frames = []
                         threading.Thread(target=self._save_images_to_disk,
-                                         args=(self.record_frames, self.record_session_id)).start()
+                                         args=(frames_to_save, self.record_session_id)).start()
 
                 frame_count += 1
                 if frame_count % 20 == 0:
@@ -830,14 +860,23 @@ class HighSpeedCamera:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         return frame
 
+    def get_latest_raw_frame(self):
+        """Return the newest unannotated frame for a still-image snapshot."""
+        if not self.is_active or not self.available or not self.buffer:
+            return None, None
+        try:
+            return self.latest_frame_ns, self.buffer[-1].copy()
+        except IndexError:
+            return None, None
+
 
 # =================================================================
 # Flask 逻辑
 # =================================================================
 app = Flask(__name__)
 
-cam_left = HighSpeedCamera(src=0, name="Left", fps=200)
-cam_right = HighSpeedCamera(src=2, name="Right", fps=200)
+cam_left = HighSpeedCamera(src=0, name="Left", fps=210)
+cam_right = HighSpeedCamera(src=2, name="Right", fps=210)
 
 
 @app.route('/')
@@ -872,6 +911,53 @@ def video_right():
 @app.route('/fps_stats')
 def fps_stats():
     return jsonify({"left": f"{cam_left.real_fps:.1f}", "right": f"{cam_right.real_fps:.1f}"})
+
+
+@app.route('/capture_snapshot', methods=['POST'])
+def capture_snapshot():
+    with snapshot_lock:
+        left_timestamp_ns, left_frame = cam_left.get_latest_raw_frame()
+        right_timestamp_ns, right_frame = cam_right.get_latest_raw_frame()
+
+        missing = []
+        if left_frame is None:
+            missing.append("left")
+        if right_frame is None:
+            missing.append("right")
+        if missing:
+            return jsonify({
+                "status": "camera_unavailable",
+                "message": f"请先开启并等待摄像头出图: {', '.join(missing)}",
+                "missing": missing,
+            }), 409
+
+        snapshot_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        snapshot_path = os.path.join(SNAPSHOT_DIR, snapshot_id)
+        os.makedirs(snapshot_path, exist_ok=False)
+        left_path = os.path.join(snapshot_path, "left.jpg")
+        right_path = os.path.join(snapshot_path, "right.jpg")
+
+        left_saved = cv2.imwrite(
+            left_path, left_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        right_saved = cv2.imwrite(
+            right_path, right_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        if not left_saved or not right_saved:
+            return jsonify({
+                "status": "error",
+                "message": "单张图片写入失败，请检查磁盘空间和目录权限",
+            }), 500
+
+    relative_folder = os.path.relpath(snapshot_path, SAVE_DIR)
+    print(
+        f"📸 双目单张已保存: {snapshot_path} "
+        f"(left={left_timestamp_ns}, right={right_timestamp_ns})"
+    )
+    return jsonify({
+        "status": "saved",
+        "folder": relative_folder,
+        "left": os.path.join(relative_folder, "left.jpg"),
+        "right": os.path.join(relative_folder, "right.jpg"),
+    })
 
 
 @app.route('/sensor_stats')
@@ -921,31 +1007,39 @@ def toggle_cam():
 
 @app.route('/start_record')
 def start_record():
-    if esp32_serial and record_workflow_active.is_set():
-        return jsonify({"status": "busy", "message": "上一批传感器数据还在等待停稳或复制SD数据"}), 409
+    with record_command_lock:
+        serial_ready = bool(esp32_serial and esp32_serial.is_open)
+        if serial_ready and record_workflow_active.is_set():
+            return jsonify({"status": "busy", "message": "上一批传感器数据还在等待停稳或复制SD数据"}), 409
 
-    session_id = time.strftime("%Y%m%d_%H%M%S")
-    # 左相机必定录制
-    cam_left.start_record(session_id=session_id, duration_sec=3)
+        session_id = time.strftime("%Y%m%d_%H%M%S")
+        sensor_record_start_ns = None
+        if serial_ready:
+            record_workflow_active.set()
+            try:
+                sensor_record_start_ns = time.time_ns()
+                write_esp32_record_command(b's')
+            except Exception as e:
+                record_workflow_active.clear()
+                print(f"⚠️ 多源记录启动ESP32录制失败: {e}")
+                return jsonify({"status": "error", "message": str(e)}), 500
 
-    # 只有当右相机激活时才录制右侧
-    if cam_right.is_active:
-        cam_right.start_record(session_id=session_id, duration_sec=3)
+        # 左相机必定录制
+        cam_left.start_record(session_id=session_id, duration_sec=3)
+
+        # 只有当右相机激活时才录制右侧
+        if cam_right.is_active:
+            cam_right.start_record(session_id=session_id, duration_sec=3)
 
     print(f"📢 开始录制批次: {session_id} (单目/双目模式已自动识别)")
 
-    if esp32_serial:
-        record_workflow_active.set()
-        with serial_write_lock:
-            sensor_record_start_ns = time.time_ns()
-            esp32_serial.write(b's')
+    if serial_ready:
 
         def stop_esp_recording():
             try:
                 time.sleep(3.0)
-                with serial_write_lock:
-                    sensor_record_stop_ns = time.time_ns()
-                    esp32_serial.write(b'p')
+                sensor_record_stop_ns = time.time_ns()
+                write_esp32_record_command(b'p')
                 time.sleep(0.2)
                 copy_latest_sd_log_to_session(
                     session_id, sensor_record_start_ns, sensor_record_stop_ns)

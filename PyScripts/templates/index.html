@@ -82,8 +82,10 @@
     </div>
     
     <div class="btn-group">
+        <button id="snapshot-btn" class="btn-snapshot" onclick="captureSnapshot()">📸 保存当前双目图片</button>
         <button id="rec-btn" onclick="startRecord()">🔴 记录多源融合数据 (3秒)</button>
         <button id="speed-rec-btn" class="btn-speed-record" onclick="toggleSpeedRecord()">📈 开始速度记录</button>
+        <div class="snapshot-status" id="snapshot-status">单张拍摄: 等待</div>
         <div class="speed-record-status" id="speed-record-status">速度记录: 空闲 | 上限 10 min</div>
     </div>
 

@@ -212,6 +212,34 @@ setInterval(() => {
 }, 100);
 
 // --- 录制功能 ---
+function captureSnapshot() {
+    const btn = document.getElementById('snapshot-btn');
+    const status = document.getElementById('snapshot-status');
+    btn.disabled = true;
+    btn.innerText = "⏳ 正在保存...";
+    status.innerText = "单张拍摄: 正在读取左右摄像头";
+
+    fetch('/capture_snapshot', { method: 'POST', cache: 'no-store' })
+        .then(async response => {
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.message || '单张拍摄失败');
+            }
+            return data;
+        })
+        .then(data => {
+            status.innerText = `单张拍摄: 已保存 ${data.folder}/left.jpg 和 right.jpg`;
+        })
+        .catch(error => {
+            console.error("单张拍摄失败:", error);
+            status.innerText = `单张拍摄失败: ${error.message}`;
+        })
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerText = "📸 保存当前双目图片";
+        });
+}
+
 function startRecord() {
     const btn = document.getElementById('rec-btn');
     btn.disabled = true;
