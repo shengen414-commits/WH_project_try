@@ -29,7 +29,7 @@ SD_COPY_STOP_STABLE_SEC = 1.2
 SD_COPY_WAIT_LOG_SEC = 5.0
 SD_COPY_TIMEOUT_SEC = 8.0
 SERIAL_INPUT_FLUSH_THRESHOLD = 2048
-SERIAL_IDLE_SLEEP_SEC = 0.001
+SERIAL_IDLE_SLEEP_SEC = 0.005
 SERIAL_DEBUG_PRINT = True
 SERIAL_DEBUG_MIN_INTERVAL_SEC = 0.5
 BRAKE_REVERSE_DURATION_SEC = 2.00
@@ -693,7 +693,7 @@ def read_esp32_data():
                         sensor_state["last_drive_line"] = line
             else:
                 # Avoid a tight Python loop monopolizing the GIL while the
-                # ESP32 is quiet. 1 ms is still well below its 10 ms sample interval.
+                # ESP32 is quiet. 5 ms is still below its 10 ms sample interval.
                 time.sleep(SERIAL_IDLE_SLEEP_SEC)
         except Exception as e:
             time.sleep(0.1)
@@ -724,7 +724,9 @@ class HighSpeedCamera:
         # 如果是右眼，初始状态设为休眠
         self.is_active = False if name == "Right" else True
 
-        self.buffer = deque(maxlen=int(fps * 2.0))
+        # 这里只供网页预览和单张快照读取“最新帧”；高速录像有独立列表。
+        # 保留 2 帧即可，避免常驻 420 张 640x480 BGR 图像（约 369 MiB）。
+        self.buffer = deque(maxlen=2)
         self.latest_frame_ns = 0
         self.running = True
         self.real_fps = 0.0
@@ -754,14 +756,27 @@ class HighSpeedCamera:
             self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            # 注释掉 FPS 设置以防触发驱动重置 (根据你之前的硬件反馈)
-            self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+            # 请求摄像头实际支持的 210 FPS 高速档位。
+            fps_set = self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
 
-            # 🚀 极其关键的漏网之鱼：强行把底层缓存池设为 1，拒绝积压历史画面！
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # 不再强制 CAP_PROP_BUFFERSIZE=1。OpenCV V4L2 默认使用 4 个
+            # mmap 缓冲，使摄像头采集下一帧和当前帧解码能够流水并行。
+            actual_fourcc_value = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+            actual_fourcc = "".join(
+                chr((actual_fourcc_value >> (8 * i)) & 0xFF) for i in range(4)
+            )
+            actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            actual_buffers = int(self.cap.get(cv2.CAP_PROP_BUFFERSIZE))
 
             self.available = True
-            print(f"✅ [{self.name}] 摄像头硬件已连接并初始化。")
+            print(
+                f"✅ [{self.name}] 摄像头已初始化: "
+                f"{actual_fourcc} {actual_width}x{actual_height} "
+                f"@ {actual_fps:.1f} FPS, V4L2 buffers={actual_buffers}, "
+                f"fps_set={fps_set}"
+            )
 
     def _close_camera(self):
         """释放底层硬件"""
@@ -795,11 +810,13 @@ class HighSpeedCamera:
         return True
 
     def _update(self):
-        prev_time = time.time()
-        frame_count = 0
+        stat_started_at = time.perf_counter()
+        stat_frame_count = 0
         while self.running:
             # 如果处于休眠状态，或者硬件不可用，则挂起线程
             if not self.is_active or not self.available:
+                stat_started_at = time.perf_counter()
+                stat_frame_count = 0
                 time.sleep(0.5)
                 continue
 
@@ -810,7 +827,9 @@ class HighSpeedCamera:
                 self.latest_frame_ns = curr_ns
 
                 if self.is_recording:
-                    self.record_frames.append((curr_ns, frame.copy()))
+                    # cap.read() 每次返回独立 ndarray；直接保留引用，避免每帧再复制
+                    # 约 0.88 MiB 数据。预览路径读取时会自行 copy，不会修改此帧。
+                    self.record_frames.append((curr_ns, frame))
                     if len(self.record_frames) >= self.record_target_count:
                         self.is_recording = False
                         frames_to_save = self.record_frames
@@ -818,11 +837,14 @@ class HighSpeedCamera:
                         threading.Thread(target=self._save_images_to_disk,
                                          args=(frames_to_save, self.record_session_id)).start()
 
-                frame_count += 1
-                if frame_count % 20 == 0:
-                    curr_time = time.time()
-                    self.real_fps = 20 / (curr_time - prev_time)
-                    prev_time = curr_time
+                stat_frame_count += 1
+                if stat_frame_count >= 100:
+                    stat_now = time.perf_counter()
+                    elapsed = stat_now - stat_started_at
+                    if elapsed > 0:
+                        self.real_fps = stat_frame_count / elapsed
+                    stat_started_at = stat_now
+                    stat_frame_count = 0
             else:
                 time.sleep(0.01)
 
