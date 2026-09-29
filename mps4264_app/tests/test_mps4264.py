@@ -1,0 +1,208 @@
+import csv
+import socket
+import struct
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+
+from mps4264_app import MPS4264Controller
+from mps4264_app.protocol import FAST_TYPE, NORMAL_TYPE, convert_binary_to_csv, decode_frame
+from mps4264_app.web import create_app
+
+
+def make_frame(number=1, packet_type=NORMAL_TYPE, units=23):
+    raw = bytearray(348)
+    struct.pack_into(">4I", raw, 0, packet_type, 348, number, 249)
+    struct.pack_into(">f", raw, 16, 5.0)
+    struct.pack_into(">2I", raw, 20, 0, units)
+    struct.pack_into(">f", raw, 28, 6894.759766)
+    values = [float(i) for i in range(1, 65)] if units != 27 else list(range(1, 65))
+    struct.pack_into(">64f" if units != 27 else ">64i", raw, 76, *values)
+    struct.pack_into(">4I", raw, 332, 12, 500_000_000, 0, 0)
+    return bytes(raw)
+
+
+class FakeDevice:
+    def __init__(self, udp_port):
+        self.udp_port = udp_port
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(2)
+        self.listener.settimeout(0.2)
+        self.port = self.listener.getsockname()[1]
+        self.stop = threading.Event()
+        self.commands = []
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        while not self.stop.is_set():
+            try:
+                client, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with client:
+                client.settimeout(0.2)
+                client.sendall(b"Mock MPS4264\r\n>")
+                buffer = b""
+                while not self.stop.is_set():
+                    try:
+                        chunk = client.recv(4096)
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    while b"\r" in buffer:
+                        command, buffer = buffer.split(b"\r", 1)
+                        decoded = command.decode("ascii", errors="replace")
+                        self.commands.append(decoded)
+                        if decoded == "SCAN":
+                            threading.Thread(target=self._send_udp, daemon=True).start()
+                        elif decoded == "LIST S":
+                            client.sendall(b"SET RATE 5.0000\r\nSET FPS 3\r\nSET OPTIONS 0 0 16\r\n>")
+                        elif decoded == "LIST UDP":
+                            client.sendall(f"SET ENUDP 1\r\nSET IPUDP 127.0.0.1 {self.udp_port}\r\n>".encode())
+                        else:
+                            try:
+                                client.sendall((decoded + "\r\n>").encode())
+                            except OSError:
+                                break
+
+    def _send_udp(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            for number in (1, 2, 3):
+                udp.sendto(make_frame(number), ("127.0.0.1", self.udp_port))
+                time.sleep(0.02)
+
+    def close(self):
+        self.stop.set()
+        self.listener.close()
+        self.thread.join(timeout=2)
+
+
+class ProtocolTests(unittest.TestCase):
+    def test_normal_and_raw_decoding(self):
+        frame = decode_frame(make_frame())
+        self.assertEqual(frame.frame_number, 1)
+        self.assertEqual(frame.pressures[0], 1.0)
+        self.assertEqual(frame.pressures[-1], 64.0)
+        self.assertEqual(frame.frame_time_sec, 12.5)
+        raw = decode_frame(make_frame(units=27))
+        self.assertEqual(raw.units_index, 27)
+        self.assertEqual(raw.pressures[63], 64)
+
+    def test_fast_group_masks_other_channels(self):
+        frame = decode_frame(make_frame(packet_type=FAST_TYPE))
+        values = frame.display_pressures(1)
+        self.assertEqual(values[0], 1.0)
+        self.assertIsNone(values[1])
+        self.assertEqual(values[63], 64.0)
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / "fast.dat", Path(directory) / "fast.csv"
+            source.write_bytes(make_frame(packet_type=FAST_TYPE))
+            with self.assertRaises(ValueError):
+                convert_binary_to_csv(source, target)
+            result = convert_binary_to_csv(source, target, fast_group=1)
+            self.assertEqual(result["frames"], 1)
+            with target.open(encoding="utf-8", newline="") as file:
+                row = next(csv.DictReader(file))
+            self.assertEqual(row["P01"], "1.0")
+            self.assertEqual(row["P02"], "")
+
+
+class ControllerTests(unittest.TestCase):
+    def test_full_capture_and_importable_api(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reserved = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            reserved.bind(("127.0.0.1", 0))
+            udp_port = reserved.getsockname()[1]
+            reserved.close()
+            fake = FakeDevice(udp_port)
+            service = MPS4264Controller(directory)
+            try:
+                service.connect("127.0.0.1", fake.port)
+                service.device_info()
+                service.set_parameters(5, 3, 0)
+                service.new_file("trial", udp_port)
+                service.scan()
+                deadline = time.monotonic() + 3
+                while service.status()["frames_received"] < 3 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(service.status()["frames_received"], 3)
+                service.stop()
+                service.close_file()
+                result = service.convert_file("trial.dat")
+                self.assertEqual(result["frames"], 3)
+                self.assertEqual((Path(directory) / "trial.dat").stat().st_size, 3 * 348)
+                self.assertTrue((Path(directory) / "trial.index.csv").is_file())
+                self.assertTrue((Path(directory) / "trial.meta.json").is_file())
+                self.assertIn("SCAN", fake.commands)
+                self.assertIn("STOP", fake.commands)
+                service.disconnect()
+            finally:
+                fake.close()
+
+    def test_dashboard_without_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = create_app(MPS4264Controller(directory))
+            client = app.test_client()
+            self.assertEqual(client.get("/").status_code, 200)
+            self.assertFalse(client.get("/api/status").json["connected"])
+            self.assertEqual(client.post("/api/calz", json={}).status_code, 400)
+
+    def test_dashboard_full_workflow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reserved = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            reserved.bind(("127.0.0.1", 0))
+            udp_port = reserved.getsockname()[1]
+            reserved.close()
+            fake = FakeDevice(udp_port)
+            service = MPS4264Controller(directory)
+            app = create_app(service)
+            browser = app.test_client()
+            try:
+                self.assertEqual(browser.post("/api/connect", json={
+                    "device_ip": "127.0.0.1", "control_port": fake.port}).status_code, 200)
+                self.assertEqual(browser.post("/api/device-info", json={}).status_code, 200)
+                configured = browser.post("/api/configure-udp", json={
+                    "host_ip": "127.0.0.1", "udp_port": udp_port})
+                self.assertTrue(configured.json["reboot_required"])
+                self.assertEqual(browser.post("/api/connect", json={
+                    "device_ip": "127.0.0.1", "control_port": fake.port,
+                    "confirm_reboot": True}).status_code, 200)
+                self.assertEqual(browser.post("/api/parameters", json={
+                    "rate": 5, "fps": 3, "fast_group": 0,
+                    "read_mode": 0, "subset_size": 16}).status_code, 200)
+                self.assertEqual(browser.post("/api/new-file", json={
+                    "name": "web_trial", "udp_port": udp_port}).status_code, 200)
+                self.assertEqual(browser.post("/api/scan", json={}).status_code, 200)
+                deadline = time.monotonic() + 3
+                while service.status()["frames_received"] < 3 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(service.status()["frames_received"], 3)
+                self.assertEqual(browser.post("/api/stop", json={}).status_code, 200)
+                self.assertEqual(browser.post("/api/close-file", json={}).status_code, 200)
+                self.assertEqual(browser.post("/api/convert", json={
+                    "filename": "web_trial.dat"}).status_code, 202)
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    job = browser.get("/api/convert-status").json
+                    if job["state"] != "running":
+                        break
+                    time.sleep(0.02)
+                self.assertEqual(job["state"], "done")
+                self.assertEqual(job["result"]["frames"], 3)
+                self.assertEqual(browser.post("/api/disconnect", json={}).status_code, 200)
+            finally:
+                fake.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

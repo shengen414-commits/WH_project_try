@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MPS4264 压力扫描控制台</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div><div class="eyebrow">SCANIVALVE · GEN1</div><h1>MPS4264 压力扫描控制台</h1></div>
+    <div class="top-right"><span id="connection-light" class="light"></span><span id="connection-text">未连接</span><span id="clock"></span></div>
+  </header>
+  <main>
+    <div id="message" class="message" role="status">请先核对设备铭牌和 IP，再连接。</div>
+
+    <section class="metrics">
+      <div class="metric"><span>采集状态</span><strong id="scan-state">待机</strong></div>
+      <div class="metric"><span>已接收帧</span><strong id="frame-count">0</strong></div>
+      <div class="metric"><span>帧号缺口</span><strong id="gap-count">0</strong></div>
+      <div class="metric"><span>无效 UDP 包</span><strong id="bad-count">0</strong></div>
+      <div class="metric"><span>最新帧号</span><strong id="last-frame-number">—</strong></div>
+      <div class="metric"><span>压力单位</span><strong id="units">—</strong></div>
+    </section>
+
+    <div class="columns">
+      <section class="card">
+        <div class="card-head"><h2>01 · 连接设备</h2><span class="tag">TCP 控制</span></div>
+        <div class="form-grid two">
+          <label>设备 IP<input id="device-ip" inputmode="decimal" placeholder="以铭牌/LIST IP 为准"></label>
+          <label>TCP 端口<input id="control-port" type="number" min="1" max="65535" value="23"></label>
+        </div>
+        <div class="actions">
+          <button id="connect-btn">连接</button>
+          <button id="reconnect-btn" class="secondary">已重启，重新连接</button>
+          <button id="info-btn" class="secondary">读取设备信息</button>
+          <button id="disconnect-btn" class="quiet">断开设备</button>
+        </div>
+        <p class="hint">读取设备信息会新建/使用控制连接；不要在其他软件正扫描时操作。</p>
+        <details><summary>设备返回信息</summary><pre id="device-info">尚未查询</pre></details>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>02 · UDP 数据路径</h2><span class="tag">接收地址</span></div>
+        <div class="form-grid two">
+          <label>Orange Pi 网口 IP<input id="host-ip" inputmode="decimal" placeholder="必须是本机实际地址"></label>
+          <label>UDP 端口<input id="udp-port" type="number" min="1" max="65535" value="50023"></label>
+        </div>
+        <div class="actions"><button id="configure-btn" class="secondary">设置二进制 UDP + SAVE</button></div>
+        <p class="hint warn">此操作会修改设备配置。等待 SAVE 完成后，须给设备断电重启，再点“已重启，重新连接”。TCP 23 与 UDP 数据端口是两回事。</p>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>03 · 扫描参数</h2><span class="tag">SET</span></div>
+        <div class="form-grid three">
+          <label>RATE / Hz<input id="rate" type="number" min="0.25" max="2500" step="any" value="5"></label>
+          <label>FPS / 帧<input id="fps" type="number" min="0" step="1" value="100"></label>
+          <label>OPTIONS 组<select id="fast-group"><option value="0">0 · 64 路</option><option value="1">1 · 快速 16 路</option><option value="2">2 · 快速 16 路</option><option value="3">3 · 快速 16 路</option><option value="4">4 · 快速 16 路</option></select></label>
+          <label>OPTIONS 读取模式<select id="read-mode"><option value="0">0</option><option value="1">1</option></select></label>
+          <label>OPTIONS 子集<input id="subset-size" type="number" min="2" max="256" value="16"></label>
+        </div>
+        <div class="actions"><button id="set-btn">发送 SET</button><button id="save-btn" class="secondary">保存配置 SAVE</button></div>
+        <p class="hint">64 路最高 850 Hz；2500 Hz 时仅选定的 16 路有效。FPS=0 将持续扫描直到 STOP。</p>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>04 · 采集与文件</h2><span class="tag">.dat → .csv</span></div>
+        <label>新文件名（自动保存到 recordings）<input id="file-name" maxlength="64" placeholder="例如 test_001；不写 .dat"></label>
+        <div class="actions">
+          <button id="new-file-btn">新建文件</button>
+          <button id="scan-btn" class="accent">SCAN 开始</button>
+          <button id="stop-btn" class="danger">STOP 停止</button>
+          <button id="close-btn" class="secondary">关闭文件</button>
+        </div>
+        <p class="hint">顺序：新建文件并监听 UDP → SCAN → STOP → 关闭文件 → 转换 CSV。原始二进制始终保留。</p>
+        <div class="divider"></div>
+        <div class="form-grid two">
+          <label>待转换二进制文件<select id="convert-file"><option value="">选择 .dat 文件</option></select></label>
+          <label>快速扫描组（留空时读记录元数据）<select id="convert-group"><option value="">自动</option><option value="1">组 1</option><option value="2">组 2</option><option value="3">组 3</option><option value="4">组 4</option></select></label>
+        </div>
+        <div class="actions"><button id="refresh-files-btn" class="quiet">刷新文件列表</button><button id="convert-btn" class="secondary">转换二进制为 CSV</button></div>
+        <p id="convert-status" class="hint">尚无转换任务。</p>
+      </section>
+    </div>
+
+    <section class="card chart-card">
+      <div class="card-head"><h2>实时压力预览</h2><span class="tag">只显示抽样 · 原始帧全部写盘</span></div>
+      <div class="chart-options"><label>预览通道（逗号分隔，最多 6 路）<input id="chart-channels" value="1,2,3,4"></label><span id="chart-note">等待数据</span></div>
+      <canvas id="pressure-chart" width="1100" height="330" aria-label="压力趋势图"></canvas>
+      <details><summary>查看 64 路最新值</summary><div id="channel-grid" class="channel-grid"></div></details>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>校零与事件</h2><span class="tag">CALZ</span></div>
+      <p class="hint warn">仅在 CAL/REF 等压，或 PX 状态下无风、无测点压差时校零。不要在未知压力作用下盲目执行。</p>
+      <button id="calz-btn" class="secondary">执行 CALZ 校零</button>
+      <div id="events" class="events"></div>
+    </section>
+  </main>
+</body>
+</html>
