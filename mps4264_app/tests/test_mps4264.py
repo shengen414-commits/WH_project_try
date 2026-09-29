@@ -7,9 +7,10 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mps4264_app import MPS4264Controller
+from mps4264_app.controller import MPSControllerError
 from mps4264_app.protocol import FAST_TYPE, NORMAL_TYPE, convert_binary_to_csv, decode_frame
 from mps4264_app.web import create_app
 from mps4264_app.network import NetworkInitializationError, ensure_ipv4_alias
@@ -162,6 +163,8 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(client.get("/").status_code, 200)
             self.assertIn(b'191.30.90.102', client.get("/").data)
             self.assertIn(b'191.30.90.82', client.get("/").data)
+            self.assertIn(b'id="udp-port" type="number" min="1" max="65535" value="23"', client.get("/").data)
+            self.assertEqual(client.get("/api/status").json["udp_port"], 23)
             self.assertFalse(client.get("/api/status").json["connected"])
             self.assertEqual(client.post("/api/calz", json={}).status_code, 400)
             self.assertEqual(client.post("/api/command", json={"command": "STATUS"}).status_code, 409)
@@ -186,6 +189,7 @@ class ControllerTests(unittest.TestCase):
                 configured = browser.post("/api/configure-udp", json={
                     "host_ip": "127.0.0.1", "udp_port": udp_port})
                 self.assertTrue(configured.json["reboot_required"])
+                self.assertIn("SET FORMAT B B", fake.commands)
                 self.assertEqual(browser.post("/api/connect", json={
                     "device_ip": "127.0.0.1", "control_port": fake.port,
                     "confirm_reboot": True}).status_code, 200)
@@ -218,7 +222,37 @@ class ControllerTests(unittest.TestCase):
                 fake.close()
 
 
+class LowPortTests(unittest.TestCase):
+    def test_default_udp_port_permission_error_is_actionable(self):
+        udp = Mock()
+        udp.bind.side_effect = PermissionError(13, "Permission denied")
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("mps4264_app.controller.socket.socket", return_value=udp):
+            service = MPS4264Controller(directory)
+            with self.assertRaisesRegex(MPSControllerError, "CAP_NET_BIND_SERVICE"):
+                service.new_file("low_port")
+            self.assertFalse((Path(directory) / "low_port.dat").exists())
+        udp.bind.assert_called_once_with(("0.0.0.0", 23))
+        udp.close.assert_called_once()
+
+
 class NetworkInitializationTests(unittest.TestCase):
+    def test_eth0_without_ipv4_is_still_detected(self):
+        devices = [
+            {"ifname": "wlan0", "flags": ["UP"],
+             "addr_info": [{"family": "inet", "local": "192.168.1.5", "prefixlen": 24}]},
+            {"ifname": "eth0", "flags": ["BROADCAST", "UP", "LOWER_UP"],
+             "addr_info": [{"family": "inet6", "local": "fe80::1234", "prefixlen": 64}]},
+        ]
+        completed = type("Completed", (), {"returncode": 0, "stdout": json.dumps(devices), "stderr": ""})()
+        with patch("mps4264_app.network.platform.system", return_value="Linux"), \
+                patch("mps4264_app.network._run_ip", return_value=completed) as run_ip, \
+                patch("mps4264_app.network._run_privileged") as privileged:
+            result = ensure_ipv4_alias("eth0", "191.30.90.82/16")
+        run_ip.assert_called_once_with(["-j", "address", "show"])
+        self.assertTrue(result["added"])
+        privileged.assert_called_once_with(["address", "add", "191.30.90.82/16", "dev", "eth0"])
+
     def test_adds_only_missing_address(self):
         devices = [{"ifname": "eth0", "flags": ["UP"],
                     "addr_info": [{"family": "inet", "local": "192.168.1.5", "prefixlen": 24}]}]

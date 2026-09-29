@@ -45,7 +45,7 @@
         <div class="card-head"><h2>02 · UDP 数据路径</h2><span class="tag">接收地址</span></div>
         <div class="form-grid two">
           <label>Orange Pi 网口 IP<input id="host-ip" inputmode="decimal" value="{{ default_host_ip }}" placeholder="必须是本机实际地址"></label>
-          <label>UDP 端口<input id="udp-port" type="number" min="1" max="65535" value="50023"></label>
+          <label>UDP 端口<input id="udp-port" type="number" min="1" max="65535" value="23"></label>
         </div>
         <div class="actions"><button id="configure-btn" class="secondary">设置二进制 UDP + SAVE</button></div>
         <p class="hint warn">此操作会修改设备配置。等待 SAVE 完成后，须给设备断电重启，再点“已重启，重新连接”。TCP 23 与 UDP 数据端口是两回事。</p>

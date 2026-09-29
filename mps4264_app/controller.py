@@ -39,7 +39,7 @@ class MPS4264Controller:
         self._device_ip: str | None = None
         self._device_port = 23
         self._udp_target_ip: str | None = None
-        self._udp_port = 50023
+        self._udp_port = 23
         self._listen_port: int | None = None
         self._udp_socket: socket.socket | None = None
         self._capture_thread: threading.Thread | None = None
@@ -165,7 +165,7 @@ class MPS4264Controller:
             self._log(f"已 SET RATE={rate:g}, FPS={fps}, OPTIONS={fast_group} {read_mode} {subset_size}")
             return response
 
-    def configure_udp(self, host_ip: str, udp_port: int = 50023) -> dict:
+    def configure_udp(self, host_ip: str, udp_port: int = 23) -> dict:
         address = ipaddress.IPv4Address(host_ip)
         if address.is_unspecified or address.is_multicast:
             raise ValueError("UDP 目标必须是 Orange Pi 的单播 IPv4 地址")
@@ -175,7 +175,7 @@ class MPS4264Controller:
             client = self._require_idle()
             if self._raw_file is not None:
                 raise MPSControllerError("请先关闭文件再修改 UDP 目标")
-            commands = ("SET FORMAT F B", "SET TRIG 0", "SET ENFTP 0",
+            commands = ("SET FORMAT B B", "SET TRIG 0", "SET ENFTP 0",
                         "SET ENUDP 1", "SET SVRSEL 3",
                         f"SET IPUDP {host_ip} {udp_port}", "SAVE")
             responses = {command: client.command(command, 120 if command == "SAVE" else 10)
@@ -279,7 +279,14 @@ class MPS4264Controller:
             udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
             udp.settimeout(0.2)
             try:
-                udp.bind(("0.0.0.0", port))
+                try:
+                    udp.bind(("0.0.0.0", port))
+                except PermissionError as exc:
+                    if port < 1024:
+                        raise MPSControllerError(
+                            f"无法监听 UDP {port}：当前用户没有绑定低端口权限；"
+                            "请为此服务授予 CAP_NET_BIND_SERVICE，或将设备和面板改用高端口") from exc
+                    raise
                 raw = raw_path.open("xb", buffering=4 * 1024 * 1024)
                 try:
                     index = index_path.open("x", newline="", encoding="utf-8", buffering=1024 * 1024)

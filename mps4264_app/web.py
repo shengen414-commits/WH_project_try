@@ -74,7 +74,7 @@ def create_app(controller: MPS4264Controller | None = None,
     def configure_udp():
         data = body()
         return jsonify(service.configure_udp(str(data.get("host_ip", "")),
-                                              int(data.get("udp_port", 50023))))
+                                              int(data.get("udp_port", 23))))
 
     @app.post("/api/parameters")
     def parameters():

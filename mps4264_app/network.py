@@ -54,13 +54,15 @@ def ensure_ipv4_alias(interface: str = "eth0", cidr: str = "191.30.90.82/16") ->
     if not interface or any(char.isspace() or char in "/\\" for char in interface):
         raise NetworkInitializationError("无效网口名")
 
-    result = _run_ip(["-j", "-4", "address", "show"])
+    # Do not filter by -4 here: on some iproute2 versions a link without any
+    # IPv4 address is omitted, even though the Ethernet interface exists.
+    result = _run_ip(["-j", "address", "show"])
     if result.returncode != 0:
         raise NetworkInitializationError(f"读取网口地址失败：{result.stderr.strip()}")
     try:
         devices = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise NetworkInitializationError("无法解析 ip -j 的网口信息") from exc
+        raise NetworkInitializationError("无法解析 ip -j address show 的网口信息") from exc
     target = next((item for item in devices if item.get("ifname") == interface), None)
     if target is None:
         raise NetworkInitializationError(f"找不到网口 {interface}；请先用 ip -br link 核对接口名")
