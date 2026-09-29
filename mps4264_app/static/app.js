@@ -48,14 +48,57 @@ const ip = () => $("device-ip").value.trim();
 const port = () => Number($("control-port").value);
 const udpPort = () => Number($("udp-port").value);
 
+function appendTerminal(text) {
+  const output = $("terminal-output");
+  const timestamp = new Date().toLocaleTimeString();
+  output.textContent = `${output.textContent}[${timestamp}] ${text}\n`.slice(-30000);
+  output.scrollTop = output.scrollHeight;
+}
+
+async function sendTerminalCommand(command) {
+  const line = command.trim();
+  if (!line) return;
+  let confirmed = false;
+  if (line.toUpperCase() === "CALZ") {
+    confirmed = confirm("确认当前满足 CALZ 校零条件：CAL/REF 等压，或 PX 状态下无风、无测点压差？");
+    if (!confirmed) return;
+  }
+  const button = $("terminal-send");
+  button.disabled = true;
+  appendTerminal(`> ${line}`);
+  try {
+    const result = await api("/api/command", {
+      command: line, zero_pressure_confirmed: confirmed,
+    });
+    appendTerminal(result.response.trimEnd());
+    showMessage(`命令 ${line} 已完成。`);
+    await refreshStatus();
+  } catch (error) {
+    appendTerminal(`ERROR: ${error.message}`);
+    showMessage(error.message, true);
+  } finally {
+    button.disabled = false;
+    $("terminal-input").focus();
+  }
+}
+
+$("terminal-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = $("terminal-input");
+  const line = input.value;
+  input.value = "";
+  sendTerminalCommand(line);
+});
+document.querySelectorAll("[data-command]").forEach((button) => {
+  button.addEventListener("click", () => sendTerminalCommand(button.dataset.command));
+});
+
 onClick("connect-btn", () => api("/api/connect", { device_ip: ip(), control_port: port() }), "设备已连接，可读取信息。");
 onClick("reconnect-btn", () => api("/api/connect", { device_ip: ip(), control_port: port(), confirm_reboot: true }), "已按重启后的设备重新连接；请读取设备信息核对 UDP 设置。");
 onClick("disconnect-btn", () => api("/api/disconnect", {}), "设备已断开，采集文件已安全关闭。");
 onClick("info-btn", async () => {
   const data = await api("/api/device-info", {});
   $("device-info").textContent = Object.entries(data.info).map(([key, value]) => `>>> ${key}\n${value}`).join("\n\n");
-  const match = data.info["LIST UDP"].match(/SET IPUDP\s+([\d.]+)\s+(\d+)/i);
-  if (match) { $("host-ip").value = match[1]; $("udp-port").value = match[2]; }
   return data;
 }, "设备信息已读取。请核对阀位 PX、UDP 目标和扫描设置。");
 
@@ -159,6 +202,13 @@ async function refreshStatus() {
   $("connection-text").textContent = state.connected ? `已连接 ${state.device_ip}` : "未连接";
   $("scan-state").textContent = state.scanning ? "扫描中" : state.file_open ? "文件待命" : "待机";
   $("frame-count").textContent = state.frames_received.toLocaleString();
+  $("byte-count").textContent = state.bytes_received.toLocaleString();
+  $("saved-byte-count").textContent = state.bytes_saved.toLocaleString();
+  $("byte-human").textContent = state.bytes_received >= 1048576
+    ? `${(state.bytes_received / 1048576).toFixed(2)} MiB`
+    : state.bytes_received >= 1024
+      ? `${(state.bytes_received / 1024).toFixed(1)} KiB`
+      : `${state.bytes_received} B`;
   $("gap-count").textContent = state.frame_gaps.toLocaleString();
   $("bad-count").textContent = state.bad_datagrams.toLocaleString();
   $("last-frame-number").textContent = state.last_frame ? state.last_frame.number : "—";

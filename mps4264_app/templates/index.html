@@ -28,7 +28,7 @@
       <section class="card">
         <div class="card-head"><h2>01 · 连接设备</h2><span class="tag">TCP 控制</span></div>
         <div class="form-grid two">
-          <label>设备 IP<input id="device-ip" inputmode="decimal" placeholder="以铭牌/LIST IP 为准"></label>
+          <label>设备 IP<input id="device-ip" inputmode="decimal" value="{{ default_device_ip }}" placeholder="以铭牌/LIST IP 为准"></label>
           <label>TCP 端口<input id="control-port" type="number" min="1" max="65535" value="23"></label>
         </div>
         <div class="actions">
@@ -44,7 +44,7 @@
       <section class="card">
         <div class="card-head"><h2>02 · UDP 数据路径</h2><span class="tag">接收地址</span></div>
         <div class="form-grid two">
-          <label>Orange Pi 网口 IP<input id="host-ip" inputmode="decimal" placeholder="必须是本机实际地址"></label>
+          <label>Orange Pi 网口 IP<input id="host-ip" inputmode="decimal" value="{{ default_host_ip }}" placeholder="必须是本机实际地址"></label>
           <label>UDP 端口<input id="udp-port" type="number" min="1" max="65535" value="50023"></label>
         </div>
         <div class="actions"><button id="configure-btn" class="secondary">设置二进制 UDP + SAVE</button></div>
@@ -73,6 +73,10 @@
           <button id="stop-btn" class="danger">STOP 停止</button>
           <button id="close-btn" class="secondary">关闭文件</button>
         </div>
+        <div class="byte-counter" aria-live="polite">
+          <div><span class="byte-label">UDP Byte Counter</span><strong id="byte-count">0</strong><span class="byte-unit">Bytes received</span></div>
+          <div class="byte-secondary"><span id="byte-human">0 B</span><span>有效帧 <b id="saved-byte-count">0</b> B</span></div>
+        </div>
         <p class="hint">顺序：新建文件并监听 UDP → SCAN → STOP → 关闭文件 → 转换 CSV。原始二进制始终保留。</p>
         <div class="divider"></div>
         <div class="form-grid two">
@@ -83,6 +87,26 @@
         <p id="convert-status" class="hint">尚无转换任务。</p>
       </section>
     </div>
+
+    <section class="card terminal-card">
+      <div class="card-head"><h2>设备命令窗口</h2><span class="tag">TCP 23 · ScanTel 风格</span></div>
+      <p class="hint">连接后可输入单行设备命令并查看原样回显。SCAN、STOP、CALZ 会走采集管理流程；扫描期间仅允许 STOP，以免破坏采集状态。</p>
+      <div class="terminal-presets">
+        <button type="button" data-command="VER" class="quiet">VER</button>
+        <button type="button" data-command="STATUS" class="quiet">STATUS</button>
+        <button type="button" data-command="VALVESTATE" class="quiet">VALVESTATE</button>
+        <button type="button" data-command="LIST S" class="quiet">LIST S</button>
+        <button type="button" data-command="LIST M" class="quiet">LIST M</button>
+        <button type="button" data-command="LIST UDP" class="quiet">LIST UDP</button>
+      </div>
+      <pre id="terminal-output" class="terminal-output" role="log" aria-live="polite">MPS4264 console ready. 请先连接设备。
+</pre>
+      <form id="terminal-form" class="terminal-form">
+        <span class="prompt">&gt;</span>
+        <input id="terminal-input" autocomplete="off" spellcheck="false" maxlength="79" placeholder="输入设备命令，例如 LIST S">
+        <button id="terminal-send" type="submit">发送命令</button>
+      </form>
+    </section>
 
     <section class="card chart-card">
       <div class="card-head"><h2>实时压力预览</h2><span class="tag">只显示抽样 · 原始帧全部写盘</span></div>

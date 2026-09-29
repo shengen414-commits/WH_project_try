@@ -1,4 +1,5 @@
 import csv
+import json
 import socket
 import struct
 import tempfile
@@ -6,10 +7,12 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mps4264_app import MPS4264Controller
 from mps4264_app.protocol import FAST_TYPE, NORMAL_TYPE, convert_binary_to_csv, decode_frame
 from mps4264_app.web import create_app
+from mps4264_app.network import NetworkInitializationError, ensure_ipv4_alias
 
 
 def make_frame(number=1, packet_type=NORMAL_TYPE, units=23):
@@ -129,6 +132,7 @@ class ControllerTests(unittest.TestCase):
             try:
                 service.connect("127.0.0.1", fake.port)
                 service.device_info()
+                self.assertIn("STATUS", service.send_command("STATUS")["response"])
                 service.set_parameters(5, 3, 0)
                 service.new_file("trial", udp_port)
                 service.scan()
@@ -136,6 +140,8 @@ class ControllerTests(unittest.TestCase):
                 while service.status()["frames_received"] < 3 and time.monotonic() < deadline:
                     time.sleep(0.02)
                 self.assertEqual(service.status()["frames_received"], 3)
+                self.assertEqual(service.status()["bytes_received"], 3 * 348)
+                self.assertEqual(service.status()["bytes_saved"], 3 * 348)
                 service.stop()
                 service.close_file()
                 result = service.convert_file("trial.dat")
@@ -154,8 +160,11 @@ class ControllerTests(unittest.TestCase):
             app = create_app(MPS4264Controller(directory))
             client = app.test_client()
             self.assertEqual(client.get("/").status_code, 200)
+            self.assertIn(b'191.30.90.102', client.get("/").data)
+            self.assertIn(b'191.30.90.82', client.get("/").data)
             self.assertFalse(client.get("/api/status").json["connected"])
             self.assertEqual(client.post("/api/calz", json={}).status_code, 400)
+            self.assertEqual(client.post("/api/command", json={"command": "STATUS"}).status_code, 409)
 
     def test_dashboard_full_workflow(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -171,6 +180,9 @@ class ControllerTests(unittest.TestCase):
                 self.assertEqual(browser.post("/api/connect", json={
                     "device_ip": "127.0.0.1", "control_port": fake.port}).status_code, 200)
                 self.assertEqual(browser.post("/api/device-info", json={}).status_code, 200)
+                command = browser.post("/api/command", json={"command": "LIST S"})
+                self.assertEqual(command.status_code, 200)
+                self.assertIn("SET FPS 3", command.json["response"])
                 configured = browser.post("/api/configure-udp", json={
                     "host_ip": "127.0.0.1", "udp_port": udp_port})
                 self.assertTrue(configured.json["reboot_required"])
@@ -187,6 +199,8 @@ class ControllerTests(unittest.TestCase):
                 while service.status()["frames_received"] < 3 and time.monotonic() < deadline:
                     time.sleep(0.02)
                 self.assertEqual(service.status()["frames_received"], 3)
+                self.assertEqual(browser.get("/api/status").json["bytes_received"], 1044)
+                self.assertEqual(browser.post("/api/command", json={"command": "STATUS"}).status_code, 409)
                 self.assertEqual(browser.post("/api/stop", json={}).status_code, 200)
                 self.assertEqual(browser.post("/api/close-file", json={}).status_code, 200)
                 self.assertEqual(browser.post("/api/convert", json={
@@ -202,6 +216,39 @@ class ControllerTests(unittest.TestCase):
                 self.assertEqual(browser.post("/api/disconnect", json={}).status_code, 200)
             finally:
                 fake.close()
+
+
+class NetworkInitializationTests(unittest.TestCase):
+    def test_adds_only_missing_address(self):
+        devices = [{"ifname": "eth0", "flags": ["UP"],
+                    "addr_info": [{"family": "inet", "local": "192.168.1.5", "prefixlen": 24}]}]
+        completed = type("Completed", (), {"returncode": 0, "stdout": json.dumps(devices), "stderr": ""})()
+        with patch("mps4264_app.network.platform.system", return_value="Linux"), \
+                patch("mps4264_app.network._run_ip", return_value=completed), \
+                patch("mps4264_app.network._run_privileged") as privileged:
+            result = ensure_ipv4_alias("eth0", "191.30.90.82/16")
+        self.assertTrue(result["added"])
+        privileged.assert_called_once_with(["address", "add", "191.30.90.82/16", "dev", "eth0"])
+
+    def test_existing_address_does_not_reconfigure(self):
+        devices = [{"ifname": "eth0", "flags": ["UP"],
+                    "addr_info": [{"family": "inet", "local": "191.30.90.82", "prefixlen": 16}]}]
+        completed = type("Completed", (), {"returncode": 0, "stdout": json.dumps(devices), "stderr": ""})()
+        with patch("mps4264_app.network.platform.system", return_value="Linux"), \
+                patch("mps4264_app.network._run_ip", return_value=completed), \
+                patch("mps4264_app.network._run_privileged") as privileged:
+            result = ensure_ipv4_alias()
+        self.assertFalse(result["added"])
+        privileged.assert_not_called()
+
+    def test_conflicting_mask_is_not_overwritten(self):
+        devices = [{"ifname": "eth0", "flags": ["UP"],
+                    "addr_info": [{"family": "inet", "local": "191.30.90.82", "prefixlen": 24}]}]
+        completed = type("Completed", (), {"returncode": 0, "stdout": json.dumps(devices), "stderr": ""})()
+        with patch("mps4264_app.network.platform.system", return_value="Linux"), \
+                patch("mps4264_app.network._run_ip", return_value=completed):
+            with self.assertRaises(NetworkInitializationError):
+                ensure_ipv4_alias()
 
 
 if __name__ == "__main__":

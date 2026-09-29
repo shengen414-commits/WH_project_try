@@ -13,6 +13,8 @@ pip install flask
 python3 -m mps4264_app.main
 ```
 
+启动时程序会检查 `eth0`：如果没有 `191.30.90.82/16`，会执行等价于 `sudo ip addr add 191.30.90.82/16 dev eth0` 的初始化；已有该地址就跳过，不删除或替换其他地址。页面的设备 IP 默认是 `191.30.90.102`，第二步 Orange Pi 网口 IP 默认是 `191.30.90.82`。首次用普通用户启动前可先执行 `sudo -v`，让后台的非交互式提权能成功；如果作为服务开机自启，需要为网口初始化提供 NET_ADMIN 权限（例如由 systemd 的特权 `ExecStartPre` 完成地址配置），否则程序会明确报错退出，不会静默跳过。网口名称不为 `eth0` 时，启动参数加 `--interface 实际网口名`；网络已由系统配置时可用 `--skip-network-init`。可用 `ip -br addr show eth0` 和 `ping -c 3 191.30.90.102` 检查连通性。
+
 在 Orange Pi 本机浏览器打开 `http://127.0.0.1:5055`。如果从同一可信局域网的另一台电脑访问：
 
 ```bash
@@ -21,23 +23,14 @@ python3 -m mps4264_app.main --host 0.0.0.0 --port 5055
 
 面板没有账号认证；**不要向公网或不可信网络开放**。`recordings/` 自动创建并被本目录 `.gitignore` 忽略。当前项目的 Docker Compose 未映射 UDP 数据端口，首次联调建议在 Orange Pi 主机上直接运行本模块，不放进原有 `wh-dashboard` 容器。
 
-设备需要独立电源和网线；若为 CPx 气动阀，测量时还须确认控制气路与 `VALVESTATE=PX`。本地旧指南的设备/主机示例 IP 互相矛盾，务必读铭牌并用 `LIST IP` 核实。假设设备为 `191.30.90.102/16`、Orange Pi 网口为 `eth0`，可临时配置：
-
-```bash
-ip -br link
-sudo ip addr add 191.30.90.82/16 dev eth0
-sudo ip link set eth0 up
-ping -c 3 191.30.90.102
-```
-
-若网口已有该地址，勿重复添加；接口名应以 `ip -br link` 实际输出为准。
+设备需要独立电源和网线；若为 CPx 气动阀，测量时还须确认控制气路与 `VALVESTATE=PX`。设备实际地址应以现场连通性和 `LIST IP` 为准。启动时的网口地址是临时地址，重启系统后由程序再次按需添加；它不是永久的 Ubuntu 网络配置。
 
 ## 面板操作顺序
 
-1. 输入现场真实设备 IP，连接并“读取设备信息”，核对 `VER`、阀位、`LIST IP/S/M/UDP`。
+1. 输入现场真实设备 IP，连接并“读取设备信息”，核对 `VER`、阀位、`LIST IP/S/M/UDP`。页面下方的设备命令窗口可发送单行 ScanTel 命令（如 `STATUS`、`LIST S`），并显示设备原始回显；SCAN/STOP/CALZ/SAVE 仍走采集状态保护。
 2. 首次把 Windows 主机换成 Orange Pi 时，输入 **Orange Pi 网口 IP**、UDP 端口（默认 50023），点击“设置二进制 UDP + SAVE”。等待保存完成，给设备断电重启，再点击“已重启，重新连接”。这会发送 `SET FORMAT F B`、`SET TRIG 0`、`SET ENFTP 0`、`SET ENUDP 1`、`SET SVRSEL 3`、`SET IPUDP`、`SAVE`。TCP 控制端口 23 和 UDP 数据端口 50023 可不同。
 3. 先设置 `RATE=5`、`FPS=100`、`OPTIONS=0 0 16`，点击“发送 SET”。如需断电后保留，点击 SAVE。正式高频采集再改成 64 路最高 850 Hz；`RATE=2500` 时必须选 OPTIONS 组 1–4，且只有 16 路有效。
-4. 点击“新建文件”先打开并监听 UDP，再点 SCAN。确认帧数增长及数据单位正确。FPS 有限时设备会自行完成采样，但仍应点 STOP 结束本次扫描；然后点“关闭文件”。最后选择 `.dat` 点击“转换二进制为 CSV”。
+4. 点击“新建文件”先打开并监听 UDP，再点 SCAN。确认帧数增长及数据单位正确；04 区的 `UDP Byte Counter` 会实时显示本次扫描收到的 UDP 字节数，旁边同时显示有效帧写入字节数。FPS 有限时设备会自行完成采样，但仍应点 STOP 结束本次扫描；然后点“关闭文件”。最后选择 `.dat` 点击“转换二进制为 CSV”。
 5. CALZ 只在零压/等压条件确认后执行。不要在测点上施加未知压力时校零。
 
 每个记录有 `<name>.dat`（连续的原始 348 字节帧）、`<name>.index.csv`（主机接收时间、设备帧号/时间）、`<name>.meta.json`（参数及丢包统计），转换后生成 `<name>.csv`。单位索引 `23` 表示 Pa，已无需再乘 6894.759766。快速扫描组号不在二进制帧里；本模块录制的文件可从 `.meta.json` 自动读取，外部来源的快速扫描 `.dat` 需手选组号。

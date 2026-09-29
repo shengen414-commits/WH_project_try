@@ -38,6 +38,19 @@ button.danger { background:#6e3035; border-color:#aa565c; }
 .hint { color:#88a8b7; line-height:1.55; font-size:12px; margin:12px 0 0; }
 .warn { color:#eabf83; }
 .divider { border-top:1px solid #254657; margin:18px 0; }
+.byte-counter { display:flex; justify-content:space-between; align-items:end; gap:12px; margin-top:14px; padding:12px 15px; border:1px solid #2d6973; background:#0a2836; border-radius:8px; }
+.byte-counter strong { display:block; font-size:29px; line-height:1.15; color:#8ae0de; font-variant-numeric:tabular-nums; }
+.byte-label,.byte-unit { display:block; font-size:11px; color:#92b8c3; }
+.byte-secondary { text-align:right; color:#a7c3cb; font-size:12px; display:flex; flex-direction:column; gap:5px; }
+.byte-secondary b { font-variant-numeric:tabular-nums; }
+.terminal-card { border-color:#2b6063; }
+.terminal-presets { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0; }
+.terminal-presets button { padding:6px 10px; font-size:11px; font-family:ui-monospace,Consolas,monospace; }
+.terminal-output { min-height:170px; max-height:280px; overflow:auto; margin:0; padding:14px; background:#051219; border:1px solid #2c5360; border-radius:8px 8px 0 0; color:#b7e3d6; font:13px/1.5 ui-monospace,Consolas,monospace; }
+.terminal-form { display:flex; align-items:center; gap:8px; background:#081a24; border:1px solid #2c5360; border-top:0; padding:9px; border-radius:0 0 8px 8px; }
+.terminal-form .prompt { color:#65d6bd; font:bold 19px ui-monospace,Consolas,monospace; }
+.terminal-form input { flex:1; margin:0; border:0; box-shadow:none; background:transparent; font-family:ui-monospace,Consolas,monospace; }
+.terminal-form button { white-space:nowrap; }
 details { margin-top:15px; border-top:1px solid #264557; padding-top:12px; }
 summary { color:#91c7d4; cursor:pointer; font-size:13px; }
 pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:320px; overflow:auto; background:#081723; padding:13px; border-radius:8px; color:#cadfe4; }

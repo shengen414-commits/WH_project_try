@@ -40,6 +40,7 @@ class MPS4264Controller:
         self._device_port = 23
         self._udp_target_ip: str | None = None
         self._udp_port = 50023
+        self._listen_port: int | None = None
         self._udp_socket: socket.socket | None = None
         self._capture_thread: threading.Thread | None = None
         self._capture_stop = threading.Event()
@@ -54,6 +55,8 @@ class MPS4264Controller:
         self._fps: int | None = None
         self._fast_group: int | None = None
         self._frames = 0
+        self._bytes_received = 0
+        self._bytes_saved = 0
         self._frame_gaps = 0
         self._bad_datagrams = 0
         self._foreign_datagrams = 0
@@ -196,6 +199,68 @@ class MPS4264Controller:
             self._log("CALZ 已完成；请核查设备返回信息")
             return response
 
+    def send_command(self, command: str, zero_pressure_confirmed: bool = False) -> dict:
+        """Send one ScanTel-style device command through the shared control session.
+
+        SCAN/STOP/CALZ use the managed paths so the recorder and device state
+        cannot silently diverge. Other one-line ASCII commands pass through.
+        """
+        line = command.strip()
+        if not line or len(line) > 79 or not line.isascii() or "\r" in line or "\n" in line:
+            raise ValueError("命令必须是长度不超过 79 字符的单行 ASCII")
+        upper = line.upper()
+        if upper == "SCAN":
+            state = self.scan()
+            return {"command": line, "response": "SCAN 已发送；UDP 采集已启动。", "status": state}
+        if upper == "STOP":
+            state = self.stop()
+            return {"command": line, "response": "STOP 已发送；采集文件仍打开。", "status": state}
+        if upper == "CALZ":
+            response = self.calz(zero_pressure_confirmed)
+            return {"command": line, "response": response, "status": self.status()}
+        if upper == "SAVE":
+            response = self.save_settings()
+            return {"command": line, "response": response, "status": self.status()}
+        with self._lock:
+            client = self._require_idle()
+            if upper.startswith("SET ") and self._raw_file is not None:
+                raise MPSControllerError("请先关闭采集文件再用命令窗口修改 SET 参数")
+            response = client.command(line, timeout=15)
+            if upper.startswith("SET "):
+                match = re.fullmatch(r"SET RATE\s+([\d.]+)", upper)
+                if match:
+                    self._rate = float(match.group(1))
+                match = re.fullmatch(r"SET FPS\s+(\d+)", upper)
+                if match:
+                    self._fps = int(match.group(1))
+                match = re.fullmatch(r"SET OPTIONS\s+([0-4])\s+\d+\s+\d+", upper)
+                if match:
+                    self._fast_group = int(match.group(1)) or None
+                match = re.fullmatch(r"SET IPUDP\s+([\d.]+)\s+(\d+)", upper)
+                if match:
+                    self._udp_target_ip, self._udp_port = match.group(1), int(match.group(2))
+                    self._reboot_required = True
+                if upper.startswith(("SET SVRSEL ", "SET IPADD ")):
+                    self._reboot_required = True
+            elif upper == "LIST S":
+                match = re.search(r"SET RATE\s+([\d.]+)", response)
+                if match:
+                    self._rate = float(match.group(1))
+                match = re.search(r"SET FPS\s+(\d+)", response)
+                if match:
+                    self._fps = int(match.group(1))
+                match = re.search(r"SET OPTIONS\s+([0-4])\s+\d+\s+\d+", response)
+                if match:
+                    self._fast_group = int(match.group(1)) or None
+            elif upper == "LIST UDP":
+                match = re.search(r"SET IPUDP\s+([\d.]+)(?:\s+(\d+))?", response)
+                if match:
+                    self._udp_target_ip = match.group(1)
+                    if match.group(2):
+                        self._udp_port = int(match.group(2))
+            self._log(f"命令窗口：{line}")
+            return {"command": line, "response": response, "status": self.status()}
+
     def new_file(self, name: str, udp_port: int | None = None) -> dict:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
             raise ValueError("文件名仅允许英文字母、数字、下划线和连字符，长度 1–64")
@@ -230,8 +295,9 @@ class MPS4264Controller:
             self._index_writer.writerow(("frame", "host_receive_monotonic_ns",
                                          "host_receive_unix_ns", "device_frame_sec",
                                          "device_frame_ns", "packet_type", "units_index"))
-            self._udp_socket, self._udp_port, self._file_stem = udp, port, name
-            self._frames = self._frame_gaps = self._bad_datagrams = self._foreign_datagrams = 0
+            self._udp_socket, self._listen_port, self._file_stem = udp, port, name
+            self._frames = self._bytes_received = self._bytes_saved = 0
+            self._frame_gaps = self._bad_datagrams = self._foreign_datagrams = 0
             self._last_frame_number = None
             self._last_frame = None
             self._last_receive_unix_ns = None
@@ -267,6 +333,7 @@ class MPS4264Controller:
                 if self._device_ip and address[0] != self._device_ip:
                     self._foreign_datagrams += 1
                     continue
+                self._bytes_received += len(datagram)
                 try:
                     decoded = list(decode_datagram(datagram))
                 except ValueError:
@@ -275,6 +342,7 @@ class MPS4264Controller:
                 try:
                     for raw, frame in decoded:
                         self._raw_file.write(raw)
+                        self._bytes_saved += len(raw)
                         self._index_writer.writerow((frame.frame_number, monotonic_ns,
                                                      unix_ns, frame.frame_sec, frame.frame_ns,
                                                      frame.packet_type, frame.units_index))
@@ -370,11 +438,14 @@ class MPS4264Controller:
             metadata = {
                 "device_ip": self._device_ip,
                 "udp_target_ip": self._udp_target_ip,
-                "udp_port": self._udp_port,
+                "udp_target_port": self._udp_port,
+                "listen_port": self._listen_port,
                 "rate_hz": self._rate,
                 "fps": self._fps,
                 "fast_group": self._fast_group,
                 "frames_received": self._frames,
+                "bytes_received": self._bytes_received,
+                "bytes_saved": self._bytes_saved,
                 "frame_gaps": self._frame_gaps,
                 "bad_datagrams": self._bad_datagrams,
                 "foreign_datagrams": self._foreign_datagrams,
@@ -383,6 +454,7 @@ class MPS4264Controller:
             }
             self._raw_file = self._index_file = self._index_writer = None
             self._udp_socket = self._capture_thread = None
+            self._listen_port = None
             self._file_stem = None
             try:
                 (self.data_dir / f"{stem}.meta.json").write_text(
@@ -433,6 +505,7 @@ class MPS4264Controller:
                 "device_port": self._device_port,
                 "udp_target_ip": self._udp_target_ip,
                 "udp_port": self._udp_port,
+                "listen_port": self._listen_port,
                 "reboot_required": self._reboot_required,
                 "file_open": self._raw_file is not None,
                 "file_name": f"{self._file_stem}.dat" if self._file_stem else None,
@@ -441,6 +514,8 @@ class MPS4264Controller:
                 "fps": self._fps,
                 "fast_group": self._fast_group,
                 "frames_received": self._frames,
+                "bytes_received": self._bytes_received,
+                "bytes_saved": self._bytes_saved,
                 "frame_gaps": self._frame_gaps,
                 "bad_datagrams": self._bad_datagrams,
                 "foreign_datagrams": self._foreign_datagrams,

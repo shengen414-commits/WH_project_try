@@ -9,7 +9,9 @@ from flask import Flask, jsonify, render_template, request
 from .controller import MPS4264Controller, MPSControllerError
 
 
-def create_app(controller: MPS4264Controller | None = None) -> Flask:
+def create_app(controller: MPS4264Controller | None = None,
+               default_device_ip: str = "191.30.90.102",
+               default_host_ip: str = "191.30.90.82") -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     service = controller or MPS4264Controller()
     app.config["MPS_CONTROLLER"] = service
@@ -36,7 +38,8 @@ def create_app(controller: MPS4264Controller | None = None) -> Flask:
 
     @app.get("/")
     def index():
-        return render_template("index.html")
+        return render_template("index.html", default_device_ip=default_device_ip,
+                               default_host_ip=default_host_ip)
 
     @app.get("/api/status")
     def status():
@@ -60,6 +63,12 @@ def create_app(controller: MPS4264Controller | None = None) -> Flask:
     @app.post("/api/device-info")
     def device_info():
         return jsonify(info=service.device_info(), status=service.status())
+
+    @app.post("/api/command")
+    def command():
+        data = body()
+        return jsonify(service.send_command(str(data.get("command", "")),
+                                            bool(data.get("zero_pressure_confirmed", False))))
 
     @app.post("/api/configure-udp")
     def configure_udp():
