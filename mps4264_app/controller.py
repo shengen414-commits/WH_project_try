@@ -175,7 +175,7 @@ class MPS4264Controller:
             client = self._require_idle()
             if self._raw_file is not None:
                 raise MPSControllerError("请先关闭文件再修改 UDP 目标")
-            commands = ("SET FORMAT B B", "SET TRIG 0", "SET ENFTP 0",
+            commands = ("SET FORMAT F B", "SET TRIG 0", "SET ENFTP 0",
                         "SET ENUDP 1", "SET SVRSEL 3",
                         f"SET IPUDP {host_ip} {udp_port}", "SAVE")
             responses = {command: client.command(command, 120 if command == "SAVE" else 10)

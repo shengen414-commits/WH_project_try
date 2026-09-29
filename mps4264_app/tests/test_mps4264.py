@@ -16,21 +16,22 @@ from mps4264_app.web import create_app
 from mps4264_app.network import NetworkInitializationError, ensure_ipv4_alias
 
 
-def make_frame(number=1, packet_type=NORMAL_TYPE, units=23):
+def make_frame(number=1, packet_type=NORMAL_TYPE, units=23, endian=">", serial=249):
     raw = bytearray(348)
-    struct.pack_into(">4I", raw, 0, packet_type, 348, number, 249)
-    struct.pack_into(">f", raw, 16, 5.0)
-    struct.pack_into(">2I", raw, 20, 0, units)
-    struct.pack_into(">f", raw, 28, 6894.759766)
+    struct.pack_into(endian + "4I", raw, 0, packet_type, 348, number, serial)
+    struct.pack_into(endian + "f", raw, 16, 5.0)
+    struct.pack_into(endian + "2I", raw, 20, 0, units)
+    struct.pack_into(endian + "f", raw, 28, 6894.759766)
     values = [float(i) for i in range(1, 65)] if units != 27 else list(range(1, 65))
-    struct.pack_into(">64f" if units != 27 else ">64i", raw, 76, *values)
-    struct.pack_into(">4I", raw, 332, 12, 500_000_000, 0, 0)
+    struct.pack_into(endian + ("64f" if units != 27 else "64i"), raw, 76, *values)
+    struct.pack_into(endian + "4I", raw, 332, 12, 500_000_000, 0, 0)
     return bytes(raw)
 
 
 class FakeDevice:
-    def __init__(self, udp_port):
+    def __init__(self, udp_port, endian=">"):
         self.udp_port = udp_port
+        self.endian = endian
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen(2)
@@ -82,7 +83,7 @@ class FakeDevice:
     def _send_udp(self):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
             for number in (1, 2, 3):
-                udp.sendto(make_frame(number), ("127.0.0.1", self.udp_port))
+                udp.sendto(make_frame(number, endian=self.endian), ("127.0.0.1", self.udp_port))
                 time.sleep(0.02)
 
     def close(self):
@@ -92,6 +93,18 @@ class FakeDevice:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_actual_ver_210_little_endian_header_and_fields(self):
+        raw = make_frame(number=1, serial=2, endian="<")
+        self.assertEqual(raw[:28], bytes.fromhex(
+            "0a0000005c01000001000000020000000000a0400000000017000000"))
+        frame = decode_frame(raw)
+        self.assertEqual((frame.packet_type, frame.frame_number, frame.serial_number),
+                         (NORMAL_TYPE, 1, 2))
+        self.assertEqual((frame.rate_hz, frame.units_index, frame.pressures[63]),
+                         (5.0, 23, 64.0))
+        self.assertEqual(frame.frame_time_sec, 12.5)
+        self.assertEqual(decode_frame(make_frame(units=27, endian="<")).pressures[63], 64)
+
     def test_normal_and_raw_decoding(self):
         frame = decode_frame(make_frame())
         self.assertEqual(frame.frame_number, 1)
@@ -128,7 +141,7 @@ class ControllerTests(unittest.TestCase):
             reserved.bind(("127.0.0.1", 0))
             udp_port = reserved.getsockname()[1]
             reserved.close()
-            fake = FakeDevice(udp_port)
+            fake = FakeDevice(udp_port, endian="<")
             service = MPS4264Controller(directory)
             try:
                 service.connect("127.0.0.1", fake.port)
@@ -189,7 +202,7 @@ class ControllerTests(unittest.TestCase):
                 configured = browser.post("/api/configure-udp", json={
                     "host_ip": "127.0.0.1", "udp_port": udp_port})
                 self.assertTrue(configured.json["reboot_required"])
-                self.assertIn("SET FORMAT B B", fake.commands)
+                self.assertIn("SET FORMAT F B", fake.commands)
                 self.assertEqual(browser.post("/api/connect", json={
                     "device_ip": "127.0.0.1", "control_port": fake.port,
                     "confirm_reboot": True}).status_code, 200)

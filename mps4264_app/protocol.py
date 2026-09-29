@@ -1,4 +1,4 @@
-"""MPS4264 Gen1 348-byte binary scan frame decoding (network byte order)."""
+"""MPS4264 Gen1 348-byte scan frames; accept observed LE and documented BE."""
 
 from __future__ import annotations
 
@@ -54,16 +54,23 @@ class PressureFrame:
 def decode_frame(raw: bytes) -> PressureFrame:
     if len(raw) != FRAME_SIZE:
         raise ValueError(f"帧长度应为 {FRAME_SIZE} 字节，实际为 {len(raw)}")
-    packet_type, packet_size, frame_number, serial_number = struct.unpack_from(">4I", raw)
-    if packet_type not in (NORMAL_TYPE, FAST_TYPE) or packet_size != FRAME_SIZE:
-        raise ValueError(f"不是预期的 MPS4264 帧：type={packet_type:#x}, size={packet_size}")
-    rate_hz = struct.unpack_from(">f", raw, 16)[0]
-    valve_state, units_index = struct.unpack_from(">2I", raw, 20)
-    psi_to_units = struct.unpack_from(">f", raw, 28)[0]
-    scan_start_sec, scan_start_ns, external_trigger_us = struct.unpack_from(">3I", raw, 32)
-    temperatures = struct.unpack_from(">8f", raw, 44)
-    pressures = struct.unpack_from(">64i" if units_index == 27 else ">64f", raw, 76)
-    frame_sec, frame_ns, trigger_sec, trigger_ns = struct.unpack_from(">4I", raw, 332)
+    # The manual specifies network byte order, but an actual Ver 2.10 module
+    # sent 0a0000005c010000 (type 0x0A, length 348) in little-endian order.
+    # Select only from an exact type/length match; never guess from values.
+    for endian in (">", "<"):
+        packet_type, packet_size = struct.unpack_from(endian + "2I", raw)
+        if packet_type in (NORMAL_TYPE, FAST_TYPE) and packet_size == FRAME_SIZE:
+            break
+    else:
+        raise ValueError(f"不是预期的 MPS4264 帧头：{raw[:8].hex()}")
+    packet_type, packet_size, frame_number, serial_number = struct.unpack_from(endian + "4I", raw)
+    rate_hz = struct.unpack_from(endian + "f", raw, 16)[0]
+    valve_state, units_index = struct.unpack_from(endian + "2I", raw, 20)
+    psi_to_units = struct.unpack_from(endian + "f", raw, 28)[0]
+    scan_start_sec, scan_start_ns, external_trigger_us = struct.unpack_from(endian + "3I", raw, 32)
+    temperatures = struct.unpack_from(endian + "8f", raw, 44)
+    pressures = struct.unpack_from(endian + ("64i" if units_index == 27 else "64f"), raw, 76)
+    frame_sec, frame_ns, trigger_sec, trigger_ns = struct.unpack_from(endian + "4I", raw, 332)
     return PressureFrame(packet_type, frame_number, serial_number, rate_hz,
                          valve_state, units_index, psi_to_units, scan_start_sec,
                          scan_start_ns, external_trigger_us, temperatures,
