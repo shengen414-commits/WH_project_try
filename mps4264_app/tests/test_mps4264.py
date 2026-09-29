@@ -163,8 +163,8 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(client.get("/").status_code, 200)
             self.assertIn(b'191.30.90.102', client.get("/").data)
             self.assertIn(b'191.30.90.82', client.get("/").data)
-            self.assertIn(b'id="udp-port" type="number" min="1" max="65535" value="23"', client.get("/").data)
-            self.assertEqual(client.get("/api/status").json["udp_port"], 23)
+            self.assertIn(b'id="udp-port" type="number" min="1" max="65535" value="50023"', client.get("/").data)
+            self.assertEqual(client.get("/api/status").json["udp_port"], 50023)
             self.assertFalse(client.get("/api/status").json["connected"])
             self.assertEqual(client.post("/api/calz", json={}).status_code, 400)
             self.assertEqual(client.post("/api/command", json={"command": "STATUS"}).status_code, 409)
@@ -223,14 +223,14 @@ class ControllerTests(unittest.TestCase):
 
 
 class LowPortTests(unittest.TestCase):
-    def test_default_udp_port_permission_error_is_actionable(self):
+    def test_explicit_low_udp_port_permission_error_is_actionable(self):
         udp = Mock()
         udp.bind.side_effect = PermissionError(13, "Permission denied")
         with tempfile.TemporaryDirectory() as directory, \
                 patch("mps4264_app.controller.socket.socket", return_value=udp):
             service = MPS4264Controller(directory)
             with self.assertRaisesRegex(MPSControllerError, "CAP_NET_BIND_SERVICE"):
-                service.new_file("low_port")
+                service.new_file("low_port", udp_port=23)
             self.assertFalse((Path(directory) / "low_port.dat").exists())
         udp.bind.assert_called_once_with(("0.0.0.0", 23))
         udp.close.assert_called_once()

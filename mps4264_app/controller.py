@@ -39,7 +39,7 @@ class MPS4264Controller:
         self._device_ip: str | None = None
         self._device_port = 23
         self._udp_target_ip: str | None = None
-        self._udp_port = 23
+        self._udp_port = 50023
         self._listen_port: int | None = None
         self._udp_socket: socket.socket | None = None
         self._capture_thread: threading.Thread | None = None
@@ -165,7 +165,7 @@ class MPS4264Controller:
             self._log(f"已 SET RATE={rate:g}, FPS={fps}, OPTIONS={fast_group} {read_mode} {subset_size}")
             return response
 
-    def configure_udp(self, host_ip: str, udp_port: int = 23) -> dict:
+    def configure_udp(self, host_ip: str, udp_port: int = 50023) -> dict:
         address = ipaddress.IPv4Address(host_ip)
         if address.is_unspecified or address.is_multicast:
             raise ValueError("UDP 目标必须是 Orange Pi 的单播 IPv4 地址")

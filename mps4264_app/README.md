@@ -10,7 +10,9 @@
 python3 -m venv .venv
 source .venv/bin/activate
 pip install flask
+sudo ip addr add 191.30.90.82/16 dev eth0
 python3 -m mps4264_app.main
+
 ```
 
 启动时程序会检查 `eth0`：如果没有 `191.30.90.82/16`，会执行等价于 `sudo ip addr add 191.30.90.82/16 dev eth0` 的初始化；已有该地址就跳过，不删除或替换其他地址。页面的设备 IP 默认是 `191.30.90.102`，第二步 Orange Pi 网口 IP 默认是 `191.30.90.82`。首次用普通用户启动前可先执行 `sudo -v`，让后台的非交互式提权能成功；如果作为服务开机自启，需要为网口初始化提供 NET_ADMIN 权限（例如由 systemd 的特权 `ExecStartPre` 完成地址配置），否则程序会明确报错退出，不会静默跳过。网口名称不为 `eth0` 时，启动参数加 `--interface 实际网口名`；网络已由系统配置时可用 `--skip-network-init`。可用 `ip -br addr show eth0` 和 `ping -c 3 191.30.90.102` 检查连通性。
@@ -28,9 +30,9 @@ python3 -m mps4264_app.main --host 0.0.0.0 --port 5055
 ## 面板操作顺序
 
 1. 输入现场真实设备 IP，连接并“读取设备信息”，核对 `VER`、阀位、`LIST IP/S/M/UDP`。页面下方的设备命令窗口可发送单行 ScanTel 命令（如 `STATUS`、`LIST S`），并显示设备原始回显；SCAN/STOP/CALZ/SAVE 仍走采集状态保护。
-2. 首次把 Windows 主机换成 Orange Pi 时，输入 **Orange Pi 网口 IP**、UDP 端口（默认 23），点击“设置二进制 UDP + SAVE”。等待保存完成，给设备断电重启，再点击“已重启，重新连接”。这会发送 `SET FORMAT B B`、`SET TRIG 0`、`SET ENFTP 0`、`SET ENUDP 1`、`SET SVRSEL 3`、`SET IPUDP`、`SAVE`。TCP 控制端口 23 和 UDP 数据端口 23 是不同协议；两者端口号可以相同。
+2. 首次把 Windows 主机换成 Orange Pi 时，输入 **Orange Pi 网口 IP**、UDP 端口（默认 50023），点击“设置二进制 UDP + SAVE”。等待保存完成，给设备断电重启，再点击“已重启，重新连接”。这会发送 `SET FORMAT B B`、`SET TRIG 0`、`SET ENFTP 0`、`SET ENUDP 1`、`SET SVRSEL 3`、`SET IPUDP`、`SAVE`。TCP 控制端口保持 23；UDP 数据端口改为 50023。设备与面板的 UDP 端口必须一致。
 
-   在普通 Ubuntu 配置中，非 root 用户通常不能监听 UDP 23（低于 1024）。若“新建文件”提示没有低端口权限，需为面板服务授予 `CAP_NET_BIND_SERVICE`，或把**设备和面板**一起配置为大于等于 1024 的 UDP 端口（如 50023，改设备后须 SAVE 并重启）。不要只改面板端口，也不建议为此长期以 root 运行整个网页服务。
+   设备目前若仍显示 `SET IPUDP 191.30.90.82 23`，只更新面板程序不会收到数据；必须通过上一步把设备改为 `191.30.90.82 50023`，等待 SAVE 完成并重启，再用 `LIST UDP` 与 `LIST M` 核对。默认 50023 避开了普通用户监听 UDP 23 的低端口权限限制。
 3. 先设置 `RATE=5`、`FPS=100`、`OPTIONS=0 0 16`，点击“发送 SET”。如需断电后保留，点击 SAVE。正式高频采集再改成 64 路最高 850 Hz；`RATE=2500` 时必须选 OPTIONS 组 1–4，且只有 16 路有效。
 4. 点击“新建文件”先打开并监听 UDP，再点 SCAN。确认帧数增长及数据单位正确；04 区的 `UDP Byte Counter` 会实时显示本次扫描收到的 UDP 字节数，旁边同时显示有效帧写入字节数。FPS 有限时设备会自行完成采样，但仍应点 STOP 结束本次扫描；然后点“关闭文件”。最后选择 `.dat` 点击“转换二进制为 CSV”。
 5. CALZ 只在零压/等压条件确认后执行。不要在测点上施加未知压力时校零。
@@ -50,7 +52,7 @@ mps = MPS4264Controller("Car_Records/mps_run_001")
 mps.connect("191.30.90.102")
 mps.device_info()                       # 只在未扫描时查询
 mps.set_parameters(rate=5, fps=100, fast_group=0)
-mps.new_file("run_001", udp_port=23)    # 必须先监听，再 SCAN；低端口可能需要权限
+mps.new_file("run_001", udp_port=50023) # 必须先监听，再 SCAN
 mps.scan()
 # 其他程序可调用 mps.status() 查看帧数及最新压力
 mps.stop()
@@ -59,7 +61,7 @@ mps.convert_file("run_001.dat")
 mps.disconnect()
 ```
 
-如设备的 UDP 目标还指向旧 Windows 主机，先调用 `mps.configure_udp("191.30.90.82", 23)`，**等待 SAVE 完成、重启设备**，随后 `mps.connect("191.30.90.102", confirm_reboot=True)`。不要在扫描过程中调用 `device_info()` 或重复连接。`set_parameters`、`calz`、`save_settings`、`new_file`、`scan`、`stop`、`close_file`、`convert_file` 都可单独调用；导入模块不会自动连接设备或启动网页。
+如设备的 UDP 目标还是端口 23 或旧 Windows 主机，先调用 `mps.configure_udp("191.30.90.82", 50023)`，**等待 SAVE 完成、重启设备**，随后 `mps.connect("191.30.90.102", confirm_reboot=True)`。不要在扫描过程中调用 `device_info()` 或重复连接。`set_parameters`、`calz`、`save_settings`、`new_file`、`scan`、`stop`、`close_file`、`convert_file` 都可单独调用；导入模块不会自动连接设备或启动网页。
 
 ## 验证和限制
 
