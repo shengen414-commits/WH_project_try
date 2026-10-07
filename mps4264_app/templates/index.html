@@ -82,7 +82,7 @@
         <div class="divider"></div>
         <div class="form-grid two">
           <label>待转换二进制文件<select id="convert-file"><option value="">选择 .dat 文件</option></select></label>
-          <label>快速扫描组（留空时读记录元数据）<select id="convert-group"><option value="">自动</option><option value="1">组 1</option><option value="2">组 2</option><option value="3">组 3</option><option value="4">组 4</option></select></label>
+          <label>采集时的通道模式（自动读取记录元数据）<select id="convert-group"><option value="">自动</option><option value="0">普通 64 路（忽略元数据组号）</option><option value="1">组 1</option><option value="2">组 2</option><option value="3">组 3</option><option value="4">组 4</option></select></label>
         </div>
         <div class="actions"><button id="refresh-files-btn" class="quiet">刷新文件列表</button><button id="convert-btn" class="secondary">转换二进制为 CSV</button></div>
         <p id="convert-status" class="hint">尚无转换任务。</p>

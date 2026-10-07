@@ -489,15 +489,21 @@ class MPS4264Controller:
         source = self.data_dir / filename
         if not source.is_file():
             raise FileNotFoundError(filename)
+        group_source = "manual" if fast_group is not None else "none"
         if fast_group is None:
             meta = self.data_dir / f"{source.stem}.meta.json"
             if meta.is_file():
                 saved = json.loads(meta.read_text(encoding="utf-8"))
                 fast_group = saved.get("fast_group")
+                if fast_group is not None:
+                    group_source = "metadata"
         target = source.with_suffix(".csv")
         result = convert_binary_to_csv(source, target, fast_group, overwrite)
+        result["fast_group_source"] = group_source
         with self._lock:
             self._log(f"已转换 {filename} → {target.name}，共 {result['frames']} 帧")
+            for warning in result["warnings"]:
+                self._log(f"转换提醒：{warning}")
         return result
 
     def status(self) -> dict:

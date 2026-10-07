@@ -249,7 +249,7 @@ async function refreshFiles() {
 async function refreshConversion() {
   const job = await api("/api/convert-status");
   $("convert-status").textContent = job.state === "running" ? "正在后台转换…"
-    : job.state === "done" ? `已完成：${job.result.frames} 帧 → ${job.result.csv_file}`
+    : job.state === "done" ? `已完成：${job.result.frames} 帧 → ${job.result.csv_file}${job.result.warnings?.length ? '；提醒：' + job.result.warnings.join('；') : ''}`
     : job.state === "error" ? `转换失败：${job.error}` : "尚无转换任务。";
 }
 

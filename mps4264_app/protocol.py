@@ -44,7 +44,9 @@ class PressureFrame:
         return self.frame_sec + self.frame_ns / 1_000_000_000
 
     def display_pressures(self, fast_group: int | None = None) -> list[float | int | None]:
-        if self.packet_type == FAST_TYPE and fast_group in FAST_GROUPS:
+        # The caller's recorded/explicit OPTIONS group controls channel validity.
+        # Do not discard it solely because the packet uses the normal type tag.
+        if fast_group in FAST_GROUPS:
             valid = set(FAST_GROUPS[fast_group])
             return [value if number in valid else None
                     for number, value in enumerate(self.pressures, 1)]
@@ -98,13 +100,17 @@ def convert_binary_to_csv(source: str | Path, target: str | Path,
                           fast_group: int | None = None, overwrite: bool = False) -> dict:
     """Convert one raw ScanTel-style .dat; original is never modified.
 
-    Fast-scan group is not encoded in the frame and must be supplied explicitly.
+    Fast-scan group is not encoded in the frame and must be supplied explicitly
+    (or recovered by the controller from recording metadata). Group 0 explicitly
+    requests ordinary 64-channel conversion. A 0x0A/group conflict is reported
+    as a warning, not silently treated as proof that fast scan was active.
     """
     source, target = Path(source), Path(target)
     if source.resolve() == target.resolve():
         raise ValueError("输入和输出文件不能相同")
-    if fast_group is not None and fast_group not in FAST_GROUPS:
-        raise ValueError("fast_group 只能是 1、2、3 或 4")
+    if fast_group is not None and (type(fast_group) is not int or fast_group not in range(5)):
+        raise ValueError("fast_group 只能是 0（普通 64 路）或 1、2、3、4")
+    fast_group = fast_group or None
     total_bytes = source.stat().st_size
     if not total_bytes or total_bytes % FRAME_SIZE:
         raise ValueError(f"原始文件为空或长度不是 {FRAME_SIZE} 字节的整数倍")
@@ -114,8 +120,14 @@ def convert_binary_to_csv(source: str | Path, target: str | Path,
         first = decode_frame(src.read(FRAME_SIZE))
     if first.packet_type == FAST_TYPE and fast_group is None:
         raise ValueError("快速扫描文件需指定 OPTIONS 组号 fast_group=1..4；其余 48 路无效")
+    warnings = []
     if first.packet_type == NORMAL_TYPE and fast_group is not None:
-        raise ValueError("普通 64 路文件不应指定 fast_group")
+        warnings.append(
+            f"DAT 帧头为 0x0A，与手册的快速帧 0x10 不一致；本次按指定/记录的组 {fast_group} "
+            "保留 16 路，其余 48 路留空。请核对采集时 LIST S 的 OPTIONS；"
+            "此转换不能证明设备实际启用了快速扫描。原始 DAT 未修改。")
+    if first.rate_hz > 850 and fast_group is None:
+        raise ValueError("DAT 的 RATE 超过普通 64 路上限 850 Hz；请确认采集时 OPTIONS 并指定组 1–4")
 
     # Write to a sibling temporary file, then atomically publish on success.
     temporary = target.with_name(target.name + ".part")
@@ -159,4 +171,5 @@ def convert_binary_to_csv(source: str | Path, target: str | Path,
             target.unlink(missing_ok=True)
         raise
     return {"frames": frames, "frame_gaps": gaps, "csv_file": str(target),
-            "units_index": first.units_index, "fast_group": fast_group}
+            "units_index": first.units_index, "fast_group": fast_group,
+            "packet_type": f"0x{first.packet_type:02X}", "warnings": warnings}

@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 from mps4264_app import MPS4264Controller
 from mps4264_app.controller import MPSControllerError
-from mps4264_app.protocol import FAST_TYPE, NORMAL_TYPE, convert_binary_to_csv, decode_frame
+from mps4264_app.protocol import FAST_TYPE, NORMAL_TYPE, FAST_GROUPS, convert_binary_to_csv, decode_frame
 from mps4264_app.web import create_app
 from mps4264_app.network import NetworkInitializationError, ensure_ipv4_alias
 
@@ -132,6 +132,82 @@ class ProtocolTests(unittest.TestCase):
                 row = next(csv.DictReader(file))
             self.assertEqual(row["P01"], "1.0")
             self.assertEqual(row["P02"], "")
+
+
+class FastConversionRegressionTests(unittest.TestCase):
+    def test_normal_tag_with_explicit_fast_groups_both_endians(self):
+        for endian in ('<', '>'):
+            for group in range(1, 5):
+                with self.subTest(endian=endian, group=group), tempfile.TemporaryDirectory() as directory:
+                    source, target = Path(directory)/'fast.dat', Path(directory)/'fast.csv'
+                    raw = bytearray(make_frame(endian=endian))
+                    struct.pack_into(endian+'f', raw, 16, 2500)
+                    source.write_bytes(raw)
+                    result = convert_binary_to_csv(source, target, fast_group=group)
+                    self.assertEqual(source.read_bytes(), raw)
+                    self.assertEqual(result['packet_type'], '0x0A')
+                    self.assertEqual(len(result['warnings']), 1)
+                    with target.open(encoding='utf-8', newline='') as file:
+                        row = next(csv.DictReader(file))
+                    populated = [n for n in range(1, 65) if row[f'P{n:02}'] != '']
+                    self.assertEqual(populated, list(FAST_GROUPS[group]))
+                    for n in populated:
+                        self.assertEqual(float(row[f'P{n:02}']), float(n))
+
+    def test_automatic_metadata_and_manual_ordinary_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'scan.dat').write_bytes(make_frame(endian='<'))
+            (root/'scan.meta.json').write_text(json.dumps({'fast_group':1}), encoding='utf-8')
+            service = MPS4264Controller(directory)
+            automatic = service.convert_file('scan.dat')
+            self.assertEqual(automatic['fast_group'], 1)
+            self.assertEqual(automatic['fast_group_source'], 'metadata')
+            self.assertTrue(automatic['warnings'])
+            ordinary = service.convert_file('scan.dat', fast_group=0, overwrite=True)
+            self.assertIsNone(ordinary['fast_group'])
+            self.assertEqual(ordinary['fast_group_source'], 'manual')
+            self.assertEqual(ordinary['warnings'], [])
+            with (root/'scan.csv').open(encoding='utf-8', newline='') as file:
+                row = next(csv.DictReader(file))
+            self.assertTrue(all(row[f'P{n:02}'] for n in range(1,65)))
+
+    def test_high_rate_without_group_never_guesses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory)/'scan.dat', Path(directory)/'scan.csv'
+            raw = bytearray(make_frame(endian='<'))
+            struct.pack_into('<f', raw, 16, 2500)
+            source.write_bytes(raw)
+            for group in (None, 0):
+                with self.assertRaisesRegex(ValueError, '850'):
+                    convert_binary_to_csv(source, target, fast_group=group)
+            self.assertFalse(target.exists())
+
+    def test_preview_uses_recorded_group_even_with_normal_tag(self):
+        values = decode_frame(make_frame(endian='<')).display_pressures(1)
+        self.assertEqual(sum(value is not None for value in values), 16)
+        self.assertIsNone(values[1])
+        self.assertEqual(values[63], 64)
+
+    def test_web_conversion_manual_and_automatic_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = MPS4264Controller(directory)
+            browser = create_app(service).test_client()
+            for name, group in [('manual', 1), ('automatic', None)]:
+                (root/f'{name}.dat').write_bytes(make_frame(endian='<'))
+                (root/f'{name}.meta.json').write_text(json.dumps({'fast_group':1}), encoding='utf-8')
+                response = browser.post('/api/convert', json={'filename':f'{name}.dat', 'fast_group':group})
+                self.assertEqual(response.status_code, 202)
+                deadline = time.monotonic()+3
+                while time.monotonic()<deadline:
+                    job = browser.get('/api/convert-status').json
+                    if job['state']!='running':
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(job['state'], 'done', job)
+                self.assertEqual(job['result']['fast_group'], 1)
+                self.assertTrue(job['result']['warnings'])
 
 
 class ControllerTests(unittest.TestCase):
