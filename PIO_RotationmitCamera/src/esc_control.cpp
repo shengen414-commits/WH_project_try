@@ -19,11 +19,11 @@ const unsigned long ESTOP_LATCH_MS = 1000;
 const int ESC_NEUTRAL_PWM = 1500;
 const int ESC_DIRECTION_DEADBAND_US = 50;
 const unsigned long ESC_DIRECTION_CHANGE_NEUTRAL_MS = 200;
-const float ESC_BOOST_MULTIPLIER = 1.5f;     // 启动段增速倍率(pwm-1500)*rate+-1500
-const unsigned long ESC_BOOST_RAMP_MS = 250; // 启动段增速渐升时间
-const unsigned long ESC_BOOST_HOLD_MS = 800; // 启动段增速维持时间
-const int ESC_BOOST_FORWARD_LIMIT = 1900;
-const int ESC_BOOST_REVERSE_LIMIT = 1100; // 增速段PWM上下限
+const float ESC_BOOST_MULTIPLIER = 1.5f;      // 启动段增速倍率(pwm-1500)*rate+-1500
+const unsigned long ESC_BOOST_RAMP_MS = 550;  // 启动段增速渐升时间
+const unsigned long ESC_BOOST_HOLD_MS = 1500; // 启动段增速维持时间
+const int ESC_BOOST_FORWARD_LIMIT = 2000;
+const int ESC_BOOST_REVERSE_LIMIT = 1000; // 增速段PWM上下限
 
 // --- 控制权状态机 ---
 enum ControlMode

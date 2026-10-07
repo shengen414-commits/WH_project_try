@@ -1,4 +1,5 @@
-"""Run with `python3 -m mps4264_app.main` or `python3 mps4264_app/main.py`."""
+"""sudo ip addr add 191.30.90.82/16 dev eth0
+python3 -m mps4264_app.main"""
 
 from __future__ import annotations
 
