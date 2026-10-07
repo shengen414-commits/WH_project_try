@@ -171,8 +171,8 @@ setInterval(() => {
         maxKmh = Math.max(maxKmh, kmhValue);
 
         document.getElementById('sensor-pos').innerText = revolutions;
-        document.getElementById('sensor-speed').innerText = rpm;
-        document.getElementById('sensor-kmh').innerText = kmh;
+        document.getElementById('sensor-speed').innerText = data.encoder_fresh ? rpm : '--';
+        document.getElementById('sensor-kmh').innerText = data.encoder_fresh ? kmh : '--';
         document.getElementById('sensor-max-kmh').innerText = maxKmh.toFixed(2);
 
         posChart.data.labels.push(timeTicks);
@@ -240,36 +240,40 @@ function captureSnapshot() {
         });
 }
 
-function startRecord() {
+async function refreshRecordStatus() {
     const btn = document.getElementById('rec-btn');
-    btn.disabled = true;
-    btn.innerText = "⏳ 正在抓取 (剩余 3 秒)...";
-    fetch('/start_record').then(r => r.json()).then(data => {
-        if(data.status === 'started') {
-            let timeLeft = 3;
-            let timer = setInterval(() => {
-                timeLeft -= 1;
-                if(timeLeft <= 0) {
-                    clearInterval(timer);
-                    btn.innerText = "💾 等待停稳并复制SD数据...";
-                    setTimeout(() => {
-                        btn.disabled = false;
-                        btn.innerText = "🔴 记录多源融合数据 (3秒)";
-                    }, 2500); 
-                } else {
-                    btn.innerText = `⏳ 正在抓取 (剩余 ${timeLeft} 秒)...`;
-                }
-            }, 1000);
-        } else {
-            btn.disabled = false;
-            btn.innerText = "🔴 记录多源融合数据 (3秒)";
-        }
-    }).catch(error => {
-        console.error("记录启动失败:", error);
-        btn.disabled = false;
-        btn.innerText = "🔴 记录多源融合数据 (3秒)";
-    });
+    const label = document.getElementById('record-status');
+    try {
+        const response = await fetch('/record/status', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        btn.disabled = !!data.active;
+        btn.innerText = data.active ? (data.status === 'recording' ? '⏳ 正在记录多源数据...' : '💾 正在保存图片和匹配数据...') : '🔴 记录多源融合数据 (3秒)';
+        if (data.status === 'error') label.innerText = `多源记录失败: ${data.message}`;
+        else if (data.status === 'saved') label.innerText = `已保存 ${data.sample_count || 0} 条传感器数据 | 缺样 ${data.sequence_gaps || 0} | 写盘丢样 ${data.queue_drops || 0}`;
+        else if (data.active) label.innerText = `多源记录: ${data.status === 'recording' ? '记录中' : '保存中'} | ${data.sample_count || 0} samples`;
+    } catch (error) {
+        label.innerText = `记录状态读取失败: ${error.message}`;
+    }
 }
+
+async function startRecord() {
+    const btn = document.getElementById('rec-btn');
+    const label = document.getElementById('record-status');
+    btn.disabled = true;
+    try {
+        const response = await fetch('/start_record');
+        const data = await response.json();
+        if (!response.ok || data.status !== 'started') throw new Error(data.message || '记录启动失败');
+        await refreshRecordStatus();
+    } catch (error) {
+        btn.disabled = false;
+        btn.innerText = '🔴 记录多源融合数据 (3秒)';
+        label.innerText = error.message;
+    }
+}
+setInterval(refreshRecordStatus, 1000);
+refreshRecordStatus();
 
 let speedRecordActive = false;
 
@@ -292,11 +296,16 @@ function updateSpeedRecordUI(data) {
     const elapsed = formatDuration(data.elapsed_sec || 0);
     const maxDuration = formatDuration(data.max_duration_sec || 600);
     const samples = data.sample_count || 0;
+    const losses = `缺样 ${data.sequence_gaps || 0} | 写盘丢样 ${data.queue_drops || 0}`;
+    if (data.message) {
+        status.innerText = data.message;
+        return;
+    }
 
     if (speedRecordActive) {
-        status.innerText = `速度记录: 记录中 ${elapsed} / ${maxDuration} | ${samples} samples`;
+        status.innerText = `速度记录: 记录中 ${elapsed} / ${maxDuration} | ${samples} samples | ${losses}`;
     } else if (data.file_path) {
-        status.innerText = `速度记录: 已停止 ${elapsed} | ${samples} samples | ${data.stop_reason || 'stopped'}`;
+        status.innerText = `速度记录: 已停止 ${elapsed} | ${samples} samples | ${data.finalized ? '保存完成' : '正在保存'} | ${data.stop_reason || 'stopped'} | ${losses}`;
     } else {
         status.innerText = `速度记录: 空闲 | 上限 ${maxDuration}`;
     }

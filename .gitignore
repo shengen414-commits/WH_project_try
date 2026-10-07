@@ -5,3 +5,5 @@ venv/*
 YOLOv10-N/*
 *.sh
 .VSCodeCounter
+__pycache__/
+*.py[cod]

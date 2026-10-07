@@ -11,6 +11,10 @@ import numpy as np
 from collections import deque
 from datetime import datetime
 from flask import Flask, Response, render_template, jsonify, request
+try:
+    from .telemetry import EncoderStream, CsvRecorder
+except ImportError:
+    from telemetry import EncoderStream, CsvRecorder
 
 # 确保录像保存根目录存在
 SAVE_DIR = "Car_Records"
@@ -21,17 +25,10 @@ PPR = 12.0
 KMH_PER_RPM = 0.007173
 SPEED_RECORD_DIR = os.path.join(SAVE_DIR, "Speed_Records")
 os.makedirs(SPEED_RECORD_DIR, exist_ok=True)
-SPEED_RECORD_SAMPLE_INTERVAL_SEC = 0.01  # 速度记录到csv采样间隔,esp32的传感器采样长度在ESP32代码中更改
 SPEED_RECORD_MAX_DURATION_SEC = 10 * 60
-SD_COPY_SAFE_THROTTLE_DELTA = 20
-SD_COPY_STOP_SPEED_PPS_THRESHOLD = 1.0
-SD_COPY_STOP_STABLE_SEC = 1.2
-SD_COPY_WAIT_LOG_SEC = 5.0
-SD_COPY_TIMEOUT_SEC = 8.0
-SERIAL_INPUT_FLUSH_THRESHOLD = 2048
-SERIAL_IDLE_SLEEP_SEC = 0.005
 SERIAL_DEBUG_PRINT = True
 SERIAL_DEBUG_MIN_INTERVAL_SEC = 0.5
+ENCODER_FRESH_SEC = 1.0
 BRAKE_REVERSE_DURATION_SEC = 2.00
 BRAKE_REVERSE_MIN_DELTA = 80
 BRAKE_REVERSE_MAX_DELTA = 300
@@ -50,13 +47,12 @@ sensor_state = {
     "last_serial_line": "",
     "last_serial_rx_wall": 0.0,
     "serial_line_count": 0,
-    "serial_flush_count": 0,
     "last_drive_line": "",
 }
 
 try:
     esp32_serial = serial.Serial(
-        '/dev/ttyUSB0', 115200, timeout=0.1, write_timeout=0.05)
+        os.environ.get('ESP32_SERIAL_PORT', '/dev/ttyUSB0'), 115200, timeout=0.01, write_timeout=0.05)
     esp32_serial.reset_input_buffer()
     print("已清空启动积压数据！")
     print("✅ 成功连接到 ESP32 霍尔传感器模块！")
@@ -65,40 +61,19 @@ except Exception as e:
     esp32_serial = None
 
 
-# 🚀 增加一个用于存储高频历史轨迹的队列 (记录过去10次的点)
-history_buffer = deque(maxlen=10)
 serial_write_lock = threading.Lock()
 record_command_lock = threading.Lock()
 snapshot_lock = threading.Lock()
-serial_transfer_active = threading.Event()
 record_workflow_active = threading.Event()
 brake_sequence_active = threading.Event()
 brake_sequence_lock = threading.Lock()
 brake_sequence_token = 0
 speed_record_lock = threading.Lock()
-speed_record_state = {
-    "active": False,
-    "session_id": None,
-    "file_path": None,
-    "started_at_ns": None,
-    "started_at_iso": None,
-    "stopped_at_ns": None,
-    "stopped_at_iso": None,
-    "sample_count": 0,
-    "stop_reason": None,
-    "stop_event": None,
-    "thread": None,
-    "esp32_recording": False,
-}
+speed_recorder = None
+session_recorder = None
+session_status = {"active": False, "status": "idle"}
+encoder_stream = EncoderStream(PPR, KMH_PER_RPM)
 estop_ignore_until = 0.0
-
-
-def is_drive_neutral():
-    return abs(int(sensor_state.get("throttle", 1500)) - 1500) <= SD_COPY_SAFE_THROTTLE_DELTA
-
-
-def is_car_stopped():
-    return is_drive_neutral() and abs(float(sensor_state.get("speed_pps", 0.0))) <= SD_COPY_STOP_SPEED_PPS_THRESHOLD
 
 
 def clamp_throttle_value(value, fallback=1500):
@@ -131,243 +106,57 @@ def write_esp32_boost(pwm):
         esp32_serial.write(command.encode('utf-8'))
 
 
-def write_esp32_record_command(command, clear_stale_input=True):
-    """Send one SD-record command without mixing it with stale serial traffic."""
-    if command not in (b's', b'p'):
-        raise ValueError(f"unsupported record command: {command!r}")
-    if esp32_serial is None or not esp32_serial.is_open:
-        raise RuntimeError("ESP32 serial port is not open")
-
-    with serial_write_lock:
-        stale_bytes = esp32_serial.in_waiting
-        if clear_stale_input and stale_bytes:
-            esp32_serial.reset_input_buffer()
-            sensor_state["serial_flush_count"] += 1
-            print(
-                f"Discarded {stale_bytes} stale ESP32 RX bytes before "
-                f"record command {command.decode('ascii')!r}"
-            )
-
-        # Complete older outbound data first, then wait until this record
-        # command has reached the USB serial driver.
-        esp32_serial.flush()
-        esp32_serial.write(command)
-        esp32_serial.flush()
-        sent_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
-        print(f"[{sent_at}] ESP32 TX record command: {command.decode('ascii')!r}")
-
-
-def get_current_speed_metrics():
-    speed_pps = float(sensor_state.get("speed_pps", 0.0))
-    rpm = (speed_pps / PPR) * 60.0
-    kmh = abs(rpm) * KMH_PER_RPM
-    return {
-        "position": int(sensor_state.get("position", 0)),
-        "speed_pps": speed_pps,
-        "rpm": rpm,
-        "kmh": kmh,
-        "mode": sensor_state.get("mode", "WEB"),
-        "throttle": int(sensor_state.get("throttle", 1500)),
-    }
-
-
-def speed_record_worker(session_id, file_path, started_at_ns, started_at_iso, stop_event, esp32_recording_started):
-    fieldnames = [
-        "iso_time",
-        "unix_time_ns",
-        "elapsed_ms",
-        "rpm",
-        "kmh",
-        "position",
-        "speed_pps",
-        "throttle",
-        "mode",
-    ]
-    stop_reason = "manual_stop"
-    sample_count = 0
-
-    try:
-        with open(file_path, "w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-
-            while not stop_event.is_set():
-                now_ns = time.time_ns()
-                elapsed_sec = (now_ns - started_at_ns) / 1_000_000_000.0
-                if elapsed_sec >= SPEED_RECORD_MAX_DURATION_SEC:
-                    stop_reason = "max_duration"
-                    break
-
-                metrics = get_current_speed_metrics()
-                writer.writerow({
-                    "iso_time": datetime.now().astimezone().isoformat(timespec="milliseconds"),
-                    "unix_time_ns": now_ns,
-                    "elapsed_ms": f"{elapsed_sec * 1000.0:.3f}",
-                    "rpm": f"{metrics['rpm']:.3f}",
-                    "kmh": f"{metrics['kmh']:.3f}",
-                    "position": metrics["position"],
-                    "speed_pps": f"{metrics['speed_pps']:.3f}",
-                    "throttle": metrics["throttle"],
-                    "mode": metrics["mode"],
-                })
-                f.flush()
-                sample_count += 1
-
-                with speed_record_lock:
-                    if speed_record_state.get("session_id") == session_id:
-                        speed_record_state["sample_count"] = sample_count
-
-                stop_event.wait(SPEED_RECORD_SAMPLE_INTERVAL_SEC)
-    except Exception as e:
-        stop_reason = f"error: {e}"
-        print(f"⚠️ 速度记录异常: {e}")
-    finally:
-        if esp32_recording_started:
-            try:
-                if esp32_serial and esp32_serial.is_open:
-                    write_esp32_record_command(b'p')
-            except Exception as e:
-                print(f"⚠️ 速度记录停止ESP32录制失败: {e}")
-            finally:
-                record_workflow_active.clear()
-
-        stopped_at_ns = time.time_ns()
-        stopped_at_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
-        with speed_record_lock:
-            if speed_record_state.get("session_id") == session_id:
-                speed_record_state.update({
-                    "active": False,
-                    "stopped_at_ns": stopped_at_ns,
-                    "stopped_at_iso": stopped_at_iso,
-                    "sample_count": sample_count,
-                    "stop_reason": stop_reason,
-                    "stop_event": None,
-                    "thread": None,
-                    "esp32_recording": False,
-                })
-        print(
-            f"✅ 速度记录结束: {file_path} ({sample_count} samples, reason={stop_reason})")
+def encoder_ready():
+    return bool(esp32_serial and esp32_serial.is_open and
+                time.monotonic() - sensor_state.get("last_encoder_rx_mono", 0) < ENCODER_FRESH_SEC)
 
 
 def speed_record_public_state():
     with speed_record_lock:
-        started_at_ns = speed_record_state.get("started_at_ns")
-        elapsed_sec = 0.0
-        if speed_record_state.get("active") and started_at_ns:
-            elapsed_sec = (time.time_ns() - started_at_ns) / 1_000_000_000.0
-        elif started_at_ns and speed_record_state.get("stopped_at_ns"):
-            elapsed_sec = (
-                speed_record_state["stopped_at_ns"] - started_at_ns) / 1_000_000_000.0
-
-        return {
-            "active": speed_record_state["active"],
-            "session_id": speed_record_state["session_id"],
-            "file_path": speed_record_state["file_path"],
-            "started_at_iso": speed_record_state["started_at_iso"],
-            "stopped_at_iso": speed_record_state["stopped_at_iso"],
-            "elapsed_sec": round(elapsed_sec, 3),
-            "max_duration_sec": SPEED_RECORD_MAX_DURATION_SEC,
-            "sample_count": speed_record_state["sample_count"],
-            "stop_reason": speed_record_state["stop_reason"],
-            "esp32_recording": speed_record_state.get("esp32_recording", False),
-        }
+        recorder = speed_recorder
+    if recorder is None:
+        return {"active": False, "sample_count": 0, "elapsed_sec": 0,
+                "max_duration_sec": SPEED_RECORD_MAX_DURATION_SEC}
+    state = recorder.status()
+    state.update({"max_duration_sec": SPEED_RECORD_MAX_DURATION_SEC,
+                  "session_id": os.path.splitext(os.path.basename(recorder.path))[0],
+                  "started_at_iso": datetime.fromtimestamp(recorder.started_ns / 1e9).astimezone().isoformat(),
+                  "stopped_at_iso": datetime.fromtimestamp(recorder.stopped_ns / 1e9).astimezone().isoformat()
+                  if recorder.stopped_ns else None})
+    return state
 
 
 def start_speed_recording():
+    global speed_recorder
     with record_command_lock:
         with speed_record_lock:
-            already_active = speed_record_state["active"]
-        if already_active:
-            return False, speed_record_public_state()
-
-        if esp32_serial and esp32_serial.is_open and record_workflow_active.is_set():
-            return False, speed_record_public_state()
-
-        esp32_recording_started = False
-        if esp32_serial and esp32_serial.is_open:
-            try:
-                write_esp32_record_command(b's')
-                record_workflow_active.set()
-                esp32_recording_started = True
-            except Exception as e:
-                print(f"⚠️ 速度记录启动ESP32录制失败: {e}")
-                record_workflow_active.clear()
-                return False, speed_record_public_state()
-
-        session_id = time.strftime("%Y%m%d_%H%M%S")
-        file_name = f"speed_record_{session_id}.csv"
-        file_path = os.path.join(SPEED_RECORD_DIR, file_name)
-        started_at_ns = time.time_ns()
-        started_at_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
-        stop_event = threading.Event()
-
-        worker = threading.Thread(
-            target=speed_record_worker,
-            args=(session_id, file_path, started_at_ns,
-                  started_at_iso, stop_event, esp32_recording_started),
-            daemon=True,
-        )
-        with speed_record_lock:
-            speed_record_state.update({
-                "active": True,
-                "session_id": session_id,
-                "file_path": file_path,
-                "started_at_ns": started_at_ns,
-                "started_at_iso": started_at_iso,
-                "stopped_at_ns": None,
-                "stopped_at_iso": None,
-                "sample_count": 0,
-                "stop_reason": None,
-                "stop_event": stop_event,
-                "thread": worker,
-                "esp32_recording": esp32_recording_started,
-            })
-        worker.start()
-
-    print(f"🔴 速度记录开始: {file_path}")
-    return True, speed_record_public_state()
+            if speed_recorder and not speed_recorder.done.is_set():
+                error = "上一份速度记录仍在运行或保存"
+            elif not encoder_ready():
+                error = "没有新鲜编码器数据，请连接 ESP32 并烧录无 SD 版本固件"
+            else:
+                error = None
+                session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                try:
+                    speed_recorder = CsvRecorder(os.path.join(SPEED_RECORD_DIR, f"speed_record_{session_id}.csv"),
+                                                 SPEED_RECORD_MAX_DURATION_SEC)
+                except OSError as exc:
+                    error = f"无法创建速度文件: {exc}"
+    state = speed_record_public_state()
+    if error:
+        state["message"] = error
+    return error is None, state
 
 
 def stop_speed_recording():
     with record_command_lock:
         with speed_record_lock:
-            is_active = speed_record_state["active"]
-            stop_event = speed_record_state["stop_event"] if is_active else None
-            worker = speed_record_state["thread"] if is_active else None
-
-        if not is_active:
+            recorder = speed_recorder
+        if recorder is None or not recorder.status()["active"]:
             return False, speed_record_public_state()
-
-        if stop_event:
-            stop_event.set()
-        if worker:
-            worker.join(timeout=2.0)
-
+        recorder.stop()
+        recorder.done.wait(2.0)
     return True, speed_record_public_state()
-
-
-def wait_until_car_fully_stopped(session_id):
-    stable_since = None
-    last_log_time = 0.0
-
-    while True:
-        now = time.time()
-        if is_car_stopped():
-            if stable_since is None:
-                stable_since = now
-            elif now - stable_since >= SD_COPY_STOP_STABLE_SEC:
-                return
-        else:
-            stable_since = None
-
-        if now - last_log_time >= SD_COPY_WAIT_LOG_SEC:
-            print(
-                f"⏳ 批次 {session_id} 等待车辆完全停稳后复制SD数据 "
-                f"(speed_pps={sensor_state.get('speed_pps', 0.0):.2f}, throttle={sensor_state.get('throttle', 1500)})"
-            )
-            last_log_time = now
-
-        time.sleep(0.1)
 
 
 def build_image_index(session_dir, camera_name):
@@ -414,13 +203,15 @@ def read_raw_sensor_rows(raw_csv_path):
                 rows.append({
                     "esp32_time_ms": int(row["Time_ms"]),
                     "position": int(row["Position"]),
+                    "received_ns": int(row["unix_time_ns"]),
+                    "device_epoch": int(row["device_epoch"]),
                 })
             except (KeyError, TypeError, ValueError):
                 continue
     return rows
 
 
-def write_enhanced_sensor_csv(session_id, raw_csv_path, source_file, record_start_ns, record_stop_ns):
+def write_enhanced_sensor_csv(session_id, raw_csv_path, record_start_ns, record_stop_ns):
     session_dir = os.path.join(SAVE_DIR, session_id)
     enhanced_csv = os.path.join(session_dir, "sensor_data_enhanced.csv")
     sync_meta_path = os.path.join(session_dir, "sync_meta.json")
@@ -432,9 +223,6 @@ def write_enhanced_sensor_csv(session_id, raw_csv_path, source_file, record_star
 
     esp_first_ms = rows[0]["esp32_time_ms"]
     esp_last_ms = rows[-1]["esp32_time_ms"]
-    duration_ms = max(esp_last_ms - esp_first_ms, 1)
-    record_duration_ns = max(record_stop_ns - record_start_ns, 1)
-    ns_per_esp_ms = record_duration_ns / duration_ms
 
     left_images = build_image_index(session_dir, "Left")
     right_images = build_image_index(session_dir, "Right")
@@ -442,6 +230,8 @@ def write_enhanced_sensor_csv(session_id, raw_csv_path, source_file, record_star
     fieldnames = [
         "esp32_time_ms",
         "esp32_elapsed_ms",
+        "device_epoch",
+        "host_received_time_ns",
         "python_time_ns_est",
         "python_elapsed_ms_est",
         "position",
@@ -454,20 +244,22 @@ def write_enhanced_sensor_csv(session_id, raw_csv_path, source_file, record_star
     ]
 
     previous_row = None
+    epoch_start_ms = esp_first_ms
     with open(enhanced_csv, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
         for row in rows:
-            esp_elapsed_ms = row["esp32_time_ms"] - esp_first_ms
-            python_time_ns_est = int(
-                record_start_ns + esp_elapsed_ms * ns_per_esp_ms)
+            if previous_row and row["device_epoch"] != previous_row["device_epoch"]:
+                epoch_start_ms = row["esp32_time_ms"]
+            esp_elapsed_ms = (row["esp32_time_ms"] - epoch_start_ms) & 0xFFFFFFFF
+            python_time_ns_est = row["received_ns"]
 
             rpm = 0.0
             if previous_row is not None:
-                dt_ms = row["esp32_time_ms"] - previous_row["esp32_time_ms"]
-                if dt_ms > 0:
-                    delta_pos = row["position"] - previous_row["position"]
+                dt_ms = (row["esp32_time_ms"] - previous_row["esp32_time_ms"]) & 0xFFFFFFFF
+                if row["device_epoch"] == previous_row["device_epoch"] and 0 < dt_ms < 0x80000000:
+                    delta_pos = ((row["position"] - previous_row["position"] + 0x80000000) & 0xFFFFFFFF) - 0x80000000
                     pulses_per_sec = delta_pos / (dt_ms / 1000.0)
                     rpm = (pulses_per_sec / PPR) * 60.0
 
@@ -480,6 +272,8 @@ def write_enhanced_sensor_csv(session_id, raw_csv_path, source_file, record_star
             writer.writerow({
                 "esp32_time_ms": row["esp32_time_ms"],
                 "esp32_elapsed_ms": esp_elapsed_ms,
+                "device_epoch": row["device_epoch"],
+                "host_received_time_ns": python_time_ns_est,
                 "python_time_ns_est": python_time_ns_est,
                 "python_elapsed_ms_est": f"{(python_time_ns_est - record_start_ns) / 1_000_000.0:.3f}",
                 "position": row["position"],
@@ -496,13 +290,13 @@ def write_enhanced_sensor_csv(session_id, raw_csv_path, source_file, record_star
         "session_id": session_id,
         "raw_sensor_csv": "sensor_data.csv",
         "enhanced_sensor_csv": "sensor_data_enhanced.csv",
-        "source_sd_file": source_file,
+        "source": "esp32_serial_stream_v1",
         "python_record_start_ns": record_start_ns,
         "python_record_stop_ns": record_stop_ns,
         "esp32_first_time_ms": esp_first_ms,
         "esp32_last_time_ms": esp_last_ms,
-        "esp32_duration_ms": duration_ms,
-        "mapping": "linear: first ESP32 row -> python_record_start_ns, last ESP32 row -> python_record_stop_ns",
+
+        "mapping": "host serial reception timestamp; camera timestamps are host frame-read times, not exposure times",
         "ppr": PPR,
         "kmh_per_rpm": KMH_PER_RPM,
         "left_image_count": len(left_images),
@@ -515,187 +309,55 @@ def write_enhanced_sensor_csv(session_id, raw_csv_path, source_file, record_star
     return True
 
 
-def copy_latest_sd_log_to_session(session_id, record_start_ns, record_stop_ns):
-    """Stop-time helper: pull the latest ESP32 SD CSV into this recording folder."""
-    if esp32_serial is None or not esp32_serial.is_open:
-        print("⚠️ SD数据复制跳过：ESP32串口未连接")
-        return False
-
-    session_dir = os.path.join(SAVE_DIR, session_id)
-    os.makedirs(session_dir, exist_ok=True)
-    target_csv = os.path.join(session_dir, "sensor_data.csv")
-    source_note = os.path.join(session_dir, "sensor_data_source.txt")
-
-    wait_until_car_fully_stopped(session_id)
-
-    serial_transfer_active.set()
-    time.sleep(0.15)
-
-    source_file = "unknown"
-    data_chunks = []
-    data_started = False
-    data_finished = False
-
-    try:
-        with serial_write_lock:
-            esp32_serial.reset_input_buffer()
-            esp32_serial.write(b'r')
-            esp32_serial.flush()
-
-            deadline = time.time() + SD_COPY_TIMEOUT_SEC
-            while time.time() < deadline:
-                raw_line = esp32_serial.readline()
-                if not raw_line:
-                    continue
-
-                decoded_line = raw_line.decode(
-                    'utf-8', errors='ignore').strip()
-                source_match = re.search(r"/?data\d+\.csv", decoded_line)
-                if source_match:
-                    source_file = source_match.group(0)
-
-                if decoded_line == "---DATA_START---":
-                    data_started = True
-                    data_chunks = []
-                    continue
-
-                if decoded_line == "---DATA_END---":
-                    data_finished = True
-                    break
-
-                if data_started:
-                    data_chunks.append(raw_line)
-
-        if not data_started or not data_finished:
-            print("⚠️ SD数据复制失败：没有收到完整 DATA_START/DATA_END 数据段")
-            with open(source_note, "w", encoding="utf-8") as f:
-                f.write("SD copy failed: incomplete serial transfer.\n")
-            return False
-
-        with open(target_csv, "wb") as f:
-            f.writelines(data_chunks)
-        with open(source_note, "w", encoding="utf-8") as f:
-            f.write(f"Copied from ESP32 SD file: {source_file}\n")
-            f.write(f"Copied at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-
-        write_enhanced_sensor_csv(
-            session_id, target_csv, source_file, record_start_ns, record_stop_ns)
-        print(f"✅ SD传感器数据已复制到: {target_csv} (来源: {source_file})")
-        return True
-    except Exception as e:
-        print(f"⚠️ SD数据复制异常: {e}")
-        try:
-            with open(source_note, "w", encoding="utf-8") as f:
-                f.write(f"SD copy failed: {e}\n")
-        except Exception:
-            pass
-        return False
-    finally:
-        serial_transfer_active.clear()
-
-
 def read_esp32_data():
-    '''牺牲一定响应速度，换取高速下速度波动毛刺减少
-    ESP32在激活录制的时候10ms一次传回，此时画出来的速度图会波动很大，因为脉冲只能取整，
-    10ms一次的向上向下圆整差的一个脉冲，也就是1/12ppr 每10ms差这么多圈数，在换算成一分钟RPM的时候带来的误差很大
-    所以需要滤波处理，采用的是100ms 差分滑动窗口，累计过去100ms的脉冲数再算速度
-    舍去了大概50ms的响应速度，得到高速下rpm的平滑，波动小'''
-    global sensor_state
+    """Read complete frames without clearing backlog or writing files here."""
     if esp32_serial is None:
         return
-
-    pattern = re.compile(r"(\d+)\s*ms\s*\|\D*(-?\d+)")
     drive_pattern = re.compile(r"\[DRIVE\].*?\b(RC|WEB)\b.*?(\d{3,4})")
-    last_debug_print = 0.0
-
+    pending = bytearray()
+    last_debug = 0.0
     while True:
         try:
-            if serial_transfer_active.is_set():
-                time.sleep(0.02)
+            chunk = esp32_serial.read(min(max(esp32_serial.in_waiting, 1), 4096))
+            if not chunk:
                 continue
-
-            # 防积压机制
-            with serial_write_lock:
-                pending_bytes = esp32_serial.in_waiting
-                backlog_cleared = pending_bytes > SERIAL_INPUT_FLUSH_THRESHOLD
-                if backlog_cleared:
-                    esp32_serial.reset_input_buffer()
-
-            if backlog_cleared:
-                sensor_state["serial_flush_count"] += 1
-                print(f"⚠️ Serial RX backlog cleared: {pending_bytes} bytes")
-                continue
-
-            if pending_bytes > 0:
-                with serial_write_lock:
-                    raw_line = esp32_serial.readline()
+            pending.extend(chunk)
+            while b'\n' in pending:
+                raw_line, _, remainder = pending.partition(b'\n')
+                pending = bytearray(remainder)
                 line = raw_line.decode('utf-8', errors='ignore').strip()
-                now_wall = time.time()
+                now_ns = time.time_ns()
+                sensor_state["serial_error"] = None
                 sensor_state["last_serial_line"] = line
-                sensor_state["last_serial_rx_wall"] = now_wall
+                sensor_state["last_serial_rx_wall"] = now_ns / 1e9
                 sensor_state["serial_line_count"] += 1
-                if SERIAL_DEBUG_PRINT and now_wall - last_debug_print >= SERIAL_DEBUG_MIN_INTERVAL_SEC:
-                    received_at = datetime.fromtimestamp(now_wall).astimezone().isoformat(
-                        timespec="milliseconds")
-                    print(f"[{received_at}] ESP32 RX >> {line}")
-                    last_debug_print = now_wall
-                match = pattern.search(line)
-                if match:
-                    curr_time_ms = int(match.group(1))
-                    curr_pos = int(match.group(2))
-
-                    dt_sec = (curr_time_ms -
-                              sensor_state["last_time_ms"]) / 1000.0
-
-                    if dt_sec > 0 and sensor_state["last_time_ms"] != 0:
-                        raw_speed = (
-                            curr_pos - sensor_state["last_pos"]) / dt_sec
-
-                        if dt_sec > 0.5:
-                            # 1. 待机模式 (1000ms)：时间跨度大，完全没有量化误差，直接使用！
-                            smoothed_speed = raw_speed
-                            history_buffer.clear()  # 刚从录制切回待机，清空旧轨迹
-                        else:
-                            # 2. 录制模式 (10ms)：启动 M/T 差分窗口算法
-                            history_buffer.append((curr_time_ms, curr_pos))
-
-                            # 必须等攒够 10 个点 (约 100ms) 才开始差分计算
-                            if len(history_buffer) == history_buffer.maxlen:
-                                # 拿出 100ms 前的数据
-                                old_time_ms, old_pos = history_buffer[0]
-                                window_dt = (curr_time_ms -
-                                             old_time_ms) / 1000.0
-
-                                # 计算这 100ms 跨度内的平滑速度
-                                window_speed = (curr_pos - old_pos) / window_dt
-
-                                # 在此基础上，再加一层极弱的 EMA 滤波，让 4000 RPM 的波形呈现完美的流线型
-                                alpha = 0.3
-                                smoothed_speed = (
-                                    alpha * window_speed) + ((1 - alpha) * sensor_state["speed_pps"])
-                            else:
-                                # 刚点录制的前 0.1 秒，用原始速度过渡
-                                smoothed_speed = raw_speed
-                    else:
-                        smoothed_speed = 0.0
-
-                    # 更新全局状态
-                    sensor_state["position"] = curr_pos
-                    sensor_state["speed_pps"] = smoothed_speed
-                    sensor_state["last_time_ms"] = curr_time_ms
-                    sensor_state["last_pos"] = curr_pos
+                sample = encoder_stream.decode(line, now_ns, sensor_state["throttle"], sensor_state["mode"])
+                if sample is not None:
+                    sensor_state.update({"position": sample["Position"], "speed_pps": sample["speed_pps"],
+                                         "last_time_ms": sample["Time_ms"], "last_pos": sample["Position"],
+                                         "sequence_gaps": sample["sequence_gaps"],
+                                         "device_epoch": sample["device_epoch"], "last_encoder_rx_mono": time.monotonic()})
+                    with speed_record_lock:
+                        for recorder in (speed_recorder, session_recorder):
+                            if recorder is not None:
+                                recorder.submit(sample)
                 else:
-                    #   新增：如果不是传感器数据，看看是不是驱动状态数据！
-                    match_drive = drive_pattern.search(line)
-                    if match_drive:
-                        sensor_state["mode"] = match_drive.group(1)
-                        sensor_state["throttle"] = int(match_drive.group(2))
+                    match = drive_pattern.search(line)
+                    if match:
+                        sensor_state["mode"] = match.group(1)
+                        sensor_state["throttle"] = int(match.group(2))
                         sensor_state["last_drive_line"] = line
-            else:
-                # Avoid a tight Python loop monopolizing the GIL while the
-                # ESP32 is quiet. 5 ms is still below its 10 ms sample interval.
-                time.sleep(SERIAL_IDLE_SLEEP_SEC)
-        except Exception as e:
+                    elif line.startswith('[ENC]'):
+                        sensor_state["invalid_encoder_lines"] = sensor_state.get("invalid_encoder_lines", 0) + 1
+                now = time.monotonic()
+                if SERIAL_DEBUG_PRINT and now - last_debug >= SERIAL_DEBUG_MIN_INTERVAL_SEC:
+                    print(f"ESP32 RX >> {line}")
+                    last_debug = now
+            if len(pending) > 4096:
+                pending.clear()
+                sensor_state["serial_framing_errors"] = sensor_state.get("serial_framing_errors", 0) + 1
+        except Exception as exc:
+            sensor_state["serial_error"] = str(exc)
             time.sleep(0.1)
 
 
@@ -733,8 +395,12 @@ class HighSpeedCamera:
 
         self.is_recording = False
         self.record_frames = []
-        self.record_target_count = 0
         self.record_session_id = ""
+        self.record_lock = threading.Lock()
+        self.record_done = threading.Event()
+        self.record_done.set()
+        self.record_error = None
+        self.record_deadline = 0.0
 
         # 如果初始状态为激活，则立刻打开相机
         if self.is_active:
@@ -801,13 +467,40 @@ class HighSpeedCamera:
             self._close_camera()
 
     def start_record(self, session_id, duration_sec=3):
-        if not self.is_active or not self.available or self.is_recording:
-            return False
-        self.record_target_count = int(self.target_fps * duration_sec)
+        with self.record_lock:
+            if not self.is_active or not self.available or not self.record_done.is_set():
+                return False
+            self.record_frames = []
+            self.record_session_id = session_id
+            self.record_deadline = time.monotonic() + duration_sec
+            self.record_error = None
+            self.record_done.clear()
+            self.is_recording = True
+            return True
+
+    def _finish_record_locked(self):
+        if not self.is_recording:
+            return
+        self.is_recording = False
+        frames = self.record_frames
         self.record_frames = []
-        self.record_session_id = session_id
-        self.is_recording = True
-        return True
+        session_id = self.record_session_id
+
+        def save():
+            try:
+                self._save_images_to_disk(frames, session_id)
+                if not frames:
+                    self.record_error = "录制期间没有收到相机帧"
+            except Exception as exc:
+                self.record_error = str(exc)
+                print(f"相机保存失败 [{self.name}]: {exc}")
+            finally:
+                self.record_done.set()
+        threading.Thread(target=save, name=f"Save-{self.name}", daemon=True).start()
+
+    def finish_record(self):
+        with self.record_lock:
+            self._finish_record_locked()
 
     def _update(self):
         stat_started_at = time.perf_counter()
@@ -826,16 +519,12 @@ class HighSpeedCamera:
                 self.buffer.append(frame)
                 self.latest_frame_ns = curr_ns
 
-                if self.is_recording:
-                    # cap.read() 每次返回独立 ndarray；直接保留引用，避免每帧再复制
-                    # 约 0.88 MiB 数据。预览路径读取时会自行 copy，不会修改此帧。
-                    self.record_frames.append((curr_ns, frame))
-                    if len(self.record_frames) >= self.record_target_count:
-                        self.is_recording = False
-                        frames_to_save = self.record_frames
-                        self.record_frames = []
-                        threading.Thread(target=self._save_images_to_disk,
-                                         args=(frames_to_save, self.record_session_id)).start()
+                with self.record_lock:
+                    if self.is_recording:
+                        if time.monotonic() < self.record_deadline:
+                            self.record_frames.append((curr_ns, frame))
+                        else:
+                            self._finish_record_locked()
 
                 stat_frame_count += 1
                 if stat_frame_count >= 100:
@@ -854,11 +543,13 @@ class HighSpeedCamera:
         print(f"⏳ [{self.name}] 正在保存 {len(frames_to_save)} 张图片...")
         for timestamp_ns, f in frames_to_save:
             filename = os.path.join(save_path, f"{timestamp_ns}.jpg")
-            cv2.imwrite(filename, f, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            if not cv2.imwrite(filename, f, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+                raise OSError(f"图片写入失败: {filename}")
         print(f"💾 [{self.name}] 图片保存完成！")
-        # 🚀 核心救命代码加在这里：强制同步磁盘！
-        os.sync()
-        print(f"✅ [{self.name}] 磁盘同步完成，数据已绝对安全！")
+        # Linux 上请求将图片同步到磁盘；异常由保存线程报告。
+        if hasattr(os, "sync"):
+            os.sync()
+        print(f"✅ [{self.name}] 图片写入和同步完成")
 
     def get_latest_frame(self):
         if not self.is_active:
@@ -988,14 +679,20 @@ def sensor_stats():
         "position": sensor_state["position"],
         "speed": f"{sensor_state['speed_pps']:.1f}",
         "mode": sensor_state["mode"],         # 🚀 新增
-        "throttle": sensor_state["throttle"]  # 🚀 新增
+        "throttle": sensor_state["throttle"],
+        "encoder_fresh": encoder_ready(),
+        "sequence_gaps": sensor_state.get("sequence_gaps", 0),
+        "device_epoch": sensor_state.get("device_epoch", 0),
+        "invalid_encoder_lines": sensor_state.get("invalid_encoder_lines", 0),
+        "serial_framing_errors": sensor_state.get("serial_framing_errors", 0),
+        "serial_error": sensor_state.get("serial_error")
     })
 
 
 @app.route('/speed_record/start', methods=['POST'])
 def speed_record_start():
     started, state = start_speed_recording()
-    status = "started" if started else "already_running"
+    status = "started" if started else "unavailable"
     return jsonify({"status": status, **state}), (200 if started else 409)
 
 
@@ -1027,49 +724,81 @@ def toggle_cam():
     return jsonify({"status": "error", "message": "unknown camera"}), 400
 
 
+def finalize_session(recorder, session_id, cameras):
+    global session_status
+    try:
+        recorder.done.wait()
+        for camera in cameras:
+            camera.finish_record()
+        deadline = time.monotonic() + 30.0
+        for camera in cameras:
+            if not camera.record_done.wait(max(0, deadline - time.monotonic())):
+                raise RuntimeError(f"{camera.name} 图片保存超时，原始 CSV 已保留")
+            if camera.record_error:
+                raise RuntimeError(f"{camera.name}: {camera.record_error}")
+        state = recorder.status()
+        if state["stop_reason"].startswith("error:"):
+            raise RuntimeError(state["stop_reason"])
+        enhanced = write_enhanced_sensor_csv(session_id, recorder.path, recorder.started_ns, recorder.stopped_ns)
+        with open(os.path.join(SAVE_DIR, session_id, "record_stats.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        if not enhanced:
+            raise RuntimeError("录制期间没有有效编码器数据，原始文件已保留")
+        with speed_record_lock:
+            session_status = {"active": False, "status": "saved", "session_id": session_id, **state}
+    except Exception as exc:
+        with speed_record_lock:
+            session_status = {**recorder.status(), "active": False, "status": "error",
+                              "session_id": session_id, "message": str(exc)}
+        print(f"多源记录失败: {exc}")
+    finally:
+        record_workflow_active.clear()
+
+
+@app.route('/record/status')
+def record_status():
+    with speed_record_lock:
+        state = dict(session_status)
+        if state.get("active") and session_recorder:
+            live = session_recorder.status()
+            state.update({key: live[key] for key in ("sample_count", "queue_drops", "sequence_gaps", "elapsed_sec")})
+            state["status"] = "recording" if live["active"] else "saving"
+    return jsonify(state)
+
+
 @app.route('/start_record')
 def start_record():
+    global session_recorder, session_status
     with record_command_lock:
-        serial_ready = bool(esp32_serial and esp32_serial.is_open)
-        if serial_ready and record_workflow_active.is_set():
-            return jsonify({"status": "busy", "message": "上一批传感器数据还在等待停稳或复制SD数据"}), 409
-
-        session_id = time.strftime("%Y%m%d_%H%M%S")
-        sensor_record_start_ns = None
-        if serial_ready:
+        if record_workflow_active.is_set():
+            return jsonify({"status": "busy", "message": "上一批记录仍在保存"}), 409
+        if not encoder_ready():
+            return jsonify({"status": "unavailable", "message": "没有新鲜编码器数据，请连接 ESP32 并烧录无 SD 版本固件"}), 409
+        cameras = [cam_left] + ([cam_right] if cam_right.is_active else [])
+        if any(not cam.is_active or not cam.available or not cam.record_done.is_set() for cam in cameras):
+            return jsonify({"status": "unavailable", "message": "请开启相机并等待其就绪或保存完成"}), 409
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        try:
+            with speed_record_lock:
+                session_recorder = CsvRecorder(os.path.join(SAVE_DIR, session_id, "sensor_data.csv"), 3.0)
+                recorder = session_recorder
+                session_status = {"active": True, "status": "recording", "session_id": session_id}
             record_workflow_active.set()
-            try:
-                sensor_record_start_ns = time.time_ns()
-                write_esp32_record_command(b's')
-            except Exception as e:
+            for camera in cameras:
+                if not camera.start_record(session_id=session_id, duration_sec=3):
+                    raise RuntimeError(f"{camera.name} 相机启动失败")
+        except Exception as exc:
+            if record_workflow_active.is_set():
+                recorder.stop("start_failed")
+                for camera in cameras:
+                    camera.finish_record()
                 record_workflow_active.clear()
-                print(f"⚠️ 多源记录启动ESP32录制失败: {e}")
-                return jsonify({"status": "error", "message": str(e)}), 500
+                with speed_record_lock:
+                    session_status = {"active": False, "status": "error", "message": str(exc)}
+            return jsonify({"status": "error", "message": str(exc)}), 500
+        threading.Thread(target=finalize_session, args=(recorder, session_id, cameras), daemon=True).start()
+    return jsonify({"status": "started", "session_id": session_id})
 
-        # 左相机必定录制
-        cam_left.start_record(session_id=session_id, duration_sec=3)
-
-        # 只有当右相机激活时才录制右侧
-        if cam_right.is_active:
-            cam_right.start_record(session_id=session_id, duration_sec=3)
-
-    print(f"📢 开始录制批次: {session_id} (单目/双目模式已自动识别)")
-
-    if serial_ready:
-
-        def stop_esp_recording():
-            try:
-                time.sleep(3.0)
-                sensor_record_stop_ns = time.time_ns()
-                write_esp32_record_command(b'p')
-                time.sleep(0.2)
-                copy_latest_sd_log_to_session(
-                    session_id, sensor_record_start_ns, sensor_record_stop_ns)
-            finally:
-                record_workflow_active.clear()
-        threading.Thread(target=stop_esp_recording, daemon=True).start()
-
-    return jsonify({"status": "started"})
 
 # --- 新增：接收前端油门控制指令 ---
 
@@ -1084,9 +813,6 @@ def set_throttle():
         val = int(val_str)
         # 安全断言保护
         if 1000 <= val <= 2000:
-            if serial_transfer_active.is_set():
-                print(f"🛡️ SD数据复制期间丢弃普通油门指令: {val} us")
-                return jsonify({"status": "ignored", "reason": "sd_copy_active", "throttle": sensor_state["throttle"]}), 409
             if brake_sequence_active.is_set():
                 print(f"🛡️ 反向制动期间丢弃普通油门指令: {val} us")
                 return jsonify({"status": "ignored", "reason": "brake_sequence_active", "throttle": sensor_state["throttle"]}), 409
@@ -1139,8 +865,6 @@ def reverse_brake_sequence(token, source_pwm, brake_pwm):
 def e_stop():
     """最高优先级：按当前方向反向小PWM制动2秒后归中。"""
     global estop_ignore_until, brake_sequence_token
-    if serial_transfer_active.is_set():
-        return jsonify({"status": "busy", "message": "SD数据正在复制，串口暂时被占用", "throttle": 1500}), 409
     if esp32_serial and esp32_serial.is_open:
         payload = request.get_json(silent=True) or {}
         requested_pwm = clamp_throttle_value(
@@ -1159,7 +883,6 @@ def e_stop():
 
         with serial_write_lock:
             esp32_serial.reset_output_buffer()
-            esp32_serial.reset_input_buffer()
 
         threading.Thread(
             target=reverse_brake_sequence,

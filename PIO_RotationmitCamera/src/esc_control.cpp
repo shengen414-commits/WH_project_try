@@ -130,7 +130,7 @@ void IRAM_ATTR rcInterrupt()
     }
 }
 
-void handleESCCommand(char cmd)
+void handleESCCommand(char cmd, int throttleValue)
 {
     // 🚀 新增：最高优先级急停指令
     if (cmd == 'E' || cmd == 'e')
@@ -154,7 +154,6 @@ void handleESCCommand(char cmd)
     // 普通油门指令保持不变
     else if (cmd == 'T' || cmd == 't')
     {
-        int throttleValue = Serial.parseInt();
         if (millis() < estopLatchedUntil)
         {
             Serial.println("[E-STOP] 忽略急停保护窗口内的普通油门指令");
@@ -164,7 +163,6 @@ void handleESCCommand(char cmd)
     }
     else if (cmd == 'B' || cmd == 'b')
     {
-        int throttleValue = Serial.parseInt();
         if (millis() < estopLatchedUntil)
         {
             Serial.println("[E-STOP] Ignored boost command during protection window");
@@ -177,7 +175,6 @@ void handleESCCommand(char cmd)
 // --- 初始化函数 ---
 void initESC()
 {
-    Serial.setTimeout(20);
 
     // 为 ESP32 分配底层定时器
     ESP32PWM::allocateTimer(0);

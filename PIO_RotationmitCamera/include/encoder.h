@@ -14,3 +14,4 @@ extern volatile long pulseCount;
 // 【声明初始化函数】
 // 告诉大堂经理 (main.cpp)，它只要调用这个函数，编码器就会准备好
 void initEncoder();
+long readEncoderPosition();
