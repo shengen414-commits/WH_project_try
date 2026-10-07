@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+constexpr uint8_t LOW = 0;
+constexpr uint8_t HIGH = 1;
 
 struct FakeSerial {
     std::string input;

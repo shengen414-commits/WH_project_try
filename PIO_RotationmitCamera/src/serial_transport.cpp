@@ -9,6 +9,7 @@ constexpr unsigned long SAMPLE_INTERVAL_MS = 10;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 100;
 constexpr unsigned long LINE_DEBUG_INTERVAL_MS = 200;
 bool lineDebugMode = false;
+bool lineCaptureMode = false;
 unsigned long lastLineDebugAt = 0;
 char command = 0;
 char digits[5];
@@ -38,9 +39,14 @@ void pollSerialCommands() {
         if (!command) {
             if (value == 'L' || value == 'l') {
                 lineDebugMode = true;
+                lineCaptureMode = false;
                 lastLineDebugAt = millis() - LINE_DEBUG_INTERVAL_MS;
+            } else if (value == 'G' || value == 'g') {
+                lineDebugMode = false;
+                lineCaptureMode = true;
             } else if (value == 'R' || value == 'r') {
                 lineDebugMode = false;
+                lineCaptureMode = false;
             }
             continue;
         }
@@ -60,7 +66,7 @@ void pollSerialCommands() {
 }
 
 void publishEncoder() {
-    if (lineDebugMode) return;
+    if (lineDebugMode || lineCaptureMode) return;
     unsigned long now = millis();
     if (now - lastSampleAt < SAMPLE_INTERVAL_MS) return;
     lastSampleAt = now;

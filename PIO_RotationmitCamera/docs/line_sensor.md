@@ -64,6 +64,40 @@ pio device monitor -b 115200 --filter send_on_enter
 
 输入 `L` 后回车；恢复时输入 `R` 后回车。
 
+## G：记录中线并绘图
+
+串口终端本身只能显示文本，绘图由独立的 `PyScripts/line_debug_plot.py` 完成。ESP32 的 `G/g` 命令切换到约 100Hz 的 `[LINE]` 数据流并暂停 `[ENC]`；Python 工具负责计时、保存和绘图。在普通串口监视器中发送 G 只会开始数据输出，不会自动生成图片。
+
+1. 重新编译并烧录当前固件。
+2. 关闭 PlatformIO 串口监视器和占用该串口的 Orange Pi 程序。
+3. 在仓库根目录运行（COM12 替换为实际 ESP32 串口）：
+
+```powershell
+python PyScripts/line_debug_plot.py --port COM12
+```
+
+4. 在 Python 工具的 `Command >` 提示符中输入 `G` 后回车，开始默认 10 秒记录。移动黑胶带，观察它在探头阵列下的位置变化。
+5. 到时自动停止记录并弹出图窗，同时保存 CSV、PNG 到 `Car_Records/Line_Debug/`。关闭图窗回到输入提示，可再次输入 G 录制。
+6. 输入 Q 退出并恢复正常数据流；R 也可以恢复正常数据流。图窗打开期间 ESP32 保持 L 模式，采集继续运行，ENC 上报暂停。
+
+自定义记录时长：
+
+```powershell
+python PyScripts/line_debug_plot.py --port COM12 --duration 30
+```
+
+无桌面环境时加 `--no-show`，仅保存文件。用 `--reverse` 翻转纵轴通道方向。不指定 `--port` 时工具列出串口并提示选择。依赖 pyserial、matplotlib（仓库 requirements.txt 已包含）。
+
+横轴为收到的首个样本起算的 ESP32 时间（秒），纵轴为黑线中心相对探头阵列中心的位置，单位为探头间距：CH1=-3.5、CH8=+3.5，CH4/CH5 中间为 0。黑线命中的连续通道按等权平均估算中心；二值传感器无法提供连续灰度精度。CH1/CH8 的物理左右方向按实际安装确认。
+
+全无黑线标记为 lost；全黑为 all_black；多个不连续命中组为 multiple。三种情况均无唯一可信中线，图上用标记表示、曲线断开，CSV center 留空。丢帧或超过 50ms 的间隔也断开曲线，CSV 保留帧编号和 missing_before；设备重启/数据倒序则终止此次采集并报错。
+
+仅查看绘图效果（模拟数据，不代表实测）：
+
+```powershell
+python PyScripts/line_debug_plot.py --demo
+```
+
 1. 修正 AD0 接线与配置，确认 OUT 电平，给模块供电并共地。
 2. 在工程目录运行 `pio run`，烧录后打开 115200 波特率串口监视器。
 3. 应先看到 `[LINE_READY]`，随后持续出现 `[LINE]` 和 `[ENC]`。

@@ -3,12 +3,15 @@
 #include <vector>
 #include "Arduino.h"
 #include "serial_transport.h"
+#include "line_sensor.h"
 
 FakeSerial Serial;
 unsigned long clockMs = 0;
 std::vector<std::pair<char, int>> commands;
 unsigned long millis() { return clockMs; }
 long readEncoderPosition() { return -42; }
+LineSensorFrame sensorFrame = {0, 130, 231, 24};
+bool readLineSensorFrame(LineSensorFrame &frame) { frame = sensorFrame; return true; }
 void handleESCCommand(char cmd, int pwm) {
     commands.emplace_back(cmd, pwm);
     if (cmd == 'E') Serial.input.clear();  // Existing ESC emergency handler clears queued commands.
@@ -49,6 +52,27 @@ int main() {
     clockMs = 130;
     publishEncoder();
     assert(Serial.output == "[ENC],0,110,-42\n[ENC],2,130,-42\n");
+
+    Serial.output.clear();
+    feed("L\n");
+    publishEncoder();
+    assert(Serial.output.empty());
+    publishLineSensor();
+    assert(Serial.output == "[LINE_DBG] raw=11100111 line=00011000\n");
+    Serial.output.clear();
+    ++sensorFrame.sequence;
+    clockMs = 140;
+    publishLineSensor();
+    assert(Serial.output.empty());  // Human debug output is limited to 5 Hz.
+    feed("G\n");
+    publishEncoder();
+    assert(Serial.output.empty());
+    publishLineSensor();
+    assert(Serial.output == "[LINE],1,130,231,24\n");
+    Serial.output.clear();
+    feed("R\n");
+    publishEncoder();
+    assert(Serial.output == "[ENC],3,140,-42\n");
 
     Serial.input = std::string(100, '?');
     pollSerialCommands();
