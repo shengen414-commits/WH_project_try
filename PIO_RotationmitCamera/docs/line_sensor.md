@@ -98,6 +98,30 @@ python PyScripts/line_debug_plot.py --port COM12 --duration 30
 python PyScripts/line_debug_plot.py --demo
 ```
 
+## 曲线与指示灯不一致时
+
+新版 Python 图包含三个面板：中线、八路 OUT 原始电平、八路黑线命中状态，同时保存 `_diagnostics.txt` 统计。八路命中图中的蓝色应随单条黑胶带依次从 CH1 移到 CH8 再返回；单探头试验中若多个不相邻通道同时变化，需检查地址线、接口顺序、共地和电平兼容性。灯正常变化只说明各探头的本地检测有效，不能证明地址复用输出正常。
+
+可重绘已保存 CSV，无需连接 ESP32，无需烧录新固件：
+
+```bash
+python PyScripts/line_debug_plot.py --csv Car_Records/Line_Debug/实际文件名.csv --no-show
+```
+
+静态校验：全木板时 raw 应为 11111111；只把 CH1 放到黑胶带上时应为 01111111；只把 CH8 放到黑胶带上时应为 11111110（均按 CH1→CH8 排列）。每个位置保持约一秒，逐个测试。
+
+`0 missing frames` 只表示接收的序号连续，不保证通道选择或电平读取正确。all_black 表示读数认为八路全黑；multiple 表示不连续通道命中。不要通过强行计算这些样本的均值来掩盖异常，也不要仅凭图就断定某一根线有故障。
+
+若怀疑黑线极性，可显式重绘对照图：
+
+```bash
+python PyScripts/line_debug_plot.py --csv Car_Records/Line_Debug/实际文件名.csv --line-level high --no-show
+```
+
+`--line-level high/low` 从 raw_mask 重新计算命中位置，也适用于实时录制。原文件不会被修改，新 CSV 用 reported_line_mask 保留固件上报的掩码，并记录 center_line_level。未指定该参数时继续使用固件上报的 line_mask。
+
+仅当静态单探头测试确认黑线对应 HIGH 后，才将固件 include/line_sensor.h 的 LINE_LEVEL 改为 HIGH 并烧录。原始 raw_mask 的电平含义不受此配置影响；调试文本中的 line= 是命中标记，不是原始电平，命中时对应位总为 1。
+
 1. 修正 AD0 接线与配置，确认 OUT 电平，给模块供电并共地。
 2. 在工程目录运行 `pio run`，烧录后打开 115200 波特率串口监视器。
 3. 应先看到 `[LINE_READY]`，随后持续出现 `[LINE]` 和 `[ENC]`。

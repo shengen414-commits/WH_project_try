@@ -1,14 +1,46 @@
 import math
 import sys
 import unittest
+import csv
+import tempfile
 from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from line_debug_plot import FrameTimeline, collect, decode_frame, line_center
+from line_debug_plot import FrameTimeline, collect, decode_frame, line_center, load_recording, diagnostic_summary
 
 
 class LinePlotTests(unittest.TestCase):
+    def test_high_polarity_recovers_single_probe_sweep(self):
+        timeline = FrameTimeline(line_level="high")
+        centers = []
+        for i, channel in enumerate(list(range(8)) + list(range(7, -1, -1))):
+            raw = 1 << channel
+            row = timeline.add((i, i * 10, raw, raw ^ 255))
+            self.assertEqual(row["status"], "valid")
+            self.assertEqual(row["reported_line_mask"], raw ^ 255)
+            centers.append(row["center"])
+        self.assertEqual(centers, [i - 3.5 for i in range(8)] + [i - 3.5 for i in range(7, -1, -1)])
+        row = timeline.add((16, 160, 0, 255))
+        self.assertEqual(row["status"], "lost")
+
+    def test_replot_recomputes_center_from_masks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "recording.csv"
+            with path.open("w", newline="", encoding="utf-8-sig") as output:
+                writer = csv.writer(output)
+                writer.writerow(["sequence", "device_time_ms", "raw_mask", "line_mask", "center"])
+                writer.writerow([10, 100, 254, 1, 999])
+                writer.writerow([11, 110, 231, 24, 999])
+                writer.writerow([12, 120, 0, 255, 999])
+            rows = load_recording(path)
+            self.assertEqual(rows[0]["center"], -3.5)
+            self.assertEqual(rows[1]["center"], 0)
+            self.assertTrue(math.isnan(rows[2]["center"]))
+            report = diagnostic_summary(rows)
+            self.assertIn("all_black: 1", report)
+            self.assertIn("01111111", report)
+
     def test_center_and_polarity(self):
         self.assertEqual(line_center(0b00011000), (0.0, "valid"))
         self.assertEqual(line_center(1), (-3.5, "valid"))
