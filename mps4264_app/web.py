@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import threading
+import time
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, g, jsonify, render_template, request
 
 from .controller import MPS4264Controller, MPSControllerError
 from .plotting import register_plot_routes
+from .diagnostics import begin_trace, end_trace, create_timing_logger, request_summary, write_timing
 
 
 def create_app(controller: MPS4264Controller | None = None,
@@ -17,6 +19,46 @@ def create_app(controller: MPS4264Controller | None = None,
     service = controller or MPS4264Controller()
     app.config["MPS_CONTROLLER"] = service
     register_plot_routes(app, data_dir=service.data_dir)
+    timing_logger, timing_path = create_timing_logger(service.data_dir)
+    app.config["MPS_TIMING_LOG_PATH"] = str(timing_path)
+    app.config["MPS_TIMING_LOGGER"] = timing_logger
+
+    @app.before_request
+    def start_request_timing():
+        if request.path.startswith("/api/"):
+            g.mps_timing_start = time.perf_counter()
+            g.mps_timing_trace, g.mps_timing_token = begin_trace(
+                request.path, request.headers.get("X-MPS-Trace-ID"))
+
+    @app.after_request
+    def finish_request_timing(response):
+        if not hasattr(g, "mps_timing_trace"):
+            return response
+        summary = request_summary(g.mps_timing_trace, g.mps_timing_start)
+        summary.update(method=request.method, http_status=response.status_code)
+        response.headers["X-MPS-Trace-ID"] = summary["trace_id"]
+        response.headers["X-MPS-Server-Ms"] = str(summary["server_ms"])
+        response.headers["X-MPS-Controller-Wait-Ms"] = str(summary["controller_lock_wait_ms"])
+        response.headers["X-MPS-TCP-Wait-Ms"] = str(summary["tcp_lock_wait_ms"])
+        if request.method == "POST":
+            payload = response.get_json(silent=True)
+            if isinstance(payload, dict):
+                payload["_timing"] = summary
+                response.set_data(app.json.dumps(payload))
+        # Keep routine status polling quiet. Slow GETs expose lock/backlog stalls.
+        if request.method == "POST" or summary["server_ms"] >= 500:
+            try:
+                write_timing(timing_logger, summary)
+            except (OSError, ValueError):
+                app.logger.exception("命令计时日志写入失败；不改变设备操作结果")
+        return response
+
+    @app.teardown_request
+    def reset_request_timing(exc):
+        token = getattr(g, "mps_timing_token", None)
+        if token is not None:
+            end_trace(token)
+            del g.mps_timing_token
     conversion = {"state": "idle", "result": None, "error": None}
     conversion_lock = threading.Lock()
 
@@ -45,7 +87,8 @@ def create_app(controller: MPS4264Controller | None = None,
 
     @app.get("/api/status")
     def status():
-        return jsonify(service.status())
+        state = service.try_status()
+        return jsonify(state), (202 if state.get("busy") else 200)
 
     @app.get("/api/files")
     def files():

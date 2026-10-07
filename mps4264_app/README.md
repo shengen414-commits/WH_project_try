@@ -116,6 +116,49 @@ mps.disconnect()
 
 ## 验证和限制
 
+### 命令分段耗时日志
+
+每次网页 POST 操作（命令窗口、SET、SCAN、STOP、SAVE 等），命令窗口都会新增
+“耗时 [ui-…]”记录。同一 ID 出现在 HTTP 返回和后台 JSONL 日志中，可对应查找。
+后台日志在当前 `--data-dir` 下的 `diagnostics/command_timing.jsonl`，默认就是
+`mps4264_app/recordings/diagnostics/command_timing.jsonl`；启动服务的终端也会输出。
+每个日志文件最多约 2 MiB，保留 3 个轮转备份。正常状态轮询不落日志，超过 500 ms
+的慢 GET 会记录，以便发现状态查询排队。日志本身不改变重连或设备回复超时。
+
+状态/转换进度/文件列表请求均采用单请求在途保护，状态轮询在上一请求完成后等待
+200 ms 再发下一次。`/api/status` 在控制锁忙时返回 202 + `busy=true`，不排队等锁，
+网页保留上一次状态并显示忙碌说明。控制操作直接用返回的状态更新事件与计数，
+不再为了辅助状态/文件列表刷新延长按钮的等待。`status_epoch/status_revision` 避免
+较旧响应覆盖新的状态。STOP 超时会保留未确认的扫描状态和打开的文件；恢复通信后
+可以重试 STOP，不会记录虚假的“已停止”或继续关闭文件。
+
+SCAN 按钮结束等待只表示 SCAN 命令发送完成，不是采集完成。2500 Hz × 10000 帧
+理论采集时长为 4 秒；UDP 字节为零说明尚未收到数据，不能仅凭按钮状态判定扫描成功。
+当前不会自动重发 SCAN、STOP、SET 或自动重连。
+
+```bash
+tail -n 20 mps4264_app/recordings/diagnostics/command_timing.jsonl
+```
+
+字段说明：
+
+- `server_ms`：从 Flask 接收请求到生成计时摘要的后台耗时，含业务处理和等锁；
+  不含请求抵达 Flask 之前的排队、网络传输和随后日志写入/追加计时字段的开销。
+- `controller_lock_wait_ms` / `tcp_lock_wait_ms`：本次请求累计等待控制器/TCP锁的时间。
+- `commands`：实际发送的每条 TCP 命令，包含 `send_ms`、`first_tcp_byte_ms`（收到首个 TCP
+  数据字节）、`first_text_ms`（过滤 Telnet 协商后首段文字）、`response_ms`（读取完整回复
+  或直到出错的时间）、`rx_bytes`、`prompt_received`、`outcome`、`error`。
+- 没收到字节时，首字节/首文字时间为 `null`，不是零。失败请求也有计时。
+  SCAN 仍只发送，不等提示符，`waits_for_prompt=false`，不会错误标为已获设备确认。
+  STOP 额外记录 `stop_drain_ms`（清理残留回复的耗时）。
+- 浏览器窗口显示的“网页总”包含请求等待、传输、后台处理和 JSON 解析。浏览器控制台
+  `[MPS timing]` 还包含 Resource Timing 指标。“浏览器发请求前”可能包含排队、DNS/TCP
+  建连等，不能全部归为排队；网页总减后台耗时也不能全部归为网络延迟。
+
+例如控制锁等待很长而 TCP 回复很快，应检查后台并发；网页总很长而后台很快，
+应检查浏览器排队、网络/代理和前端；首字节很久或直到超时一直为 null，才指向
+设备回复、旧 TCP 会话或通信问题。计时使用单调时钟，不跨电脑比较绝对时间。
+
 ### 快速组与 DAT 帧头不一致
 
 手册将普通帧标为 `0x0A`、快速帧标为 `0x10`。转换器不再仅凭 `0x0A`

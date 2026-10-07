@@ -12,12 +12,14 @@ import re
 import socket
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import BinaryIO
 
 from .protocol import FAST_TYPE, PressureFrame, convert_binary_to_csv, decode_datagram
 from .transport import MPSControlConnection
+from .diagnostics import TimedRLock
 
 
 class MPSControllerError(RuntimeError):
@@ -34,7 +36,7 @@ class MPS4264Controller:
 
     def __init__(self, data_dir: str | Path | None = None):
         self.data_dir = Path(data_dir or Path(__file__).parent / "recordings").resolve()
-        self._lock = threading.RLock()
+        self._lock = TimedRLock("controller")
         self._client: MPSControlConnection | None = None
         self._device_ip: str | None = None
         self._device_port = 23
@@ -64,6 +66,8 @@ class MPS4264Controller:
         self._last_frame: PressureFrame | None = None
         self._last_receive_unix_ns: int | None = None
         self._last_error: str | None = None
+        self._status_epoch = uuid.uuid4().hex
+        self._status_revision = 0
         self._events: deque[dict] = deque(maxlen=80)
         self._log("面板就绪；尚未连接设备")
 
@@ -394,7 +398,7 @@ class MPS4264Controller:
                 self._scanning = False
                 self._scan_started_monotonic_ns = None
                 raise
-            self._log("已发送 SCAN；开始接收并写入原始二进制帧")
+            self._log("已发送 SCAN；UDP 监听已启动，等待压力帧")
             return self.status()
 
     def stop(self) -> dict:
@@ -409,6 +413,12 @@ class MPS4264Controller:
                 with self._lock:
                     self._last_error = f"STOP 命令未确认：{exc}"
                 stop_error = self._last_error
+        if stop_error:
+            with self._lock:
+                self._log("STOP 未确认；扫描状态仍待确认，采集文件保持打开，可恢复通信后重试 STOP")
+            # Do not claim stopped or let close_file proceed after a failed STOP.
+            # Keeping the state also ensures the next STOP really sends a command.
+            raise MPSControllerError(stop_error)
         # Give in-flight UDP datagrams time to reach the already-open file.
         if was_scanning:
             time.sleep(0.2)
@@ -416,10 +426,10 @@ class MPS4264Controller:
             self._scanning = False
             self._scan_started_monotonic_ns = None
             if was_scanning:
+                if self._last_error and self._last_error.startswith("STOP 命令未确认"):
+                    self._last_error = None
                 self._log("扫描已停止；文件仍打开，可继续 SCAN 或关闭文件")
             result = self.status()
-        if stop_error:
-            raise MPSControllerError(stop_error)
         return result
 
     def close_file(self) -> dict:
@@ -506,13 +516,25 @@ class MPS4264Controller:
                 self._log(f"转换提醒：{warning}")
         return result
 
+    def try_status(self) -> dict:
+        """UI polling never queues behind a slow device operation."""
+        if not self._lock.acquire(blocking=False):
+            return {"busy": True, "retry_after_ms": 200}
+        try:
+            return self.status()
+        finally:
+            self._lock.release()
+
     def status(self) -> dict:
         with self._lock:
+            self._status_revision += 1
             frame = self._last_frame
             no_udp_warning = bool(self._scanning and self._frames == 0 and
                                   self._scan_started_monotonic_ns is not None and
                                   time.monotonic_ns() - self._scan_started_monotonic_ns > 3_000_000_000)
             return {
+                "status_epoch": self._status_epoch,
+                "status_revision": self._status_revision,
                 "connected": self._client is not None,
                 "device_ip": self._device_ip,
                 "device_port": self._device_port,

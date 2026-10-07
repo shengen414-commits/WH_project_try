@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MPS4264 压力扫描控制台</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='app.js', v='20261007-single-flight') }}" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -15,6 +15,7 @@
   <main>
     <p><a href="/plot" target="_blank" rel="noopener">打开 CSV 压力—时间图：选择通道、查看历史采集、保存图片</a></p>
     <div id="message" class="message" role="status">请先核对设备铭牌和 IP，再连接。</div>
+    <p id="status-refresh-note" class="hint" role="status">正在读取状态…</p>
 
     <section class="metrics">
       <div class="metric"><span>采集状态</span><strong id="scan-state">待机</strong></div>

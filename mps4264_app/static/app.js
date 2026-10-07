@@ -7,6 +7,9 @@ const colors = ["#3cc7db", "#e4ad63", "#96d38c", "#e986a3", "#a6a0ed", "#d4cb71"
 let history = [];
 let lastFrameKey = "";
 let latestStatus = null;
+let statusRequest = null, conversionRequest = null, filesRequest = null;
+let statusGeneration = 0, controlsInFlight = 0, terminalBusy = false;
+let statusEpoch = null, statusRevision = -1;
 
 function showMessage(message, error = false) {
   const box = $("message");
@@ -15,13 +18,46 @@ function showMessage(message, error = false) {
 }
 
 async function api(path, payload = null) {
-  const response = await fetch(path, {
+  const started = performance.now();
+  const measured = payload !== null;
+  const traceId = measured ? `ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,10)}` : null;
+  const url = measured ? `${path}${path.includes('?') ? '&' : '?'}_trace=${traceId}` : path;
+  let response;
+  try {
+    response = await fetch(url, {
     method: payload === null ? "GET" : "POST",
-    headers: payload === null ? {} : { "Content-Type": "application/json" },
+    headers: payload === null ? {} : { "Content-Type": "application/json", "X-MPS-Trace-ID": traceId },
     body: payload === null ? undefined : JSON.stringify(payload),
     cache: "no-store",
-  });
+    });
+  } catch (error) {
+    if (measured) {
+      const total = performance.now()-started;
+      appendTerminal(`耗时 [${traceId}] ${path}：网页总 ${total.toFixed(1)}ms；未取得服务端响应：${error.message}`);
+      console.info('[MPS timing]', {trace_id:traceId,path,client_total_ms:total,error:error.message});
+    }
+    throw error;
+  }
   const data = await response.json().catch(() => ({}));
+  if (measured) {
+    // A POST snapshot is newer than polls started before its completion.
+    statusGeneration++;
+    const state = data.status || (typeof data.connected === 'boolean' ? data : null);
+    if (state) renderStatus(state);
+  }
+  if (measured) {
+    const total = performance.now() - started, timing = data._timing;
+    const entries = performance.getEntriesByName(new URL(url, location.href).href);
+    const entry = entries[entries.length-1];
+    const f = value => value === null || value === undefined ? '未收到' : `${Number(value).toFixed(1)}ms`;
+    const commands = timing?.commands?.map(c => `${c.command}：发送 ${f(c.send_ms)}，首字节 ${f(c.first_tcp_byte_ms)}，完整回复 ${f(c.response_ms)}，${c.outcome}${c.waits_for_prompt ? (c.prompt_received ? '（收到 >）' : '（未收到 >）') : '（仅发送，不等待回复）'}${c.stop_drain_ms !== undefined ? '，STOP清理 '+f(c.stop_drain_ms) : ''}`).join('；');
+    const browserBefore = entry && entry.requestStart > 0 ? entry.requestStart-entry.fetchStart : null;
+    const message = `耗时 [${timing?.trace_id || traceId}] ${path}：网页总 ${f(total)}，后台 ${f(timing?.server_ms)}，控制锁等待 ${f(timing?.controller_lock_wait_ms)}，TCP锁等待 ${f(timing?.tcp_lock_wait_ms)}，浏览器发请求前 ${f(browserBefore)}${commands ? '\n  '+commands : ''}`;
+    appendTerminal(message);
+    console.info('[MPS timing]', {trace_id: timing?.trace_id || traceId, path, client_total_ms:total,
+      browser_before_request_ms:browserBefore, ttfb_ms:entry && entry.responseStart>0 ? entry.responseStart-entry.requestStart : null,
+      client_minus_server_ms:timing ? Math.max(0,total-timing.server_ms) : null, server:timing});
+  }
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
@@ -29,16 +65,22 @@ async function api(path, payload = null) {
 function onClick(id, action, successText) {
   $(id).addEventListener("click", async () => {
     const button = $(id);
+    if (controlsInFlight && !['stop-btn','close-btn'].includes(id)) {
+      showMessage('已有控制操作正在等待回复；请勿重复发送。STOP/关闭文件仍可操作。', true);
+      return;
+    }
     button.disabled = true;
+    controlsInFlight++;
     try {
       const result = await action();
       if (result === false) return;
       showMessage(successText || "操作已完成");
-      await refreshStatus();
+      refreshStatus().catch(() => {});
       return result;
     } catch (error) {
       showMessage(error.message, true);
     } finally {
+      controlsInFlight--;
       button.disabled = false;
     }
   });
@@ -58,12 +100,19 @@ function appendTerminal(text) {
 async function sendTerminalCommand(command) {
   const line = command.trim();
   if (!line) return;
+  const emergency = ['STOP'].includes(line.toUpperCase());
+  if (terminalBusy || (controlsInFlight && !emergency)) {
+    showMessage('已有控制操作正在等待回复，请勿重复发送命令。', true);
+    return;
+  }
   let confirmed = false;
   if (line.toUpperCase() === "CALZ") {
     confirmed = confirm("确认当前满足 CALZ 校零条件：CAL/REF 等压，或 PX 状态下无风、无测点压差？");
     if (!confirmed) return;
   }
   const button = $("terminal-send");
+  terminalBusy = true;
+  controlsInFlight++;
   button.disabled = true;
   appendTerminal(`> ${line}`);
   try {
@@ -72,11 +121,13 @@ async function sendTerminalCommand(command) {
     });
     appendTerminal(result.response.trimEnd());
     showMessage(`命令 ${line} 已完成。`);
-    await refreshStatus();
+    refreshStatus().catch(() => {});
   } catch (error) {
     appendTerminal(`ERROR: ${error.message}`);
     showMessage(error.message, true);
   } finally {
+    terminalBusy = false;
+    controlsInFlight--;
     button.disabled = false;
     $("terminal-input").focus();
   }
@@ -117,15 +168,15 @@ onClick("new-file-btn", async () => {
   const name = $("file-name").value.trim() || `mps_${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}`;
   $("file-name").value = name;
   const result = await api("/api/new-file", { name, udp_port: udpPort() });
-  await refreshFiles();
+  refreshFiles().catch(() => {});
   history = []; lastFrameKey = ""; drawChart();
   return result;
 }, "已新建文件并监听 UDP；现在可以 SCAN。");
-onClick("scan-btn", () => api("/api/scan", {}), "已发送 SCAN；正在接收 UDP 数据。");
-onClick("stop-btn", () => api("/api/stop", {}), "已发送 STOP；可继续扫描或关闭文件。");
+onClick("scan-btn", () => api("/api/scan", {}), "已发送 SCAN；等待 UDP 压力帧，请观察字节数（发送成功不等于采集成功）。");
+onClick("stop-btn", () => api("/api/stop", {}), "停止操作已完成；可继续扫描或关闭文件。");
 onClick("close-btn", async () => {
   const result = await api("/api/close-file", {});
-  await refreshFiles();
+  refreshFiles().catch(() => {});
   return result;
 }, "采集文件已关闭；可以转换 CSV。");
 onClick("refresh-files-btn", refreshFiles, "文件列表已刷新。");
@@ -195,8 +246,28 @@ function renderChannels(frame) {
   });
 }
 
-async function refreshStatus() {
-  const state = await api("/api/status");
+function refreshStatus() {
+  if (statusRequest) return statusRequest;
+  const generation = statusGeneration;
+  statusRequest = (async () => {
+    const state = await api('/api/status');
+    if (generation !== statusGeneration) return;
+    if (state.busy) {
+      $('status-refresh-note').textContent = '后台正在处理控制操作；保留上次状态，查询不会排队。';
+      return;
+    }
+    renderStatus(state);
+  })().finally(() => { statusRequest = null; });
+  return statusRequest;
+}
+
+function renderStatus(state) {
+  if (state.status_epoch && Number.isFinite(state.status_revision)) {
+    if (state.status_epoch === statusEpoch && state.status_revision < statusRevision) return;
+    statusEpoch = state.status_epoch;
+    statusRevision = state.status_revision;
+  }
+  $('status-refresh-note').textContent = '状态已更新';
   latestStatus = state;
   $("connection-light").classList.toggle("online", state.connected);
   $("connection-text").textContent = state.connected ? `已连接 ${state.device_ip}` : "未连接";
@@ -237,7 +308,13 @@ async function refreshStatus() {
   else if (state.no_udp_warning) showMessage("SCAN 已发出，但 3 秒内没有收到压力帧。请核对 LIST UDP 的目标 IP/端口、设备重启状态和防火墙。", true);
 }
 
-async function refreshFiles() {
+function refreshFiles() {
+  if (filesRequest) return filesRequest;
+  filesRequest = updateFiles().finally(() => { filesRequest = null; });
+  return filesRequest;
+}
+
+async function updateFiles() {
   const data = await api("/api/files");
   const select = $("convert-file");
   const selected = select.value;
@@ -246,7 +323,13 @@ async function refreshFiles() {
   select.value = selected;
 }
 
-async function refreshConversion() {
+function refreshConversion() {
+  if (conversionRequest) return conversionRequest;
+  conversionRequest = updateConversion().finally(() => { conversionRequest = null; });
+  return conversionRequest;
+}
+
+async function updateConversion() {
   const job = await api("/api/convert-status");
   $("convert-status").textContent = job.state === "running" ? "正在后台转换…"
     : job.state === "done" ? `已完成：${job.result.frames} 帧 → ${job.result.csv_file}${job.result.warnings?.length ? '；提醒：' + job.result.warnings.join('；') : ''}`
@@ -255,9 +338,16 @@ async function refreshConversion() {
 
 $("chart-channels").addEventListener("change", drawChart);
 setInterval(() => { $("clock").textContent = new Date().toLocaleTimeString(); }, 1000);
-setInterval(() => refreshStatus().catch((error) => showMessage(`状态读取失败：${error.message}`, true)), 200);
-setInterval(() => refreshConversion().catch(() => {}), 1000);
-refreshStatus().catch(() => {});
+async function pollStatus() {
+  try { await refreshStatus(); }
+  catch (error) { $('status-refresh-note').textContent = `状态读取失败：${error.message}`; }
+  finally { setTimeout(pollStatus, 200); }
+}
+async function pollConversion() {
+  try { await refreshConversion(); } catch (_) {}
+  finally { setTimeout(pollConversion, 1000); }
+}
+pollStatus();
 refreshFiles().catch(() => {});
-refreshConversion().catch(() => {});
+pollConversion();
 drawChart();
