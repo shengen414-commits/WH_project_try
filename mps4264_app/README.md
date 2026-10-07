@@ -41,7 +41,58 @@ python3 -m mps4264_app.main --host 0.0.0.0 --port 5055
 
 实时趋势图约每 200 ms 获取最新帧一次，仅用于观察；所有收到的有效原始帧仍直接写盘。UDP 本身不保证不丢帧，请查看帧号缺口并与 FPS 比较。设备时间、主机接收时间和相机曝光时间**并非天然同步**。
 
-## 供其他程序导入
+## CSV 多通道压力—时间图
+
+原有采集面板首页新增“打开 CSV 压力—时间图”入口，地址为
+`http://127.0.0.1:5055/plot`。它只读取历史 CSV，不连接扫描阀，也不发送设备命令。
+支持 ScanTel 的 `FTime/01Press` 格式和本程序的 `frame_time_sec/P01` 格式。
+可以从浏览器上传 CSV，或者选择服务端 `--data-dir` 目录中的 CSV；上传内容仅在内存中解析，不会保存到服务器。
+
+也可以不启动采集程序，单独运行绘图服务（不需要 sudo，不会配置网口）：
+
+```bash
+# 在 WH_project_try 项目根目录、已安装 Flask 的虚拟环境中
+python3 -m mps4264_app.plotting
+# 自动打开某份 CSV 的数据
+python3 -m mps4264_app.plotting --csv /home/orangepi/WH_project_try/mps4264_app/recordings/test008.csv
+# 同一可信局域网的其他电脑访问：浏览器打开 http://香橙派地址:5056/plot
+python3 -m mps4264_app.plotting --host 0.0.0.0 --port 5056
+```
+
+单独运行时本机浏览器打开 `http://127.0.0.1:5056/plot`。默认数据目录是
+`mps4264_app/recordings`，可用 `--data-dir` 指定。Windows 示例：
+
+```powershell
+python -m mps4264_app.plotting --csv "E:\大创-wh\测压阀\test008-linux.csv"
+```
+
+勾选需要叠加的通道，可全选、取消全部、设置显示时间范围，并保存带通道图例的 PNG。
+页面和绘图库全部在本地，无需联网加载。后端保留完整帧数据，曲线仅在显示时按像素保留极值；指针读数取最近的真实帧，不做插值。空白、NaN/Inf 和 `-999999` 作为无效值，全部无效的通道不可选；曲线不跨越无效值或帧号缺口连线。不修改 CSV，不重复乘单位转换系数。
+
+当前限制：单个 CSV 不超过 128 MiB；帧号与时间必须递增，多个扫描拼接产生的重置应先拆分。Linux CSV 的单位索引 23 显示 Pa、27 显示 RAW，其他单位索引原样标注，不猜测单位。设备帧时间并非主机 UTC，不能直接代替摄像/速度同步时间。
+
+其他 Python 程序可以复用解析器或网页服务：
+
+```python
+from mps4264_app.plotting import read_pressure_csv, create_plot_app, register_plot_routes
+
+data = read_pressure_csv("run.csv")
+time_seconds = data.times
+pressure_channel_1 = data.channels["P01"]  # 无效值为 None
+payload = data.to_dict()                   # 完整分辨率，可 JSON 序列化
+
+# 可选：创建独立绘图服务；调用 create_plot_app 不会自动运行服务器
+app = create_plot_app(data_dir="Car_Records/mps_run_001")
+# 或向已有 Flask app 注册 /plot 页面，不要在同一个 app 重复注册
+# register_plot_routes(existing_app, data_dir="Car_Records/mps_run_001")
+```
+
+前端绘图类为 `window.PressureTimeChart`（`static/pressure_plot.js`）。可在其他页面用
+`new PressureTimeChart(canvas, {tooltip})` 创建实例，再调用 `setData(payload)`、
+`setChannels(["P01", "P04"])`、`setRange(0, 2)`、`exportPNG()`；不用时调用 `destroy()`。
+此功能是离线文件查看，不是实时采集或同步控制模块。
+
+## 采集控制接口的导入示例
 
 在项目根目录的其他 Python 程序中：
 

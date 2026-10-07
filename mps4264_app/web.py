@@ -7,6 +7,7 @@ import threading
 from flask import Flask, jsonify, render_template, request
 
 from .controller import MPS4264Controller, MPSControllerError
+from .plotting import register_plot_routes
 
 
 def create_app(controller: MPS4264Controller | None = None,
@@ -15,6 +16,7 @@ def create_app(controller: MPS4264Controller | None = None,
     app = Flask(__name__, template_folder="templates", static_folder="static")
     service = controller or MPS4264Controller()
     app.config["MPS_CONTROLLER"] = service
+    register_plot_routes(app, data_dir=service.data_dir)
     conversion = {"state": "idle", "result": None, "error": None}
     conversion_lock = threading.Lock()
 
