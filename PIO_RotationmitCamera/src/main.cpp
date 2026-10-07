@@ -14,6 +14,7 @@ void setup() {
         Serial.println("[LINE_ERROR] Invalid pins: AD0/AD1/AD2 require output-capable GPIO; GPIO35 is input-only");
     }
     Serial.println("[READY] Encoder stream v1; storage on Orange Pi");
+    Serial.println("[HELP] L: line debug at 5 Hz (ENC paused); R: normal streaming");
 }
 
 void loop() {

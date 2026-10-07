@@ -7,6 +7,9 @@
 namespace {
 constexpr unsigned long SAMPLE_INTERVAL_MS = 10;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 100;
+constexpr unsigned long LINE_DEBUG_INTERVAL_MS = 200;
+bool lineDebugMode = false;
+unsigned long lastLineDebugAt = 0;
 char command = 0;
 char digits[5];
 unsigned int digitCount = 0;
@@ -32,7 +35,15 @@ void pollSerialCommands() {
             commandStartedAt = millis();
             continue;
         }
-        if (!command) continue;
+        if (!command) {
+            if (value == 'L' || value == 'l') {
+                lineDebugMode = true;
+                lastLineDebugAt = millis() - LINE_DEBUG_INTERVAL_MS;
+            } else if (value == 'R' || value == 'r') {
+                lineDebugMode = false;
+            }
+            continue;
+        }
         if (value >= '0' && value <= '9' && digitCount < 4) {
             digits[digitCount++] = value;
         } else if (value == '\n') {
@@ -49,6 +60,7 @@ void pollSerialCommands() {
 }
 
 void publishEncoder() {
+    if (lineDebugMode) return;
     unsigned long now = millis();
     if (now - lastSampleAt < SAMPLE_INTERVAL_MS) return;
     lastSampleAt = now;
@@ -67,16 +79,31 @@ void publishLineSensor() {
     LineSensorFrame frame;
     if (!readLineSensorFrame(frame) ||
         (hasSent && frame.sequence == lastSentSequence)) return;
+    const unsigned long now = millis();
+    if (lineDebugMode && now - lastLineDebugAt < LINE_DEBUG_INTERVAL_MS) return;
     char line[64];
-    const int length = snprintf(line, sizeof(line), "[LINE],%lu,%lu,%u,%u\n",
+    int length;
+    if (lineDebugMode) {
+        char raw[9], detected[9];
+        for (uint8_t i = 0; i < 8; ++i) {
+            raw[i] = ((frame.rawMask >> i) & 1) ? '1' : '0';
+            detected[i] = ((frame.lineMask >> i) & 1) ? '1' : '0';
+        }
+        raw[8] = detected[8] = '\0';
+        // Printed from CH1 to CH8, unlike conventional binary mask notation.
+        length = snprintf(line, sizeof(line), "[LINE_DBG] raw=%s line=%s\n", raw, detected);
+    } else {
+        length = snprintf(line, sizeof(line), "[LINE],%lu,%lu,%u,%u\n",
                                 (unsigned long)frame.sequence,
                                 (unsigned long)frame.timeMs,
                                 (unsigned int)frame.rawMask,
                                 (unsigned int)frame.lineMask);
+    }
     // No waiting on UART: encoder/control keep their existing priority.
     if (length > 0 && length < (int)sizeof(line) && Serial.availableForWrite() >= length) {
         Serial.write((const uint8_t *)line, length);
         hasSent = true;
         lastSentSequence = frame.sequence;
+        if (lineDebugMode) lastLineDebugAt = now;
     }
 }
