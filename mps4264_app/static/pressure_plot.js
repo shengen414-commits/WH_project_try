@@ -3,7 +3,11 @@
   'use strict';
   const colors = ['#59c7ff','#ffae69','#8bdb8b','#e897df','#aaabff','#67ded2',
                   '#ff8796','#dfce69','#95b7df','#deb995','#99c6ac','#bd9cc9'];
-  const style = n => ({color: colors[(n-1)%colors.length], dash:[[],[7,3],[2,3],[8,3,2,3],[10,4,2,4]][Math.floor((n-1)/colors.length)]});
+  const lineDashes = [[],[7,3],[2,3],[8,3,2,3],[10,4,2,4]];
+  // 64 channels exceed 12 colors x 5 dash styles. Cycle BOTH indexes;
+  // an undefined dash for P61-P64 aborts drawing before the cache is updated.
+  const style = n => ({color: colors[(n-1)%colors.length],
+                      dash: lineDashes[Math.floor((n-1)/colors.length)%lineDashes.length]});
   const number = key => Number(key.slice(1));
   const label = v => Math.abs(v)>=100000 || (v!==0 && Math.abs(v)<0.001) ? v.toExponential(2) : Number(v.toPrecision(6)).toString();
   const lowerBound = (array,value) => {let lo=0,hi=array.length;while(lo<hi){const m=(lo+hi)>>1;if(array[m]<value)lo=m+1;else hi=m;}return lo;};

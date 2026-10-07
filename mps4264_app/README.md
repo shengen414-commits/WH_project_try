@@ -137,6 +137,15 @@ RATE 超过 850 Hz 却没有快速组号，程序仍会拒绝猜测组号。真�
 python3 -m unittest discover -s mps4264_app/tests -v
 ```
 
+前端绘图回归测试（如本机安装了 Node.js；运行网页本身不需要 Node.js）：
+
+```bash
+node mps4264_app/tests/test_pressure_plot.js
+```
+
+覆盖 1～64 路选择、P61～P64 线型、鼠标读数、取消后重新选择，避免线型越界
+造成绘制中断、鼠标移动恢复旧缓存图。
+
 测试覆盖 TCP 命令、UDP 采集、普通/快速帧解析与 CSV 转换。尚需在实物上确认固件版本、UDP 配置、长时间无丢帧、相机并行时的磁盘性能。本模块不做校准系数维护、固件升级或硬件级同步，也不替代 ScanTel 的所有功能。
 
 资料：[MPS4264 Gen1 厂家手册](https://scanivalve.com/wp-content/uploads/2024/11/MPS4264_V306.pdf) · [ScanTel v1.08 手册](https://scanivalve.com/wp-content/uploads/2024/11/ScanTel_V108.pdf)

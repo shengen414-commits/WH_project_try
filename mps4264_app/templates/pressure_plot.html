@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>MPS4264 CSV 压力—时间图</title>
   <link rel="stylesheet" href="{{ url_for('pressure_plot.static', filename='pressure_plot.css') }}">
-  <script src="{{ url_for('pressure_plot.static', filename='pressure_plot.js') }}" defer></script>
+  <script src="{{ url_for('pressure_plot.static', filename='pressure_plot.js', v='20261007-dash-cycle') }}" defer></script>
 </head>
 <body>
 <main id="pressure-plot" data-initial="{{ 'true' if initial_csv else 'false' }}">
