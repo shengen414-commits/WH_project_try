@@ -114,4 +114,16 @@ int main() {
     device(); feed("M\nN0\n"); assert(serialNormalMode() && !Wire.open);
     // Six-axis data remains diagnostic only; it has not armed the gyro PID.
     assert(!handleAutomaticSteeringConfig("H1"));
+    device(); feed("o\n"); tick(45); Serial.output.clear();
+    tick(10); publishEncoder(); publishLineSensor();
+    assert(Serial.output.find("[IMU],") != std::string::npos);
+    assert(Serial.output.find("[MPU] a=") == std::string::npos);
+    assert(Serial.output.find("[ENC]") == std::string::npos && Serial.output.find("[LINE]") == std::string::npos);
+    feed("T2000\nB1900\n"); tick(); assert(pwmOutputs[14] == 1500);
+    Wire.shortRead = true; Serial.output.clear(); tick();
+    assert(Serial.output.find("[IMU],") == std::string::npos && !readMPU6050Sample(sample));
+    device(); feed("M\n"); tick(45); Serial.output.clear(); tick(20);
+    assert(Serial.output.find("[MPU] a=") != std::string::npos);
+    assert(Serial.output.find("[IMU],") == std::string::npos);
+    feed("R\n"); assert(serialNormalMode() && !Wire.open);
 }

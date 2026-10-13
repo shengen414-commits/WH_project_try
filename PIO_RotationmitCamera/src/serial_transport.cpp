@@ -60,6 +60,7 @@ void pollSerialCommands() {
         if (value == 'G' || value == 'g') { selectMode(DebugMode::Capture); continue; }
         if (value == 'V' || value == 'v') { selectMode(DebugMode::Steering); continue; }
         if (value == 'M' || value == 'm') { selectMode(DebugMode::MPU); continue; }
+        if (value == 'O' || value == 'o') { selectMode(DebugMode::MPU); handleMPU6050DebugCommand('O'); continue; }
         if (value == 'R' || value == 'r') { selectMode(DebugMode::Normal); continue; }
         if (value == 'N' || value == 'n') {
             resetCommand(); command = 'N'; commandStartedAt = millis(); continue;

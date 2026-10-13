@@ -10,6 +10,7 @@ namespace {
 enum class Stage { Off, Probe, ResetWait, Configure, Verify, Warmup, Running, Failed };
 Stage stage = Stage::Off;
 bool debugEnabled = false, busOpen = false;
+bool stream3D = false;
 bool wrongIdentitySeen = false;
 uint8_t address = 0, probe = 0, configIndex = 0, verifyIndex = 0;
 uint32_t stageAt = 0, lastSampleAt = 0, lastPrintAt = 0, errors = 0;
@@ -117,6 +118,7 @@ void beginMPU6050Debug() {
     output(text); help();
 }
 void endMPU6050Debug() {
+    stream3D = false;
     debugEnabled = false; calibrating = false; latest.valid = false; stage = Stage::Off;
     if (busOpen) Wire.end();
     busOpen = false;
@@ -129,6 +131,7 @@ void handleMPU6050DebugCommand(char command) {
     if (!debugEnabled) return;
     if (command >= 'a' && command <= 'z') command -= 'a' - 'A';
     if (command == '?') help();
+    if (command == 'O') { stream3D = true; output("3D stream 50Hz; Z=gyro zero; R=exit"); return; }
     if (command == 'E') { calibrating = false; output("ZERO canceled; ESC remains neutral"); }
     if (command != 'Z') return;
     MPU6050Sample sample;
@@ -200,10 +203,15 @@ void publishMPU6050Debug() {
         char text[112]; snprintf(text, sizeof(text), "ERROR=%s count=%lu; M=retry R=exit", errorReason, (unsigned long)errors);
         output(text); lastPrintAt = millis(); return;
     }
-    if (stage != Stage::Running || uint32_t(millis() - lastPrintAt) < MPU6050Config::PRINT_MS) return;
+    if (stage != Stage::Running || uint32_t(millis() - lastPrintAt) < (stream3D ? 20u : MPU6050Config::PRINT_MS)) return;
     if (!latest.valid || uint32_t(millis() - latest.timeMs) > 100) { output("sample stale; no valid reading"); lastPrintAt = millis(); return; }
     char line[128];
-    int n = snprintf(line, sizeof(line), "[MPU] a=%.2f,%.2f,%.2f w=%.1f,%.1f,%.1f T=%.1f z=%.1f cal=%s\n",
+    int n;
+    if (stream3D) n = snprintf(line, sizeof(line), "[IMU],%lu,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.2f,%.3f,%s\n",
+                     (unsigned long)latest.timeMs, latest.axG, latest.ayG, latest.azG,
+                     latest.gxDps, latest.gyDps, latest.gzDps, latest.temperatureC, latest.correctedGzDps,
+                     calibrating ? "RUN" : latest.calibrated ? "OK" : "NO");
+    else n = snprintf(line, sizeof(line), "[MPU] a=%.2f,%.2f,%.2f w=%.1f,%.1f,%.1f T=%.1f z=%.1f cal=%s\n",
                      latest.axG, latest.ayG, latest.azG, latest.gxDps, latest.gyDps, latest.gzDps,
                      latest.temperatureC, latest.correctedGzDps, calibrating ? "RUN" : latest.calibrated ? "OK" : "NO");
     if (n > 0 && n < (int)sizeof(line) && Serial.availableForWrite() >= n) {

@@ -33,6 +33,7 @@ class DashboardTests(unittest.TestCase):
         self.app.SPEED_RECORD_DIR = str(Path(self.directory.name) / 'Speed_Records')
         self.app.speed_recorder = self.app.session_recorder = None
         self.app.encoder_stream = EncoderStream()
+        self.app.imu_visualization.reset()
         self.app.sensor_state.update({'last_encoder_rx_mono': time.monotonic(), 'throttle': 1500, 'mode': 'WEB'})
         self.app.sensor_state.update({'last_serial_line': '', 'last_serial_rx_mono': 0, 'serial_error': None})
         self.app.sensor_state.update(steering={}, last_steering_rx_mono=0)
@@ -82,6 +83,41 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.client.post('/speed_record/start').status_code, 409)
         self.assertEqual(self.client.get('/start_record').status_code, 409)
         self.assertFalse(self.client.get('/sensor_stats').get_json()['encoder_fresh'])
+
+    def test_imu_page_commands_and_serial_stream_share_reader(self):
+        self.assertEqual(self.client.get('/imu').status_code, 200)
+        self.app.esp32_serial.write.return_value = 2
+        self.assertEqual(self.client.post('/imu/command', json={'action':'start'}).status_code, 200)
+        self.app.esp32_serial.write.assert_called_with(b'O\n')
+        self.assertFalse(self.app.encoder_ready())
+        self.receive([b'[IMU],100,0,0,1,0,0,0,25,0,NO\n'])
+        state = self.client.get('/imu/status').get_json()
+        self.assertTrue(state['fresh'])
+        self.assertEqual(state['sample']['acceleration'], [0,0,1])
+        self.assertEqual(self.app.encoder_public_state()['debug_mode'], 'imu')
+        self.assertEqual(self.client.post('/imu/command', json={'action':'zero'}).status_code, 200)
+        self.assertEqual(self.client.post('/imu/command', json={'action':'calibrate'}).status_code, 200)
+        self.app.esp32_serial.write.assert_called_with(b'Z\n')
+        self.assertEqual(self.client.post('/imu/command', json={'action':'stop'}).status_code, 200)
+        self.app.esp32_serial.write.assert_called_with(b'R\n')
+        self.assertFalse(self.client.get('/imu/status').get_json()['fresh'])
+        self.app.esp32_serial.reset_input_buffer.assert_not_called()
+
+    def test_imu_commands_block_recording_bad_requests_and_closed_port(self):
+        self.assertEqual(self.client.post('/imu/command', json=[]).status_code, 400)
+        self.assertEqual(self.client.post('/imu/command', json={'action':'zero'}).status_code, 409)
+        self.assertEqual(self.client.post('/imu/command', json={'action':'calibrate'}).status_code, 409)
+        self.app.sync_coordinator.state['active'] = True
+        self.assertEqual(self.client.post('/imu/command', json={'action':'start'}).status_code, 409)
+        self.app.sync_coordinator.state['active'] = False
+        self.assertEqual(self.client.post('/speed_record/start').status_code, 200)
+        self.assertEqual(self.client.post('/imu/command', json={'action':'start'}).status_code, 409)
+        self.client.post('/speed_record/stop')
+        self.app.esp32_serial.is_open = False
+        self.assertEqual(self.client.post('/imu/command', json={'action':'start'}).status_code, 409)
+        self.app.esp32_serial.is_open = True
+        self.app.esp32_serial.write.return_value = 1
+        self.assertEqual(self.client.post('/imu/command', json={'action':'start'}).status_code, 503)
 
     def test_dashboard_exposes_sync_panel_without_connecting_a_device(self):
         response = self.client.get('/')

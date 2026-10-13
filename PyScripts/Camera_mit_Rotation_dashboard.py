@@ -21,11 +21,13 @@ try:
     from .sync_recording import SyncRecorder
     from .sync_web import register_sync_routes
     from .dashboard_runtime import run_dashboard
+    from .imu_visualization import ImuVisualization
 except ImportError:
     from telemetry import EncoderStream, CsvRecorder
     from sync_recording import SyncRecorder
     from sync_web import register_sync_routes
     from dashboard_runtime import run_dashboard
+    from imu_visualization import ImuVisualization
 
 # 确保录像保存根目录存在
 SAVE_DIR = str(Path(os.environ.get('CAR_RECORDS_DIR', str(Path(__file__).resolve().parent.parent / 'Car_Records'))).resolve())
@@ -87,6 +89,7 @@ speed_recorder = None
 session_recorder = None
 session_status = {"active": False, "status": "idle"}
 encoder_stream = EncoderStream(PPR, KMH_PER_RPM)
+imu_visualization = ImuVisualization()
 estop_ignore_until = 0.0
 
 
@@ -134,7 +137,7 @@ def encoder_public_state():
     if not encoder_ready() and time.monotonic() - sensor_state.get('last_serial_rx_mono', 0) < 1.5:
         if last_line.startswith('[SERVO]'):
             debug_mode = 'servo'
-        elif last_line.startswith('[MPU]'):
+        elif last_line.startswith(('[MPU]', '[IMU]')):
             debug_mode = 'imu'
         elif last_line.startswith(('[LINE_DBG]', '[LINE]')):
             debug_mode = 'line'
@@ -372,6 +375,7 @@ def read_esp32_data():
                 sensor_state["last_serial_rx_wall"] = now_ns / 1e9
                 sensor_state["last_serial_rx_mono"] = now_mono_ns / 1e9
                 sensor_state["serial_line_count"] += 1
+                imu_visualization.feed(line, now_mono_ns / 1e9)
                 sample = encoder_stream.decode(line, now_ns, sensor_state["throttle"], sensor_state["mode"], now_mono_ns)
                 if sample is not None:
                     sensor_state.update({"position": sample["Position"], "speed_pps": sample["speed_pps"],
@@ -643,6 +647,61 @@ cam_right = HighSpeedCamera(src=2, name="Right", fps=210)
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.get('/imu')
+def imu_page():
+    return render_template('imu.html')
+
+
+@app.get('/imu/status')
+def imu_status():
+    state = imu_visualization.status()
+    state['serial_open'] = bool(esp32_serial and esp32_serial.is_open)
+    state['serial_error'] = sensor_state.get('serial_error')
+    if not state['serial_open'] or state['serial_error']:
+        state['fresh'] = False
+    return jsonify(state)
+
+
+@app.post('/imu/command')
+def imu_command():
+    body = request.get_json(silent=True)
+    action = body.get('action') if isinstance(body, dict) else None
+    if action not in ('start', 'stop', 'calibrate', 'zero'):
+        return jsonify(error='无效的三维测试命令'), 400
+    if action == 'zero':
+        if not imu_visualization.zero():
+            return jsonify(error='没有新鲜三维数据，无法归零'), 409
+        return jsonify(message='已将当前显示姿态设为参考零点')
+    if not sync_coordinator.operation_lock.acquire(blocking=False):
+        return jsonify(error='设备正在执行操作，请稍后重试'), 409
+    try:
+        with record_command_lock:
+            with sync_coordinator.lock:
+                sync_active = sync_coordinator.state['active']
+            with speed_record_lock:
+                recording = any(r is not None and not r.done.is_set() for r in (speed_recorder, session_recorder))
+            if sync_active or recording or record_workflow_active.is_set() or brake_sequence_active.is_set():
+                return jsonify(error='请先结束记录或制动，再切换 MPU 测试模式'), 409
+            if not esp32_serial or not esp32_serial.is_open:
+                return jsonify(error='ESP32 串口未连接'), 409
+            if action == 'calibrate' and not imu_visualization.status()['fresh']:
+                return jsonify(error='请先启动三维测试并等待有效读数'), 409
+            packet = {'start': b'O\n', 'stop': b'R\n', 'calibrate': b'Z\n'}[action]
+            with serial_write_lock:
+                if action in ('start', 'stop'):
+                    imu_visualization.reset()
+                    sensor_state['last_encoder_rx_mono'] = 0
+                if esp32_serial.write(packet) != len(packet):
+                    return jsonify(error='串口命令未完整发送'), 503
+    except OSError as exc:
+        return jsonify(error=f'串口命令发送失败：{exc}'), 503
+    finally:
+        sync_coordinator.operation_lock.release()
+    return jsonify(message={'start': '已发送 O，等待固件三维数据；测试模式保持油门中立',
+                            'stop': '已发送 R，等待恢复编码器数据；正常油门控制恢复',
+                            'calibrate': '已发送 Z，请保持模块静止至少两秒，等待 cal=OK'}[action])
 
 
 def gen_stream(camera):
