@@ -16,7 +16,7 @@ enum class DebugMode { Normal, Line, Capture, Steering, MPU };
 DebugMode debugMode = DebugMode::Normal;
 unsigned long lastLineDebugAt = 0;
 char command = 0;
-char digits[5];
+char digits[13]; // Four throttle digits, or N<action>,<uint32 request id>.
 unsigned int digitCount = 0;
 unsigned long commandStartedAt = 0;
 bool configPending = false;
@@ -24,6 +24,37 @@ char configPacket[64];
 unsigned int configLength = 0;
 unsigned long lastSampleAt = 0;
 uint32_t sequence = 0;
+char pendingSteeringAck[128];
+int pendingSteeringAckLength = 0;
+void publishSteeringAck() {
+    if (pendingSteeringAckLength > 0 && Serial.availableForWrite() >= pendingSteeringAckLength) {
+        Serial.write((const uint8_t*)pendingSteeringAck, pendingSteeringAckLength);
+        pendingSteeringAckLength = 0;
+    }
+}
+bool parseSteeringRequest(uint32_t& id) {
+    id = 0; // Legacy N1/N0 commands remain valid without a request id.
+    if (digitCount == 1) return true;
+    if (digitCount < 3 || digits[1] != ',') return false;
+    for (unsigned int i = 2; i < digitCount; ++i) {
+        const uint32_t digit = digits[i] - '0';
+        if (digit > 9 || id > (UINT32_MAX - digit) / 10) return false;
+        id = id * 10 + digit;
+    }
+    return true;
+}
+void acknowledgeSteering(uint32_t id, char action, bool ok) {
+    const auto state = automaticSteeringState();
+    LineSensorFrame frame;
+    const bool haveFrame = readLineSensorFrame(frame);
+    pendingSteeringAckLength = snprintf(pendingSteeringAck, sizeof(pendingSteeringAck),
+        "[FOLLOW_ACK] id=%lu action=%c ok=%d mask=%d raw=%d lvl=%d reason=%s\n",
+        (unsigned long)id, action, ok ? 1 : 0, haveFrame ? (int)frame.lineMask : -1,
+        haveFrame ? (int)frame.rawMask : -1, LineSensorConfig::LINE_LEVEL == HIGH ? 1 : 0,
+        action == '0' ? "disabled" : state.reason);
+    if (pendingSteeringAckLength >= (int)sizeof(pendingSteeringAck)) pendingSteeringAckLength = 0;
+    publishSteeringAck(); // If UART is busy, retry at the start of subsequent loops.
+}
 void resetCommand() { command = 0; digitCount = 0; configPending = false; configLength = 0; }
 void selectMode(DebugMode mode) {
     resetCommand();
@@ -40,6 +71,7 @@ void selectMode(DebugMode mode) {
 bool serialNormalMode() { return debugMode == DebugMode::Normal; }
 
 void pollSerialCommands() {
+    publishSteeringAck(); // Command results get an opportunity before sample packets.
     if ((command || configPending) && millis() - commandStartedAt >= COMMAND_TIMEOUT_MS) resetCommand();
     // Bound work so incoming traffic cannot starve control updates.
     for (unsigned int i = 0; i < 64 && Serial.available() > 0; ++i) {
@@ -92,19 +124,24 @@ void pollSerialCommands() {
             if (debugMode == DebugMode::MPU) handleMPU6050DebugCommand(value);
             continue;
         }
-        if (value >= '0' && value <= '9' && digitCount < 4) {
+        if (command == 'N' && value == ',' && digitCount == 1) {
+            digits[digitCount++] = value;
+        } else if (value >= '0' && value <= '9' && digitCount < (command == 'N' ? 12U : 4U)) {
             digits[digitCount++] = value;
         } else if (value == '\n') {
-            if (command == 'N' && digitCount == 1 && digits[0] >= '0' && digits[0] <= '2') {
+            uint32_t requestId = 0;
+            if (command == 'N' && digitCount >= 1 && digits[0] >= '0' && digits[0] <= '2' && parseSteeringRequest(requestId)) {
                 const char action = digits[0];
                 selectMode(DebugMode::Normal); // Autonomous control keeps ENC and LINE streams running.
-                if (action == '1') startLineFollowing();
-                else if (action == '2') startExternalYawControl();
+                bool ok = true;
+                if (action == '1') ok = startLineFollowing();
+                else if (action == '2') ok = startExternalYawControl();
                 else {
                     setESCSteeringInhibit(false);
                     centerSteeringOutput();
                     handleAutomaticSteeringConfig("S");
                 }
+                acknowledgeSteering(requestId, action, ok);
             } else if (command != 'N' && digitCount == 4) {
                 digits[4] = '\0';
                 int pwm = atoi(digits);

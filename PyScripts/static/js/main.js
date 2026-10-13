@@ -210,13 +210,32 @@ function renderSensorStats(data) {
 
 let lineSteeringPending = false;
 let lastLineSteeringState = {};
+let lineSteeringExpectedRequest = null;
+let lineSteeringAwaitingConfirmation = false;
+let lineSteeringConfirmationTimer = null;
+let lineSteeringConfirmationExpired = false;
+function clearLineConfirmationTimer() {
+    if (lineSteeringConfirmationTimer !== null) clearTimeout(lineSteeringConfirmationTimer);
+    lineSteeringConfirmationTimer = null;
+}
 function renderLineSteering(state) {
     lastLineSteeringState = state;
+    const commandRequest = state.request || {};
+    if (lineSteeringExpectedRequest !== null && commandRequest.id === lineSteeringExpectedRequest) {
+        if (commandRequest.status !== 'pending' && commandRequest.status !== 'idle') {
+            clearLineConfirmationTimer();
+            lineSteeringAwaitingConfirmation = false;
+            document.getElementById('line-steering-message').innerText = commandRequest.message || '';
+        } else if (!lineSteeringConfirmationExpired) {
+            document.getElementById('line-steering-message').innerText = commandRequest.message || '';
+        }
+    }
     const labels = { LINE: '巡线已开启', YAW: '外部横摆控制已开启', FAULT: '故障，动力已锁定中位', OFF: '已关闭' };
     const reasons = {tracking:'正在响应偏差', centered:'已居中', centering:'正在回中',
         controller_invalid:'控制算法输出无效，已停止', armed:'已开启转向，动力保持中位', disabled:'已关闭',
         line_lost:'未检测到线，请重新对准后开启', line_ambiguous:'多条线或全通道命中，请检查赛道及极性',
-        line_stale:'巡线数据超时', no_valid_line:'没有有效巡线数据，未开启', gyro_stale:'陀螺仪反馈超时',
+        line_stale:'巡线数据超时', no_line_frame:'巡线尚无完整数据帧，请检查初始化与接线',
+        no_valid_line:'没有有效巡线数据，未开启', gyro_stale:'陀螺仪反馈超时',
         no_valid_gyro:'没有有效陀螺仪数据', no_valid_yaw_source:'外部目标或陀螺仪尚未接入',
         target_stale:'外部目标超时', rc_takeover:'遥控油门已接管，自动转向关闭',
         reverse_not_supported:'巡线仅支持前进，倒车指令已停止', control_gap:'控制采样间隔过长',
@@ -227,14 +246,14 @@ function renderLineSteering(state) {
     const algorithms = {BASIC:'基础反向响应', PID:'PID', GYRO:'角速度闭环'};
     const algorithmLabel = state.algo ? ` | 算法 ${algorithms[state.algo] || state.algo}` : '';
     const directionLabel = state.dir ? ` | 方向 ${state.dir}` : '';
-    target.innerText = state.mode && (state.fresh || state.mode === 'OFF') ?
+    target.innerText = state.mode && state.fresh ?
         `巡线转向：${labels[state.mode] || state.mode}${algorithmLabel}${directionLabel} | 偏差 ${state.e ?? '—'} | 舵机 ${state.pwm || '—'} us | ${reasons[state.reason] || state.reason || ''}` :
         '巡线转向：暂无新鲜状态，请确认已烧录新版正常固件。';
-    document.getElementById('line-steering-on').disabled = lineSteeringPending || isRcMode || (state.fresh && ['LINE', 'YAW'].includes(state.mode));
+    document.getElementById('line-steering-on').disabled = lineSteeringPending || lineSteeringAwaitingConfirmation || isRcMode || (state.fresh && ['LINE', 'YAW'].includes(state.mode));
     document.getElementById('line-steering-off').disabled = lineSteeringPending;
 }
 async function requestLineSteering(enabled) {
-    if (lineSteeringPending) return;
+    if (lineSteeringPending || (enabled && lineSteeringAwaitingConfirmation)) return;
     lineSteeringPending = true;
     document.getElementById('line-steering-on').disabled = true;
     document.getElementById('line-steering-off').disabled = true;
@@ -246,8 +265,21 @@ async function requestLineSteering(enabled) {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
         label.innerText = data.message;
+        clearLineConfirmationTimer();
+        lineSteeringExpectedRequest = data.request_id ?? null;
+        lineSteeringConfirmationExpired = false;
+        lineSteeringAwaitingConfirmation = true;
+        lineSteeringConfirmationTimer = setTimeout(() => {
+            lineSteeringConfirmationExpired = true;
+            lineSteeringAwaitingConfirmation = false;
+            label.innerText = '未收到 ESP32 命令确认：请确认已烧录新版 esp32dev 固件，并检查串口连接及后台状态刷新。';
+            renderLineSteering(lastLineSteeringState);
+        }, 3500);
         if (!enabled) { numericOutputToggle.checked = false; pendingThrottle = null; updateDriveState(1500, 'system', false); }
-    } catch (error) { label.innerText = error.message; }
+    } catch (error) {
+        clearLineConfirmationTimer(); lineSteeringExpectedRequest = null;
+        lineSteeringAwaitingConfirmation = false; label.innerText = error.message;
+    }
     finally { lineSteeringPending = false; renderLineSteering(lastLineSteeringState); }
 }
 

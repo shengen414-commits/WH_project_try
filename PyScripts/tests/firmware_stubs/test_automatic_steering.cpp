@@ -144,4 +144,17 @@ int main() {
     assert(automaticSteeringState().algorithm == LineControlAlgorithm::Basic);
     assert(!handleAutomaticSteeringConfig("C2"));
     assert(!handleAutomaticSteeringConfig("F-10,0.22,0.16"));
+    // Reproduce rejected arming while UART is full: Off status must be retried.
+    Serial.output.clear(); Serial.capacity = 0;
+    cycle(0); // No black tape, remains Off.
+    Serial.output.clear(); // Ignore unrelated DRIVE diagnostics from the preceding control tick.
+    feed("N1,42\n");
+    assert(automaticSteeringState().mode == AutomaticSteeringMode::Off);
+    assert(std::string(automaticSteeringState().reason) == "line_lost");
+    assert(Serial.output.empty());
+    Serial.capacity = 128;
+    pollSerialCommands(); publishAutomaticSteering();
+    assert(Serial.output.find("[FOLLOW_ACK] id=42 action=1 ok=0") != std::string::npos);
+    assert(Serial.output.find("mode=OFF") != std::string::npos);
+    assert(Serial.output.find("reason=line_lost") != std::string::npos);
 }

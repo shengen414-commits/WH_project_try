@@ -22,6 +22,7 @@ try:
     from .dashboard_runtime import run_dashboard
     from .imu_visualization import ImuVisualization
     from .serial_connection import open_esp32_serial
+    from .steering_requests import SteeringRequests
 except ImportError:
     from telemetry import EncoderStream, CsvRecorder
     from sync_recording import SyncRecorder
@@ -29,6 +30,7 @@ except ImportError:
     from dashboard_runtime import run_dashboard
     from imu_visualization import ImuVisualization
     from serial_connection import open_esp32_serial
+    from steering_requests import SteeringRequests
 
 # 确保录像保存根目录存在
 SAVE_DIR = str(Path(os.environ.get('CAR_RECORDS_DIR', str(Path(__file__).resolve().parent.parent / 'Car_Records'))).resolve())
@@ -91,6 +93,7 @@ session_recorder = None
 session_status = {"active": False, "status": "idle"}
 encoder_stream = EncoderStream(PPR, KMH_PER_RPM)
 imu_visualization = ImuVisualization()
+steering_requests = SteeringRequests()
 estop_ignore_until = 0.0
 
 
@@ -396,6 +399,7 @@ def read_esp32_data():
                 sensor_state["last_serial_rx_mono"] = now_mono_ns / 1e9
                 sensor_state["serial_line_count"] += 1
                 imu_visualization.feed(line, now_mono_ns / 1e9)
+                steering_requests.feed(line)
                 sample = encoder_stream.decode(line, now_ns, sensor_state["throttle"], sensor_state["mode"], now_mono_ns)
                 if sample is not None:
                     sensor_state.update({"position": sample["Position"], "speed_pps": sample["speed_pps"],
@@ -813,7 +817,8 @@ def sensor_public_state():
         "serial_framing_errors": sensor_state.get("serial_framing_errors", 0),
         "serial_error": sensor_state.get("serial_error"),
         "steering": {**sensor_state.get('steering', {}),
-                     'fresh': time.monotonic() - sensor_state.get('last_steering_rx_mono', 0) < 1.0}
+                     'fresh': time.monotonic() - sensor_state.get('last_steering_rx_mono', 0) < 1.0,
+                     'request': steering_requests.snapshot()}
     }
 
 
@@ -980,11 +985,17 @@ def set_line_steering():
         return jsonify(error='请先归中油门并退出遥控接管/制动，再开启巡线'), 409
     try:
         with serial_write_lock:
-            esp32_serial.write(b'N1\n' if enabled else b'N0\n')
+            request_id = steering_requests.begin(enabled)
+            command = f"N{1 if enabled else 0},{request_id}\n".encode('ascii')
+            if not enabled:
+                command = b'N0\n' + command  # Older firmware can still honor STOP.
+            esp32_serial.write(command)
     except OSError as exc:
+        steering_requests.fail(request_id, f'串口命令发送失败：{exc}')
         return jsonify(error=str(exc)), 503
     # A successful write is only a request; firmware checks live sensor validity.
-    return jsonify(status='requested', message='命令已发送，等待固件状态确认', enabled=enabled)
+    return jsonify(status='requested', message='命令已发送，等待 ESP32 确认（最多3秒）',
+                   enabled=enabled, request_id=request_id)
 
 
 @app.route('/set_throttle', methods=['GET', 'POST'])

@@ -4,6 +4,7 @@
 #include "Arduino.h"
 #include "serial_transport.h"
 #include "line_sensor.h"
+#include "automatic_steering.h"
 
 FakeSerial Serial;
 unsigned long clockMs = 0;
@@ -18,6 +19,9 @@ void stopAutomaticSteering(bool) {}
 bool startLineFollowing() { ++autoStarts; return true; }
 bool startExternalYawControl() { ++yawStarts; return false; }
 bool handleAutomaticSteeringConfig(const char* value) { autoConfig = value; return true; }
+AutomaticSteeringState automaticSteeringState() {
+    return {AutomaticSteeringMode::Off, 0, 1500, 24, false, "armed", LineControlAlgorithm::Basic, 1, 1500};
+}
 void setESCSteeringInhibit(bool) {}
 void centerSteeringOutput() {}
 bool mpuDebug = false;
@@ -135,6 +139,20 @@ int main() {
     assert(mpuCommands.back() == 'E' && mpuDebug);
     feed("R\n");
     assert(!mpuDebug && !neutralHeld && serialNormalMode());
+
+    Serial.output.clear();
+    Serial.capacity = 0;
+    const int beforeTaggedStart = autoStarts;
+    feed("N1,4294967295\n");
+    assert(autoStarts == beforeTaggedStart + 1);
+    assert(Serial.output.empty()); // Busy UART must not lose the command result.
+    Serial.capacity = 128;
+    pollSerialCommands();
+    assert(Serial.output.find("[FOLLOW_ACK] id=4294967295 action=1 ok=1") != std::string::npos);
+    Serial.output.clear();
+    feed("N1,4294967296\nN1,,12\nN1,\n");
+    assert(autoStarts == beforeTaggedStart + 1); // Reject overflow and malformed ids.
+    assert(Serial.output.empty());
 
     Serial.input = std::string(100, '?');
     pollSerialCommands();

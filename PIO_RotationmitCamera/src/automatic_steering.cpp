@@ -27,6 +27,7 @@ float lastRequestedUs = SteeringConfig::CENTER_US;
 int direction = 1;
 uint8_t lastMask = 0;
 const char* reason = "disabled";
+bool statusPending = false;
 
 void prepare() {
     if (prepared) return;
@@ -42,13 +43,17 @@ const char* algorithmName() {
          : lineAlgorithm == LineControlAlgorithm::Basic ? "BASIC" : "PID";
 }
 void message(const char* text) {
+    statusPending = true;
     char line[128];
     const char* name = mode == AutomaticSteeringMode::Line ? "LINE" : mode == AutomaticSteeringMode::ExternalYaw ? "YAW" : mode == AutomaticSteeringMode::Fault ? "FAULT" : "OFF";
     int n = snprintf(line, sizeof(line), "[FOLLOW] mode=%s e=%.3f pwm=%d mask=%u gyro=%d algo=%s dir=%d reason=%s\n",
                      name, lineError, (int)std::lround(outputUs), (unsigned int)lastMask, gyroEnabled,
                      algorithmName(), direction, text);
-    if (n > 0 && n < (int)sizeof(line) && Serial.availableForWrite() >= n)
+    if (n > 0 && n < (int)sizeof(line) && Serial.availableForWrite() >= n) {
         Serial.write((const uint8_t*)line, n);
+        statusPending = false;
+        lastPublishAt = millis();
+    }
 }
 bool fresh(uint32_t now, uint32_t at, uint32_t timeout) { return uint32_t(now - at) <= timeout; }
 bool yawFresh(uint32_t now) { return yawValid && fresh(now, yawAt, FEEDBACK_TIMEOUT_MS); }
@@ -103,8 +108,12 @@ bool submitTargetYawRate(float value, uint32_t at, bool valid) {
 bool startLineFollowing() {
     prepare();
     LineSensorFrame frame;
-    if (!readLineSensorFrame(frame) || !fresh(millis(), frame.timeMs, FEEDBACK_TIMEOUT_MS) || !linePosition(frame, lineError)) {
-        reason = "no_valid_line"; message(reason); return false;
+    if (!readLineSensorFrame(frame)) { reason = "no_line_frame"; message(reason); return false; }
+    lastMask = frame.lineMask;
+    if (!fresh(millis(), frame.timeMs, FEEDBACK_TIMEOUT_MS)) { reason = "line_stale"; message(reason); return false; }
+    if (!linePosition(frame, lineError)) {
+        reason = frame.lineMask == 0 ? "line_lost" : "line_ambiguous";
+        message(reason); return false;
     }
     if (gyroEnabled && !yawFresh(millis())) { reason = "no_valid_gyro"; message(reason); return false; }
     if (!canArm()) return false;
@@ -120,7 +129,7 @@ bool startExternalYawControl() {
     gyroEnabled = true; armed(AutomaticSteeringMode::ExternalYaw); message(reason); return true;
 }
 void stopAutomaticSteering(bool resetDrive) {
-    if (mode == AutomaticSteeringMode::Off) return;
+    if (mode == AutomaticSteeringMode::Off) { reason = "disabled"; message(reason); return; }
     mode = AutomaticSteeringMode::Off; reason = "disabled";
     resetControllers(); outputUs = steeringCenterUs(); centerSteeringOutput();
     lastRequestedUs = outputUs;
@@ -181,14 +190,14 @@ void updateAutomaticSteering() {
 }
 
 void publishAutomaticSteering() {
-    if (mode == AutomaticSteeringMode::Off || uint32_t(millis() - lastPublishAt) < 200) return;
-    const char* name = mode == AutomaticSteeringMode::Line ? "LINE" : mode == AutomaticSteeringMode::ExternalYaw ? "YAW" : "FAULT";
+    if (!statusPending && uint32_t(millis() - lastPublishAt) < 200) return;
+    const char* name = mode == AutomaticSteeringMode::Line ? "LINE" : mode == AutomaticSteeringMode::ExternalYaw ? "YAW" : mode == AutomaticSteeringMode::Fault ? "FAULT" : "OFF";
     char line[128];
     int n = snprintf(line, sizeof(line), "[FOLLOW] mode=%s e=%.3f pwm=%d mask=%u gyro=%d algo=%s dir=%d reason=%s\n",
                      name, lineError, (int)std::lround(outputUs), (unsigned int)lastMask, gyroEnabled,
                      algorithmName(), direction, reason);
     if (n > 0 && n < (int)sizeof(line) && Serial.availableForWrite() >= n) {
-        Serial.write((const uint8_t*)line, n); lastPublishAt = millis();
+        Serial.write((const uint8_t*)line, n); lastPublishAt = millis(); statusPending = false;
     }
 }
 

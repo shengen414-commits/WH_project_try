@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PyScripts.telemetry import CsvRecorder, EncoderStream
+from PyScripts.steering_requests import SteeringRequests
 
 
 class DashboardTests(unittest.TestCase):
@@ -37,6 +38,7 @@ class DashboardTests(unittest.TestCase):
         self.app.sensor_state.update({'last_encoder_rx_mono': time.monotonic(), 'throttle': 1500, 'mode': 'WEB'})
         self.app.sensor_state.update({'last_serial_line': '', 'last_serial_rx_mono': 0, 'serial_error': None})
         self.app.sensor_state.update(steering={}, last_steering_rx_mono=0)
+        self.app.steering_requests = SteeringRequests()
         self.app.esp32_serial = Mock(is_open=True, port='/dev/ttyUSB0')
         self.app.sync_coordinator.state = {'active': False, 'phase': 'idle', 'events': []}
         self.app.record_workflow_active.clear()
@@ -214,15 +216,28 @@ class DashboardTests(unittest.TestCase):
         response = self.client.post('/steering/line', json={'enabled': True})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['status'], 'requested')
-        self.app.esp32_serial.write.assert_called_with(b'N1\n')
+        request_id = response.get_json()['request_id']
+        self.app.esp32_serial.write.assert_called_with(f'N1,{request_id}\n'.encode())
         self.assertNotIn('mode', self.client.get('/sensor_stats').get_json()['steering'])
-        self.receive([b'[FOLLOW] mode=LINE e=0.143 pwm=1504 mask=16 gyro=0 reason=tracking\n[ENC],0,10,0\n'])
+        self.receive([f'[FOLLOW_ACK] id={request_id} action=1 ok=1 mask=16 raw=16 lvl=1 reason=armed\n'.encode(),
+                      b'[FOLLOW] mode=LINE e=0.143 pwm=1504 mask=16 gyro=0 reason=tracking\n[ENC],0,10,0\n'])
         state = self.client.get('/sensor_stats').get_json()
         self.assertTrue(state['encoder_fresh'])
         self.assertEqual(state['steering']['mode'], 'LINE')
         self.assertTrue(state['steering']['fresh'])
-        self.assertEqual(self.client.post('/steering/line', json={'enabled': False}).status_code, 200)
-        self.app.esp32_serial.write.assert_called_with(b'N0\n')
+        self.assertEqual(state['steering']['request']['status'], 'confirmed')
+        stop = self.client.post('/steering/line', json={'enabled': False})
+        self.assertEqual(stop.status_code, 200)
+        self.app.esp32_serial.write.assert_called_with(f"N0\nN0,{stop.get_json()['request_id']}\n".encode())
+
+    def test_steering_rejection_is_visible_even_while_firmware_stays_off(self):
+        response = self.client.post('/steering/line', json={'enabled': True})
+        request_id = response.get_json()['request_id']
+        self.receive([f'[FOLLOW_ACK] id={request_id} action=1 ok=0 mask=255 raw=255 lvl=1 reason=line_ambiguous\n'.encode()])
+        state = self.client.get('/dashboard/status').get_json()['sensor']['steering']
+        self.assertEqual(state['request']['status'], 'rejected')
+        self.assertIn('全通道命中', state['request']['message'])
+        self.assertIn('raw=11111111', state['request']['message'])
 
     def test_line_steering_requires_idle_controls_and_valid_payload(self):
         for payload in ({}, {'enabled': 'true'}, []):
