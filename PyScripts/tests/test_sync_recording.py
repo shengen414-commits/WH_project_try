@@ -1,6 +1,7 @@
 import csv
 import json
 import socket
+import struct
 import tempfile
 import threading
 import time
@@ -13,7 +14,7 @@ from PyScripts.sync_recording import SyncRecorder, SyncRecordingError, align_rec
 from PyScripts.sync_web import register_sync_routes
 from PyScripts.telemetry import EncoderStream, FIELDS, CsvRecorder
 from mps4264_app.controller import MPS4264Controller, MPSControllerError
-from mps4264_app.tests.test_mps4264 import FakeDevice
+from mps4264_app.tests.test_mps4264 import FakeDevice, make_frame
 
 
 class SyncTests(unittest.TestCase):
@@ -24,6 +25,14 @@ class SyncTests(unittest.TestCase):
         port = reserved.getsockname()[1]
         reserved.close()
         self.fake = FakeDevice(port, endian='<')
+        def send_timed_udp():
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                for number in (1, 2, 3):
+                    raw = bytearray(make_frame(number, endian='<'))
+                    struct.pack_into('<4I', raw, 332, 12, number * 20_000_000, 0, 0)
+                    udp.sendto(raw, ('127.0.0.1', port))
+                    time.sleep(.02)
+        self.fake._send_udp = send_timed_udp
         self.controller = MPS4264Controller(self.directory.name)
         self.controller.connect('127.0.0.1', self.fake.port)
         self.controller.device_info()
@@ -153,6 +162,51 @@ class SyncTests(unittest.TestCase):
                 'device_ip': '127.0.0.1', 'control_port': self.fake.port, 'init_network': False})
             self.assertEqual(response.status_code, 200)
             init_network.assert_not_called()
+
+    def test_terminal_stop_uses_coordinated_shutdown(self):
+        self.controller.set_parameters(5, 0)
+        self.feed()
+        response = self.browser.post('/sync_record/device/command', json={'command': 'SCAN', 'duration_sec': 2})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.browser.post('/sync_record/device/command', json={'command': 'LIST S'}).status_code, 409)
+        deadline = time.monotonic() + 2
+        while self.controller.status()['frames_received'] < 3 and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertEqual(self.browser.post('/sync_record/device/command', json={'command': 'STOP'}).status_code, 200)
+        self.assertEqual(self.wait()['phase'], 'saved')
+
+    def test_pressure_only_files_conversion_plot_and_download(self):
+        self.ready = False  # Manual pressure acquisition does not require encoder hardware.
+        self.assertEqual(self.browser.post('/sync_record/device/new-file', json={'name': 'manual'}).status_code, 200)
+        self.assertEqual(self.browser.post('/sync_record/device/command', json={'command': 'VER'}).status_code, 200)
+        self.assertEqual(self.browser.post('/sync_record/device/command', json={'command': 'SCAN'}).status_code, 200)
+        deadline = time.monotonic() + 2
+        while self.controller.status()['frames_received'] < 3 and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertEqual(self.browser.post('/sync_record/device/command', json={'command': 'STOP'}).status_code, 200)
+        self.assertEqual(self.browser.post('/sync_record/device/close-file', json={}).status_code, 200)
+        name = self.browser.get('/sync_record/files').get_json()['files'][0]['name']
+        self.assertEqual(name, 'Pressure_Only/manual.dat')
+        self.assertEqual(self.browser.post('/sync_record/convert', json={'filename': name}).status_code, 200)
+        deadline = time.monotonic() + 3
+        while self.sync.conversion_status()['phase'] == 'running' and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertEqual(self.sync.conversion_status()['phase'], 'done')
+        self.assertIn('Pressure_Only/manual.csv', self.browser.get('/plot/api/files').get_json()['files'])
+        plotted = self.browser.get('/plot/api/data?filename=Pressure_Only/manual.csv')
+        self.assertEqual(plotted.status_code, 200, plotted.get_json())
+        response = self.browser.get('/sync_record/download?filename=Pressure_Only/manual.dat')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 3 * 348)
+        response.close()
+
+    def test_terminal_and_library_validation(self):
+        self.assertEqual(self.browser.post('/sync_record/device/command', json={'command': 'VER\nSTOP'}).status_code, 400)
+        self.assertEqual(self.browser.post('/sync_record/device/calz', json={}).status_code, 400)
+        self.assertEqual(self.browser.post('/sync_record/device/calz', json={'zero_pressure_confirmed': 'yes'}).status_code, 400)
+        self.assertEqual(self.browser.get('/sync_record/download?filename=../private.dat').status_code, 400)
+        self.assertEqual(self.browser.post('/sync_record/convert', json={'filename': '../private.dat'}).status_code, 400)
+        self.assertEqual(self.browser.get('/plot/api/data?filename=../../private.csv').status_code, 400)
 
 
 class AlignmentTests(unittest.TestCase):

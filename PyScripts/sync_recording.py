@@ -11,6 +11,7 @@ from pathlib import Path
 
 from mps4264_app.controller import MPS4264Controller
 from mps4264_app.network import ensure_ipv4_alias
+from mps4264_app.protocol import convert_binary_to_csv
 try:
     from .telemetry import CsvRecorder
 except ImportError:
@@ -94,6 +95,7 @@ class SyncRecorder:
         self.recorder = None
         self.worker = None
         self.network = None
+        self.conversion = {'phase': 'idle'}
         self.speed_calibration = speed_calibration or {'ppr': 12.0, 'kmh_per_rpm': 0.007173}
 
     def _event(self, name):
@@ -125,7 +127,7 @@ class SyncRecorder:
                 if self.state['active']:
                     raise SyncRecordingError('同步记录期间不能更改扫描阀配置')
             pressure = self.controller.status()
-            if pressure['file_open'] or pressure['scanning']:
+            if (pressure['file_open'] or pressure['scanning']) and action not in ('pressure-scan', 'pressure-stop', 'close-file', 'command'):
                 raise SyncRecordingError('上一份压力文件仍未关闭，请先重试停止')
             if action == 'connect':
                 if values.get('init_network', True):
@@ -142,12 +144,110 @@ class SyncRecorder:
                 result = self.controller.configure_udp(str(values['host_ip']), int(values.get('udp_port', 50023)))
             elif action == 'parameters':
                 result = self.controller.set_parameters(float(values['rate']), int(values.get('fps', 0)),
-                                                         int(values.get('fast_group', 0)), 0, 16)
+                                                         int(values.get('fast_group', 0)),
+                                                         int(values.get('read_mode', 0)), int(values.get('subset_size', 16)))
+            elif action == 'command':
+                result = self.controller.send_command(str(values.get('command', '')),
+                                                      bool(values.get('zero_pressure_confirmed', False)))
+            elif action == 'save':
+                result = self.controller.save_settings()
+            elif action == 'calz':
+                result = self.controller.calz(bool(values.get('zero_pressure_confirmed', False)))
+            elif action == 'new-file':
+                self.controller.data_dir = self.root / 'Sync_Records' / 'Pressure_Only'
+                name = str(values.get('name') or datetime.now().strftime('pressure_%Y%m%d_%H%M%S_%f'))
+                result = self.controller.new_file(name)
+                with self.lock:
+                    self.recorder = None
+                    self.state = {'active': False, 'phase': 'idle', 'events': [],
+                                  'folder': str(self.controller.data_dir), 'mode': 'pressure_only'}
+            elif action == 'pressure-scan':
+                result = self.controller.scan()
+            elif action == 'pressure-stop':
+                result = self.controller.stop()
+            elif action == 'close-file':
+                result = self.controller.close_file()
             else:
                 raise ValueError('未知扫描阀操作')
             return {'result': result, 'status': self.status()}
         finally:
             self.operation_lock.release()
+
+    def command(self, values):
+        line = str(values.get('command', '')).strip()
+        # SCAN/STOP cannot bypass ownership of an active synchronized capture.
+        if line.upper() == 'STOP':
+            with self.lock:
+                active = self.state['active']
+            if active:
+                return {'result': {'command': line, 'response': '同步停止已请求；等待双方保存。'}, 'status': self.stop()}
+            return self.device_operation('pressure-stop', values)
+        if line.upper() == 'SCAN':
+            pressure = self.controller.try_status()
+            if pressure.get('busy'):
+                raise SyncRecordingError('扫描阀正在执行其他操作')
+            if pressure.get('file_open'):
+                return self.device_operation('pressure-scan', values)
+            state = self.start(values.get('duration_sec', 60), values.get('max_delta_ms', 30))
+            return {'result': {'command': line, 'response': '同步记录已启动；等待双方数据。'}, 'status': state}
+        return self.device_operation('command', values)
+
+    def library_path(self, filename, suffixes=('.dat', '.csv', '.json')):
+        root = (self.root / 'Sync_Records').resolve()
+        path = (root / str(filename)).resolve()
+        if not path.is_relative_to(root) or path.suffix.lower() not in suffixes or not path.is_file():
+            raise ValueError('请选择记录目录中的有效文件')
+        return path
+
+    def files(self):
+        root = self.root / 'Sync_Records'
+        items = []
+        if root.exists():
+            for path in root.rglob('*.dat'):
+                if path.is_file() and path.resolve().is_relative_to(root.resolve()):
+                    items.append({'name': path.relative_to(root).as_posix(), 'bytes': path.stat().st_size,
+                                  'csv_exists': path.with_suffix('.csv').is_file()})
+        return sorted(items, key=lambda item: item['name'], reverse=True)
+
+    def convert(self, values):
+        if not self.operation_lock.acquire(blocking=False):
+            raise SyncRecordingError('已有设备操作或转换正在运行')
+        try:
+            with self.lock:
+                if self.state['active']:
+                    raise SyncRecordingError('同步采集结束后再转换文件')
+            if self.controller.status()['file_open']:
+                raise SyncRecordingError('请先停止并关闭压力文件')
+            source = self.library_path(values.get('filename', ''), ('.dat',))
+            group = values.get('fast_group')
+            if group in (None, ''):
+                meta = source.with_suffix('.meta.json')
+                group = json.loads(meta.read_text(encoding='utf-8')).get('fast_group') if meta.exists() else None
+            else:
+                group = int(group)
+            with self.lock:
+                self.conversion = {'phase': 'running', 'filename': str(values['filename'])}
+
+            def run():
+                try:
+                    result = convert_binary_to_csv(source, source.with_suffix('.csv'), group,
+                                                   overwrite=bool(values.get('overwrite', False)))
+                    with self.lock:
+                        self.conversion = {'phase': 'done', 'result': result}
+                except Exception as exc:
+                    with self.lock:
+                        self.conversion = {'phase': 'error', 'error': str(exc)}
+                finally:
+                    self.operation_lock.release()
+            threading.Thread(target=run, name='pressure-conversion', daemon=True).start()
+            return self.conversion_status()
+        except Exception:
+            self.operation_lock.release()
+            raise
+
+    def conversion_status(self):
+        with self.lock:
+            return dict(self.conversion)
 
     def submit(self, sample):
         with self.lock:

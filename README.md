@@ -14,6 +14,14 @@ python3 PyScripts/Camera_mit_Rotation_dashboard.py
 通过后台的 `SyncRecorder` 使用同一个 `MPS4264Controller`。
 不要同时运行 `python3 -m mps4264_app.main` 控制同一设备或占用同一个 UDP 端口。
 
+同步面板与线控底盘驱动台在宽屏左右并列，窄屏自动纵向排列。
+连接状态灯、UDP 状态灯、设备命令行和 VER/STATUS/VALVESTATE/LIST 快捷命令常驻显示。
+网络设置、扫描参数、实时压力曲线、64 路数值、SAVE/CALZ、压力单独采集、文件转换下载、
+事件和历史 CSV 绘图入口放在默认折叠的“更多扫描阀功能”里。
+同步记录期间命令行 STOP 会协调双方停止，其他设备命令不允许修改该批采集状态。
+没有单独压力文件时，命令行 SCAN 启动同步记录；新建了压力文件时，SCAN/STOP 仅管理压力采集。
+压力单独采集保存在 `Car_Records/Sync_Records/Pressure_Only/`，历史图支持浏览同步批次的压力 CSV。
+
 操作顺序：
 
 1. ESP32 使用正常 `esp32dev` 固件，保持串口正常模式（`R`）；舵机 demo 或暂停编码器的巡线调试模式不能用于车速同步。

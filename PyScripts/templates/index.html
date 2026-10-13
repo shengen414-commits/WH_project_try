@@ -1,9 +1,11 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>双路高速感知终端</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='sync-columns-2') }}">
 </head>
 <body>
     <div class="top-bar">
@@ -90,40 +92,8 @@
         <div class="speed-record-status" id="speed-record-status">速度记录: 空闲 | 上限 10 min</div>
     </div>
 
-    <section class="sync-panel">
-        <h2>车速＋扫描阀同步记录</h2>
-        <p>先连接并确认参数，再开始记录。使用 Orange Pi 接收时间对齐，不代表硬件同步；不自动改变油门。</p>
-        <div class="sync-fields">
-            <label>扫描阀 IP<input id="sync-device-ip" value="191.30.90.102"></label>
-            <label>Orange Pi 网口 IP / 掩码<input id="sync-local-cidr" value="191.30.90.82/16"></label>
-            <label>网口<input id="sync-interface" value="eth0"></label>
-            <label>UDP 端口<input id="sync-udp-port" type="number" min="1024" max="65535" value="50023"></label>
-        </div>
-        <label><input id="sync-init-network" type="checkbox" checked>连接时检查并添加本机网口地址（需要网口管理权限；已配置可取消）</label>
-        <div class="sync-buttons">
-            <button data-sync-config onclick="syncDevice('connect')">连接扫描阀</button>
-            <button data-sync-config onclick="syncDevice('info')">读取设备信息</button>
-            <button data-sync-config onclick="syncDevice('udp')">设置 UDP 并保存</button>
-            <button data-sync-config onclick="syncDevice('reconnect')">已重启，重新连接</button>
-            <button data-sync-config onclick="syncDevice('disconnect')">断开连接</button>
-        </div>
-        <div class="sync-fields">
-            <label>压力采样 RATE / Hz<input id="sync-rate" type="number" min="0.25" max="2500" step="0.25" value="100"></label>
-            <label>压力 FPS（0＝直到停止）<input id="sync-fps" type="number" min="0" value="0"></label>
-            <label>扫描模式<select id="sync-group"><option value="0">64 通道</option><option value="1">快速组 1</option><option value="2">快速组 2</option><option value="3">快速组 3</option><option value="4">快速组 4</option></select></label>
-            <button data-sync-config onclick="syncDevice('parameters')">发送采样参数</button>
-            <label>记录上限 / 秒<input id="sync-duration" type="number" min="1" max="600" value="60"></label>
-            <label>速度匹配容差 / ms<input id="sync-delta" type="number" min="1" max="1000" value="30"></label>
-        </div>
-        <div class="sync-buttons">
-            <button id="sync-start" onclick="startSyncRecording()">开始同步记录</button>
-            <button id="sync-stop" onclick="stopSyncRecording()" disabled>停止并保存</button>
-        </div>
-        <div id="sync-status" role="status">同步记录：空闲</div>
-        <div id="sync-message" role="status"></div>
-        <pre id="sync-device-info"></pre>
-    </section>
-
+    <div class="operation-columns">
+        {% include 'sync_panel.html' %}
     <div class="control-panel">
         <h2 style="margin:0; color:#00aaff;">🎮 线控底盘驱动台 (Drive-by-Wire)</h2>
         <div id="rc-warning" style="display: none; background: #cc0000; color: #fff; padding: 10px; border-radius: 8px; font-weight: bold; margin-bottom: 15px; text-align: center; font-size: 1.1em; animation: flash 1.5s infinite;">
@@ -168,7 +138,9 @@
         </div>
     </div>
 
+    </div>
+
     <script src="{{ url_for('static', filename='js/main.js') }}?v=20260717-numeric-boost"></script>
-    <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=2"></script>
 </body>
 </html>

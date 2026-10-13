@@ -135,7 +135,7 @@ def read_pressure_csv(source: str | Path | TextIO, *, name: str | None = None,
 
 
 def register_plot_routes(app, *, data_dir: str | Path | None = None,
-                         initial_csv: str | Path | None = None) -> None:
+                         initial_csv: str | Path | None = None, recursive: bool = False) -> None:
     """Add /plot and read-only CSV endpoints to an existing Flask application.
 
     Server file browsing is restricted to data_dir. Uploaded files are parsed
@@ -163,11 +163,12 @@ def register_plot_routes(app, *, data_dir: str | Path | None = None,
 
     @bp.get("/plot/api/files")
     def files():
-        candidates = (root.iterdir() if root.exists() else [])
-        names = sorted(p.name for p in candidates if p.is_file()
+        candidates = ((root.rglob('*.csv') if recursive else root.iterdir()) if root.exists() else [])
+        names = sorted(p.relative_to(root).as_posix() for p in candidates if p.is_file()
                        and p.suffix.lower() == ".csv"
                        and not p.name.lower().endswith(".index.csv")
-                       and p.resolve().parent == root)
+                       and (not recursive or p.name != 'speed.csv')
+                       and (p.resolve().is_relative_to(root) if recursive else p.resolve().parent == root))
         return jsonify(files=names)
 
     @bp.get("/plot/api/data")
@@ -176,10 +177,10 @@ def register_plot_routes(app, *, data_dir: str | Path | None = None,
         if filename is None and initial is not None:
             path = initial
         else:
-            if not filename or Path(filename).name != filename or "\\" in filename:
+            if not filename or (not recursive and Path(filename).name != filename) or "\\" in filename:
                 raise ValueError("请选择数据目录中的 CSV 文件")
             path = (root / filename).resolve()
-            if path.parent != root or path.suffix.lower() != ".csv":
+            if (not path.is_relative_to(root) if recursive else path.parent != root) or path.suffix.lower() != ".csv":
                 raise ValueError("不能读取数据目录以外的文件")
         return jsonify(read_pressure_csv(path).to_dict())
 

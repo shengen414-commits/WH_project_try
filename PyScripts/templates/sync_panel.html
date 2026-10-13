@@ -1,0 +1,106 @@
+<section class="sync-panel">
+    <header class="sync-heading">
+        <h2>车速＋扫描阀同步记录</h2>
+        <div class="sync-indicators" aria-live="polite">
+            <span><i id="sync-connection-light" class="sync-light" data-state="off"></i><span id="sync-connection-text">未连接</span></span>
+            <span><i id="sync-data-light" class="sync-light" data-state="off"></i><span id="sync-data-text">UDP 待机</span></span>
+        </div>
+    </header>
+    <div class="sync-fields">
+        <label>扫描阀 IP<input id="sync-device-ip" value="191.30.90.102"></label>
+        <button data-sync-config onclick="syncDevice('connect')">连接</button>
+        <button data-sync-config onclick="syncDevice('info')">读取设备信息</button>
+        <button data-sync-config onclick="syncDevice('disconnect')">断开</button>
+        <label>记录上限 / 秒<input id="sync-duration" type="number" min="1" max="600" value="60"></label>
+        <label>速度匹配容差 / ms<input id="sync-delta" type="number" min="1" max="1000" value="30"></label>
+    </div>
+    <div class="sync-buttons">
+        <button id="sync-start" onclick="startSyncRecording()">开始同步记录</button>
+        <button id="sync-stop" onclick="stopSyncRecording()" disabled>停止并保存</button>
+    </div>
+    <div id="sync-status" role="status">同步记录：空闲</div>
+    <div id="sync-message" role="status"></div>
+
+    <section class="sync-terminal" aria-label="扫描阀设备命令窗口">
+        <h3>设备命令窗口 <small>TCP · ScanTel</small></h3>
+        <div class="sync-buttons sync-presets">
+            {% for command in ['VER', 'STATUS', 'VALVESTATE', 'LIST S', 'LIST M', 'LIST UDP'] %}
+            <button data-sync-command="{{ command }}" onclick="sendSyncCommand('{{ command }}')">{{ command }}</button>
+            {% endfor %}
+        </div>
+        <pre id="sync-terminal-output" role="log" aria-live="polite">MPS4264 console ready. 请先连接设备。</pre>
+        <form class="sync-terminal-form" onsubmit="event.preventDefault(); sendSyncCommand();">
+            <span>&gt;</span><input id="sync-terminal-input" autocomplete="off" spellcheck="false" maxlength="79" placeholder="设备命令，例如 LIST S" aria-label="扫描阀命令">
+            <button id="sync-terminal-send" type="submit">发送</button>
+        </form>
+        <p class="sync-hint">同步采集时仅允许 STOP。未新建压力文件时，SCAN 启动同步记录。</p>
+    </section>
+
+    <details id="sync-advanced" class="sync-advanced">
+        <summary>更多扫描阀功能 · 网络、参数、压力预览、采集文件与校零</summary>
+        <h3>连接与 UDP 配置</h3>
+        <div class="sync-fields">
+            <label>TCP 端口<input id="sync-control-port" type="number" min="1" max="65535" value="23"></label>
+            <label>Orange Pi 网口 IP / 掩码<input id="sync-local-cidr" value="191.30.90.82/16"></label>
+            <label>网口<input id="sync-interface" value="eth0"></label>
+            <label>UDP 端口<input id="sync-udp-port" type="number" min="1024" max="65535" value="50023"></label>
+        </div>
+        <label><input id="sync-init-network" type="checkbox" checked>连接时检查并添加本机网口地址（已配置可取消）</label>
+        <div class="sync-buttons">
+            <button data-sync-config onclick="syncDevice('udp')">设置 UDP 并保存</button>
+            <button data-sync-config onclick="syncDevice('reconnect')">已重启，重新连接</button>
+        </div>
+        <p class="sync-hint">等待 UDP 保存完成后给设备断电重启，再重新连接。</p>
+        <details><summary>设备返回信息</summary><pre id="sync-device-info">尚未查询</pre></details>
+
+        <h3>扫描参数</h3>
+        <div class="sync-fields">
+            <label>RATE / Hz<input id="sync-rate" type="number" min="0.25" max="2500" step="any" value="100"></label>
+            <label>FPS（0＝直到 STOP）<input id="sync-fps" type="number" min="0" value="0"></label>
+            <label>OPTIONS 组<select id="sync-group"><option value="0">0 · 64 通道</option>{% for n in range(1,5) %}<option value="{{n}}">{{n}} · 快速 16 路</option>{% endfor %}</select></label>
+            <label>读取模式<select id="sync-read-mode"><option value="0">0</option><option value="1">1</option></select></label>
+            <label>子集大小<input id="sync-subset" type="number" min="2" max="256" value="16"></label>
+        </div>
+        <div class="sync-buttons">
+            <button data-sync-config onclick="syncDevice('parameters')">发送 SET 参数</button>
+            <button data-sync-config onclick="syncDevice('save')">保存配置 SAVE</button>
+        </div>
+
+        <h3>实时压力预览</h3>
+        <div id="sync-pressure-metrics">等待数据</div>
+        <div class="sync-fields"><label>预览通道（最多 6 路）<input id="sync-preview-channels" value="1,2,3,4" onchange="drawSyncPressure()"></label></div>
+        <canvas id="sync-pressure-chart" width="900" height="280" aria-label="扫描阀实时压力趋势图"></canvas>
+        <details><summary>查看 64 路最新值</summary><div id="sync-channel-grid"></div></details>
+        <p class="sync-hint">这里显示抽样趋势；原始有效帧全部保存。车速与压力按主机接收时间对齐。</p>
+
+        <h3>压力单独采集</h3>
+        <div class="sync-fields"><label>新文件名（留空自动生成）<input id="sync-pressure-name" maxlength="64" placeholder="pressure_001"></label></div>
+        <div class="sync-buttons">
+            <button id="sync-pressure-new" onclick="syncDevice('new-file')">新建压力文件</button>
+            <button id="sync-pressure-scan" onclick="syncDevice('pressure-scan')">SCAN</button>
+            <button id="sync-pressure-stop" onclick="syncDevice('pressure-stop')">STOP</button>
+            <button id="sync-pressure-close" onclick="syncDevice('close-file')">关闭文件</button>
+        </div>
+        <p class="sync-hint">此流程仅记录压力：新建文件 → SCAN → STOP → 关闭。同步记录自动管理自己的文件。</p>
+
+        <h3>记录文件与 CSV 转换</h3>
+        <div class="sync-fields">
+            <label>二进制文件<select id="sync-files"><option value="">选择 .dat 文件</option></select></label>
+            <label>转换组<select id="sync-convert-group"><option value="">使用记录元数据</option><option value="0">64 路</option>{% for n in range(1,5) %}<option value="{{n}}">快速组 {{n}}</option>{% endfor %}</select></label>
+        </div>
+        <label><input id="sync-convert-overwrite" type="checkbox">重新生成已有 CSV</label>
+        <div class="sync-buttons">
+            <button onclick="refreshSyncFiles()">刷新文件</button>
+            <button id="sync-convert" onclick="convertSyncFile()">转换 CSV</button>
+            <button onclick="downloadSyncFile(false)">下载 DAT</button>
+            <button onclick="downloadSyncFile(true)">下载 CSV</button>
+        </div>
+        <div id="sync-convert-status" role="status">尚无转换任务</div>
+        <a href="{{ url_for('pressure_plot.page') }}" target="_blank" rel="noopener">打开 CSV 压力—时间图（通道选择、时间范围、保存 PNG）</a>
+
+        <h3>校零与事件</h3>
+        <label><input id="sync-zero-confirmed" type="checkbox">已确认 CAL/REF 等压，或 PX 状态下无风、无测点压差</label>
+        <div class="sync-buttons"><button data-sync-config onclick="syncDevice('calz')">执行 CALZ 校零</button></div>
+        <pre id="sync-events">暂无设备事件</pre>
+    </details>
+</section>

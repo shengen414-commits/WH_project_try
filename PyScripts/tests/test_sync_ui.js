@@ -3,19 +3,21 @@ const vm = require('vm');
 const assert = require('assert');
 const elements = new Map();
 const element = id => {
-    if (!elements.has(id)) elements.set(id, { innerText: '', disabled: false });
+    if (!elements.has(id)) elements.set(id, { innerText: '', disabled: false, dataset: {}, open: false, addEventListener: () => {} });
     return elements.get(id);
 };
 const configButtons = [{}, {}];
 const context = vm.createContext({
-    document: { getElementById: element, querySelectorAll: () => configButtons },
+    document: { getElementById: element, querySelectorAll: selector => selector === '[data-sync-config]' ? configButtons : [] },
     setInterval: () => {},
+    setTimeout: () => {},
     fetch: async () => ({ ok: true, json: async () => ({ phase: 'idle', encoder_fresh: false, pressure: {} }) }),
 });
 vm.runInContext(fs.readFileSync('PyScripts/static/js/sync_recording.js', 'utf8'), context);
 const render = state => context.renderSyncState({ phase: 'idle', active: false, encoder_fresh: true, pressure: { connected: true }, ...state });
 render({});
 assert.strictEqual(element('sync-start').disabled, false);
+assert.strictEqual(element('sync-connection-light').dataset.state, 'on');
 render({ encoder_fresh: false });
 assert.strictEqual(element('sync-start').disabled, true);
 render({ pressure: { connected: true, reboot_required: true } });
@@ -30,6 +32,10 @@ render({ phase: 'stop_failed', active: true, error: 'STOP timeout' });
 assert.strictEqual(element('sync-stop').disabled, false);
 assert.ok(element('sync-stop').innerText.includes('重试'));
 assert.ok(element('sync-status').innerText.includes('STOP timeout'));
+render({ pressure: { connected: true, file_open: true, scanning: true, last_receive_unix_ns: Date.now() * 1e6 } });
+assert.strictEqual(element('sync-start').disabled, true);
+assert.strictEqual(element('sync-data-light').dataset.state, 'on');
+assert.strictEqual(element('sync-pressure-stop').disabled, false);
 render({ phase: 'error', active: false });
 assert.strictEqual(element('sync-start').disabled, false);
 assert.strictEqual(element('sync-stop').disabled, true);
