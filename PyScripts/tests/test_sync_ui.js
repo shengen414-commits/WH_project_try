@@ -64,3 +64,8 @@ assert.strictEqual(element('sync-stop').disabled, true);
 context.appendSyncTiming('/sync_record/device/command', 10, { server_ms: 1, commands: [] }, 'test');
 assert.ok(!element('sync-terminal-output').innerText.includes('2000.0 ms'));
 console.log('Sync UI state checks passed');
+assert.equal(context.syncPressureValue(999999, 23), null);
+assert.equal(context.syncPressureValue(-999999, 23), null);
+assert.equal(context.syncPressureValue(999999, 27), 999999);
+assert.equal(context.syncPressureValue(-999999, 27), -999999);
+assert.equal(context.syncPressureValue(1200, 23), 1200);

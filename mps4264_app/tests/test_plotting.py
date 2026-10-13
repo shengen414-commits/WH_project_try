@@ -71,6 +71,30 @@ class CSVReaderTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 read_pressure_csv(io.StringIO(bad))
 
+    def test_both_pressure_error_flags_are_gaps_but_raw_counts_are_kept(self):
+        text = 'frame,frame_time_sec,units_index,P01,P02\n1,0.002,23,999999,-999999\n2,0.004,23,1001,-1001\n'
+        data = read_pressure_csv(io.StringIO(text))
+        self.assertEqual(data.channels, {'P01': [None, 1001], 'P02': [None, -1001]})
+        self.assertEqual(data.to_dict()['sentinel_counts']['P01'], {'positive': 1, 'negative': 0})
+        self.assertEqual(data.to_dict()['sentinel_counts']['P02'], {'positive': 0, 'negative': 1})
+        raw = read_pressure_csv(io.StringIO(text.replace(',23,', ',27,')))
+        self.assertEqual(raw.channels['P01'], [999999, 1001])
+        self.assertEqual(raw.channels['P02'], [-999999, -1001])
+        self.assertEqual(raw.to_dict()['sentinel_counts']['P01']['positive'], 0)
+
+    def test_known_bad_channels_and_scan_groups_are_selection_metadata(self):
+        columns = ','.join(f'P{n:02d}' for n in range(1, 65))
+        text = f'frame,frame_time_sec,units_index,{columns}\n1,0.002,23,' + ','.join(['10'] * 64) + '\n'
+        data = read_pressure_csv(io.StringIO(text))
+        payload = data.to_dict()
+        self.assertEqual(set(payload['known_invalid_channels']), {'P02', 'P03', 'P35'})
+        self.assertEqual(data.channels['P02'], [10])  # Preserve source values despite exclusion from plotting.
+        groups = payload['channel_groups']
+        self.assertEqual(len(groups['1']), 16)
+        self.assertEqual(groups['1'][:3], ['P01', 'P05', 'P09'])
+        self.assertIn('P35', groups['2'])
+        self.assertEqual({channel for group in groups.values() for channel in group}, set(data.channels))
+
 
 class PlotWebTests(unittest.TestCase):
     def setUp(self):

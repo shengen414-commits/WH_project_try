@@ -9,6 +9,8 @@
   const style = n => ({color: colors[(n-1)%colors.length],
                       dash: lineDashes[Math.floor((n-1)/colors.length)%lineDashes.length]});
   const SPEED='speed';
+  const knownInvalid = data => data.known_invalid_channels || {P02:'已确认损坏',P03:'已确认损坏',P35:'已确认损坏'};
+  const channelAllowed = (data,key) => !knownInvalid(data)[key];
   const number = key => key===SPEED ? Infinity : Number(key.slice(1));
   const seriesStyle = key => key===SPEED ? {color:'#ffdd57',dash:[]} : style(number(key));
   const seriesValues = (data,key) => key===SPEED ? data.speed : data.channels[key];
@@ -36,13 +38,13 @@
       if(!data.times?.length || !data.channels || data.frames?.length!==data.times.length)throw new Error('绘图数据不完整');
       if(data.speed!=null && (!Array.isArray(data.speed) || data.speed.length!==data.times.length))throw new Error('速度数据长度不匹配');
       this.data=data;
-      this.selected=Object.keys(data.channels).filter(key=>data.channels[key].some(v=>v!==null)).slice(0,4);
+      this.selected=Object.keys(data.channels).filter(key=>channelAllowed(data,key) && data.channels[key].some(v=>v!==null)).slice(0,4);
       if(data.speed?.some(v=>v!==null))this.selected.push(SPEED);
       this.range=[data.times[0],data.times.at(-1)];this.draw();
     }
     setChannels(keys) {
       if(!this.data)return;
-      this.selected=[...new Set(keys)].filter(key=>seriesValues(this.data,key)?.some(v=>v!==null)).sort((a,b)=>number(a)-number(b));this.draw();
+      this.selected=[...new Set(keys)].filter(key=>channelAllowed(this.data,key) && seriesValues(this.data,key)?.some(v=>v!==null)).sort((a,b)=>number(a)-number(b));this.draw();
     }
     setRange(start,end) {
       if(!this.data)return;
@@ -142,19 +144,22 @@
   const chart=new PressureTimeChart(el('csv-pressure-chart'),{tooltip:el('plot-tooltip')});
   const inputs=el('csv-channels');let data=null,activeRequest=null;
   const notify=(text,error=false)=>{message.textContent=text;message.classList.toggle('error',error);};
-  function syncSelection(){chart.setChannels([...inputs.querySelectorAll('input:checked')].map(input=>input.value));el('selection-count').textContent=`已选 ${chart.selected.filter(key=>key!==SPEED).length} / ${Object.keys(data.channels).length} 路${Array.isArray(data.speed)?` · 速度${chart.selected.includes(SPEED)?'已选':'未选'}`:''}`;}
+  function syncSelection(){chart.setChannels([...inputs.querySelectorAll('input:checked')].filter(input=>!input.disabled).map(input=>input.value));const validCount=Object.keys(data.channels).filter(key=>channelAllowed(data,key) && data.channels[key].some(v=>v!==null)).length;el('selection-count').textContent=`已选 ${chart.selected.filter(key=>key!==SPEED).length} / ${validCount} 路有效通道${Array.isArray(data.speed)?` · 速度${chart.selected.includes(SPEED)?'已选':'未选'}`:''}`;}
   function loadData(value){
     chart.setData(value);data=value;inputs.replaceChildren();
     seriesKeys(data).forEach(key=>{
       const labelEl=document.createElement('label'),input=document.createElement('input'),swatch=document.createElement('span'),text=document.createElement('span');
-      input.type='checkbox';input.value=key;input.checked=chart.selected.includes(key);const invalidCount=key===SPEED?data.speed.filter(v=>v===null).length:data.invalid_counts[key];input.disabled=invalidCount===data.frame_count;
+      input.type='checkbox';input.value=key;input.checked=chart.selected.includes(key);const invalidCount=key===SPEED?data.speed.filter(v=>v===null).length:data.invalid_counts[key];const invalidReason=knownInvalid(data)[key];input.disabled=!!invalidReason || invalidCount===data.frame_count;
       swatch.className='swatch';swatch.style.background=seriesStyle(key).color;
-      text.textContent=(key===SPEED?'速度（km/h）':key)+(input.disabled?'（全部无效）':invalidCount?`（无效 ${invalidCount} 帧）`:'');
+      text.textContent=(key===SPEED?'速度（km/h）':key)+(invalidReason?`（${invalidReason}，无效）`:input.disabled?'（全部无效）':invalidCount?`（无效 ${invalidCount} 帧）`:'');
       if(input.disabled)labelEl.className='channel-invalid';labelEl.append(input,swatch,text);inputs.append(labelEl);input.addEventListener('change',syncSelection);
     });
     el('time-start').value=data.times[0];el('time-end').value=data.times.at(-1);syncSelection();
+    el('select-group').disabled=false;el('select-group').value='';
     el('plot-time-note').textContent=Array.isArray(data.speed)?'横轴使用同步记录经过时间；左轴为压力，右轴为速度（km/h）。未匹配或无效速度不绘制。':'横轴使用 CSV 中的设备帧时间，不等同于主机 UTC；压力数值已是对应单位，不再乘转换系数。';
-    notify(`${data.name} · ${data.source_format} · ${data.frame_count} 帧 · ${data.unit} · ${label(data.times[0])}～${label(data.times.at(-1))} s`);
+    const flags=Object.values(data.sentinel_counts || {});
+    const positive=flags.reduce((n,item)=>n+item.positive,0),negative=flags.reduce((n,item)=>n+item.negative,0);
+    notify(`${data.name} · ${data.source_format} · ${data.frame_count} 帧 · ${data.unit} · ${label(data.times[0])}～${label(data.times.at(-1))} s${positive+negative?` · 设备特殊值已留空：+999999 ${positive} 点，-999999 ${negative} 点（原文件保留）`:''}`);
   }
   async function requestData(url,options={}) {
     activeRequest?.abort();const controller=new AbortController();activeRequest=controller;notify('正在读取 CSV…');
@@ -168,6 +173,15 @@
   el('reset-range').addEventListener('click',()=>{if(!data)return;el('time-start').value=data.times[0];el('time-end').value=data.times.at(-1);chart.range=[data.times[0],data.times.at(-1)];chart.draw();});
   el('select-all').addEventListener('click',()=>{if(!data)return;inputs.querySelectorAll('input:not(:disabled)').forEach(input=>input.checked=true);syncSelection();});
   el('select-none').addEventListener('click',()=>{if(!data)return;inputs.querySelectorAll('input').forEach(input=>input.checked=false);syncSelection();});
+  el('select-group').addEventListener('change',()=>{
+    if(!data)return;
+    const group=el('select-group').value;
+    const keys=new Set(data.channel_groups?.[group] || []);
+    inputs.querySelectorAll('input:not(:disabled)').forEach(input=>{if(keys.has(input.value))input.checked=true;});
+    syncSelection();
+    // Reset the menu so the same group can be added again after manual changes.
+    el('select-group').value='';
+  });
   el('save-image').addEventListener('click',()=>{try{chart.exportPNG();}catch(error){notify(error.message,true);}});
   refresh();if(root.dataset.initial==='true')requestData('/plot/api/data');
 })();

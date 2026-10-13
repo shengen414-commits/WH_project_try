@@ -241,9 +241,12 @@ function renderChannels(frame) {
   frame.pressures.forEach((value, index) => {
     const item = document.createElement("div");
     item.className = "channel";
-    item.textContent = `P${String(index + 1).padStart(2, "0")}  ${value === null ? "—" : Number(value).toFixed(3)}`;
+    item.textContent = `P${String(index + 1).padStart(2, "0")}  ${displayPressureValue(value, frame.units_index) === null ? "—" : Number(value).toFixed(3)}`;
     grid.append(item);
   });
+}
+function displayPressureValue(value, unitsIndex) {
+  return !Number.isFinite(value) || (unitsIndex !== 27 && Math.abs(value) === 999999) ? null : value;
 }
 
 function refreshStatus() {
@@ -291,7 +294,7 @@ function renderStatus(state) {
     const key = `${state.file_name}/${state.last_frame.number}/${state.last_receive_unix_ns}`;
     if (key !== lastFrameKey) {
       lastFrameKey = key;
-      history.push(state.last_frame.pressures);
+      history.push(state.last_frame.pressures.map(value => displayPressureValue(value, state.last_frame.units_index)));
       if (history.length > 180) history.shift();
       drawChart();
       renderChannels(state.last_frame);

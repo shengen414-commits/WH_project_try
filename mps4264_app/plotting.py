@@ -13,8 +13,10 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
+from .protocol import FAST_GROUPS
 
 MAX_CSV_BYTES = 128 * 1024 * 1024
+KNOWN_INVALID_CHANNELS = {'P02': '已确认损坏', 'P03': '已确认损坏', 'P35': '已确认损坏'}
 
 
 @dataclass
@@ -28,6 +30,7 @@ class PressureCSV:
     metadata: dict[str, str]
     speed: list[float | None] | None = None
     time_label: str = '设备帧时间（s）'
+    sentinel_counts: dict | None = None
 
     def to_dict(self) -> dict:
         """Full-resolution data, JSON-safe; invalid readings are None/null."""
@@ -35,6 +38,11 @@ class PressureCSV:
                 "unit": self.unit, "times": self.times, "frames": self.frames,
                 "channels": self.channels, "metadata": self.metadata,
                 "speed": self.speed, "speed_unit": 'km/h', "time_label": self.time_label,
+                "sentinel_counts": self.sentinel_counts or {},
+                "known_invalid_channels": {key: reason for key, reason in KNOWN_INVALID_CHANNELS.items()
+                                           if key in self.channels},
+                "channel_groups": {str(group): [f'P{n:02d}' for n in channels]
+                                   for group, channels in FAST_GROUPS.items()},
                 "frame_count": len(self.frames),
                 "invalid_counts": {key: sum(v is None for v in values)
                                    for key, values in self.channels.items()}}
@@ -97,6 +105,7 @@ def read_pressure_csv(source: str | Path | TextIO, *, name: str | None = None,
     times: list[float] = []
     frames: list[int] = []
     values: dict[str, list[float | None]] = {key: [] for key in channel_columns}
+    sentinel_counts = {key: {'positive': 0, 'negative': 0} for key in channel_columns}
     speeds: list[float | None] | None = [] if synchronized else None
     unit = metadata.get("Units", "未知单位")
     unit_index: int | None = None
@@ -125,8 +134,13 @@ def read_pressure_csv(source: str | Path | TextIO, *, name: str | None = None,
             for key, index in channel_columns.items():
                 cell = row[index].strip()
                 v = float(cell) if cell else None
+                # Engineering-unit output uses special error values. RAW ADC
+                # integers can legitimately equal these numbers; keep RAW intact.
+                sentinel = unit_index != 27 and v in (-999999.0, 999999.0)
+                if sentinel:
+                    sentinel_counts[key]['positive' if v > 0 else 'negative'] += 1
                 parsed[key] = (v if v is not None and math.isfinite(v)
-                               and v != invalid_value else None)
+                               and not sentinel and (unit_index == 27 or v != invalid_value) else None)
             speed = None
             if synchronized:
                 valid = row[columns['match_valid']].strip()
@@ -152,7 +166,7 @@ def read_pressure_csv(source: str | Path | TextIO, *, name: str | None = None,
         unit = "Pa"
     return PressureCSV(filename, "Synchronized" if synchronized else "Linux" if linux else "ScanTel", unit,
                        times, frames, values, metadata, speeds,
-                       '同步记录时间（s）' if synchronized else '设备帧时间（s）')
+                       '同步记录时间（s）' if synchronized else '设备帧时间（s）', sentinel_counts)
 
 
 def register_plot_routes(app, *, data_dir: str | Path | None = None,

@@ -180,7 +180,7 @@ function updateSyncPressure(pressure) {
     const key = `${pressure.status_epoch || ''}:${pressure.file_name}:${frame?.number}:${pressure.last_receive_unix_ns}`;
     if (frame && key !== syncLastPressureFrame) {
         syncLastPressureFrame = key;
-        syncPressureHistory.push({ time: pressure.last_receive_unix_ns / 1e9, values: frame.pressures });
+        syncPressureHistory.push({ time: pressure.last_receive_unix_ns / 1e9, values: frame.pressures.map(value => syncPressureValue(value, frame.units_index)) });
         if (syncPressureHistory.length > 250) syncPressureHistory.shift();
     }
     if (!document.getElementById('sync-advanced').open) return;
@@ -190,10 +190,13 @@ function updateSyncPressure(pressure) {
     grid.replaceChildren();
     (frame?.pressures || []).forEach((value, index) => {
         const cell = document.createElement('div');
-        cell.innerText = `P${String(index + 1).padStart(2, '0')} ${value === null || !Number.isFinite(value) || value === -999999 ? '—' : Number(value).toFixed(3)}`;
+        cell.innerText = `P${String(index + 1).padStart(2, '0')} ${syncPressureValue(value, frame.units_index) === null ? '—' : Number(value).toFixed(3)}`;
         grid.append(cell);
     });
     drawSyncPressure();
+}
+function syncPressureValue(value, unitsIndex) {
+    return !Number.isFinite(value) || (unitsIndex !== 27 && Math.abs(value) === 999999) ? null : value;
 }
 function drawSyncPressure() {
     const canvas = document.getElementById('sync-pressure-chart');
@@ -202,7 +205,7 @@ function drawSyncPressure() {
     const width = canvas.width, height = canvas.height;
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = '#9aaebe'; ctx.font = '16px sans-serif';
-    const points = syncPressureHistory.flatMap(point => channels.map(number => point.values[number - 1])).filter(value => Number.isFinite(value) && value !== -999999);
+    const points = syncPressureHistory.flatMap(point => channels.map(number => point.values[number - 1])).filter(Number.isFinite);
     if (!points.length) { ctx.fillText('等待有效压力数据', 25, 45); return; }
     const low = Math.min(...points), high = Math.max(...points), margin = Math.max((high - low) * .1, .001);
     const minimum = low - margin, maximum = high + margin;
@@ -218,7 +221,7 @@ function drawSyncPressure() {
         ctx.strokeStyle = colors[index]; ctx.beginPath(); let drawing = false;
         syncPressureHistory.forEach(point => {
             const value = point.values[channel - 1];
-            if (!Number.isFinite(value) || value === -999999) { drawing = false; return; }
+            if (!Number.isFinite(value)) { drawing = false; return; }
             const x = 78 + (width - 93) * (point.time - firstTime) / span;
             const y = height - 30 - (height - 65) * (value - minimum) / (maximum - minimum);
             if (drawing) ctx.lineTo(x, y); else ctx.moveTo(x, y);

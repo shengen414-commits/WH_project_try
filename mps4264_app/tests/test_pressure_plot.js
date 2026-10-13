@@ -39,7 +39,7 @@ chart.setData({name:'regression.csv',unit:'Pa',times:[0.0004,0.0008,0.0012],fram
 for(let n=1;n<=64;n++) {
   const keys = Object.keys(channels).slice(0,n);
   assert.doesNotThrow(()=>chart.setChannels(keys), `Selecting ${n} channels failed`);
-  assert.equal(chart.selected.length,n);
+  assert.equal(chart.selected.length,keys.filter(key=>!['P02','P03','P35'].includes(key)).length);
   assert.doesNotThrow(()=>chart.showSample({clientX:500,clientY:100}));
   assert.doesNotThrow(()=>chart.clearHover());
 }
@@ -49,7 +49,7 @@ assert.equal(chart.selected.length,6);
 chart.setChannels([]);
 assert.doesNotThrow(()=>chart.clearHover());
 chart.setChannels(Object.keys(channels));
-assert.equal(chart.selected.length,64);
+assert.equal(chart.selected.length,61);
 const tooltip={hidden:true,style:{},offsetWidth:150,offsetHeight:90};
 const syncCanvas=fakeCanvas();
 const syncChart=new sandbox.window.PressureTimeChart(syncCanvas,{tooltip});
@@ -118,5 +118,36 @@ class FakeElement {
   inputs=get('csv-channels').querySelectorAll('input');
   assert.equal(inputs.at(-1).value,'speed');
   assert.equal(inputs.at(-1).disabled,true);
+  payload={...payload,speed:[0,5],channels:Object.fromEntries(Array.from({length:64},(_,i)=>[`P${String(i+1).padStart(2,'0')}`,[10,20]])),
+    invalid_counts:Object.fromEntries(Array.from({length:64},(_,i)=>[`P${String(i+1).padStart(2,'0')}`,0])),
+    known_invalid_channels:{P02:'已确认损坏',P03:'已确认损坏',P35:'已确认损坏'},
+    channel_groups:{1:['P01','P05','P09','P13','P17','P21','P25','P29','P36','P40','P44','P48','P52','P56','P60','P64'],
+      2:['P02','P06','P10','P14','P18','P22','P26','P30','P35','P39','P43','P47','P51','P55','P59','P63']}};
+  get('load-file').listeners.click();await new Promise(resolve=>setImmediate(resolve));
+  inputs=get('csv-channels').querySelectorAll('input');
+  for(const key of ['P02','P03','P35']){
+    const input=inputs.find(input=>input.value===key);
+    assert.equal(input.disabled,true);assert.equal(input.checked,false);
+  }
+  get('select-none').listeners.click();
+  const speed=inputs.find(input=>input.value==='speed');speed.checked=true;speed.listeners.change();
+  const addGroup=group=>{get('select-group').value=group;get('select-group').listeners.change();};
+  const selected=()=>inputs.filter(input=>input.checked).map(input=>input.value);
+  addGroup('1');
+  assert.equal(selected().length,17);assert.ok(speed.checked);
+  addGroup('2');
+  assert.equal(selected().length,31); // 16 + 14 valid channels + speed, cumulative.
+  assert.ok(selected().includes('P01') && selected().includes('P06'));
+  assert.ok(!selected().some(key=>['P02','P03','P35'].includes(key)));
+  assert.equal(get('select-group').value,'');
+  inputs.find(input=>input.value==='P05').checked=false;
+  addGroup('1');assert.ok(selected().includes('P05'));
+  get('select-all').listeners.click();
+  assert.equal(selected().length,62); // 61 valid pressure channels + speed.
+  assert.ok(!selected().some(key=>['P02','P03','P35'].includes(key)));
+  get('select-none').listeners.click();
+  assert.equal(selected().length,0);
+  addGroup('1');assert.equal(selected().length,16);assert.equal(speed.checked,false);
+  console.log('PASS: bad channels disabled; cumulative scan groups preserve selections and speed; all selects 61 pressure channels');
   console.log('PASS: synchronized speed checkbox last, default checked, select all/none, ordinary CSV reset and invalid speed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

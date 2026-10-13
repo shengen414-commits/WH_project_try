@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>MPS4264 CSV 压力—时间图</title>
   <link rel="stylesheet" href="{{ url_for('pressure_plot.static', filename='pressure_plot.css') }}">
-  <script src="{{ url_for('pressure_plot.static', filename='pressure_plot.js', v='20261013-sync-speed') }}" defer></script>
+  <script src="{{ url_for('pressure_plot.static', filename='pressure_plot.js', v='20261013-add-groups') }}" defer></script>
 </head>
 <body>
 <main id="pressure-plot" data-initial="{{ 'true' if initial_csv else 'false' }}">
@@ -25,8 +25,18 @@
     <button type="button" id="save-image">保存 PNG</button>
   </section>
   <div class="chart-shell"><canvas id="csv-pressure-chart" aria-label="所选通道的压力—时间曲线">浏览器需要支持 Canvas。</canvas><div id="plot-tooltip" hidden></div></div>
-  <p class="note">曲线显示按屏幕分辨率保留极值；指针读数使用原始帧。空值、非有限值和 -999999 不绘制，也不跨越缺帧连线。</p>
-  <div class="channel-actions"><span id="selection-count" aria-live="polite">未加载文件</span><button id="select-all" type="button">全选有效通道</button><button id="select-none" type="button">取消全部</button></div>
+  <p class="note">曲线显示按屏幕分辨率保留极值；指针读数使用原始帧。空值、非有限值和工程单位下的 ±999999 特殊值不绘制，也不跨越缺帧连线。RAW 原始计数保留。</p>
+  <div class="channel-actions">
+    <span id="selection-count" aria-live="polite">未加载文件</span>
+    <button id="select-all" type="button">全选有效通道</button>
+    <button id="select-none" type="button">取消全部</button>
+    <select id="select-group" aria-label="选择组，追加勾选该组有效通道" disabled>
+      <option value="">选择组（追加勾选）</option>
+      <option value="1">组 1</option><option value="2">组 2</option>
+      <option value="3">组 3</option><option value="4">组 4</option>
+    </select>
+  </div>
+  <p class="note">P02、P03、P35 已确认损坏，标记无效且不可勾选。选组按扫描阀的四组通道映射追加，保留已有选择及速度选项；原始 CSV 数值保留。</p>
   <div id="csv-channels" class="channels" aria-label="选择压力通道"></div>
   <p id="plot-time-note" class="note">横轴使用 CSV 中的设备帧时间，不等同于主机 UTC；压力数值已是对应单位，不再乘转换系数。</p>
 </main>
