@@ -1,5 +1,4 @@
-"""sudo ip addr add 191.30.90.82/16 dev eth0
-python3 -m mps4264_app.main"""
+"""Standalone scanner entry point; initializes its Ethernet address by default."""
 
 from __future__ import annotations
 

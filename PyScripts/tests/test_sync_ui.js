@@ -8,6 +8,9 @@ const element = id => {
 };
 const configButtons = [{}, {}];
 const context = vm.createContext({
+    URL,
+    location: { href: 'http://localhost/' },
+    performance: { getEntriesByName: () => [{ requestStart: 2000, fetchStart: 0 }] },
     document: { getElementById: element, querySelectorAll: selector => selector === '[data-sync-config]' ? configButtons : [] },
     setInterval: () => {},
     setTimeout: () => {},
@@ -39,4 +42,6 @@ assert.strictEqual(element('sync-pressure-stop').disabled, false);
 render({ phase: 'error', active: false });
 assert.strictEqual(element('sync-start').disabled, false);
 assert.strictEqual(element('sync-stop').disabled, true);
+context.appendSyncTiming('/sync_record/device/command', 10, { server_ms: 1, commands: [] }, 'test');
+assert.ok(!element('sync-terminal-output').innerText.includes('2000.0 ms'));
 console.log('Sync UI state checks passed');

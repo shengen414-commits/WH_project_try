@@ -56,6 +56,16 @@ class TimedRLock:
         self.release()
 
 
+class TimedLock(TimedRLock):
+    """Instrument a plain mutex while preserving cross-thread release support."""
+    def __init__(self, name: str):
+        self.name = name
+        self._lock = threading.Lock()
+
+    def locked(self):
+        return self._lock.locked()
+
+
 @contextmanager
 def command_timing(command: str, timeout: float | None, *, waits_for_prompt=True):
     start = time.perf_counter()

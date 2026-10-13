@@ -89,6 +89,12 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(status.status_code, 200)
         self.assertFalse(status.get_json()['pressure']['connected'])
 
+    def test_combined_status_contains_all_ui_data(self):
+        response = self.client.get('/dashboard/status')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.get_json()), {'sensor', 'fps', 'record', 'speed_record', 'sync', 'conversion'})
+        self.assertEqual(response.get_json()['sensor']['throttle'], 1500)
+
     def test_multi_source_and_speed_record_simultaneously_without_sd_commands(self):
         camera = Mock(is_active=True, available=True, record_error=None)
         camera.record_done = threading.Event()

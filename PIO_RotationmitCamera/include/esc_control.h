@@ -15,4 +15,6 @@ void startESCBoost(int pwmValue);
 void handleESCCommand(char incomingChar, int throttleValue);
 // 🚀 新增：放在 loop 中持续执行，负责监控遥控器信号并处理控制权抢占
 void updateESC();
+// Filter routine logs in module debug; steering tests additionally hold neutral.
+void setESCDebugState(bool muteDiagnostics, bool holdNeutral);
 #endif

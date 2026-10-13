@@ -1,4 +1,4 @@
-"""Idempotent, narrowly scoped Ethernet address setup for the standalone app."""
+"""Idempotent Ethernet address setup shared by dashboard and standalone app."""
 
 from __future__ import annotations
 
@@ -42,8 +42,9 @@ def _run_privileged(arguments: list[str]) -> None:
 def ensure_ipv4_alias(interface: str = "eth0", cidr: str = "191.30.90.82/16") -> dict:
     """Add one address only when absent; preserve all other interface addresses.
 
-    Called only by the executable entry point. Importing the package never
-    changes host networking. Non-Linux machines skip this Linux-only setup.
+    Called by executable entry points or an explicit dashboard connection.
+    Importing the package never changes host networking. Non-Linux machines
+    skip this Linux-only setup.
     """
     if platform.system() != "Linux":
         return {"skipped": True, "reason": "仅 Ubuntu/Linux 执行网口初始化"}

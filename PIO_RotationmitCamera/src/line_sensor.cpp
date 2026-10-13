@@ -1,4 +1,5 @@
 #include "line_sensor.h"
+#include "steering_control.h"
 #include <driver/gpio.h>
 
 namespace {
@@ -18,9 +19,10 @@ bool pinsValid() {
     for (uint8_t i = 0; i < 4; ++i) {
         if (!GPIO_IS_VALID_GPIO(pins[i])) return false;
         if (i < 3 && !GPIO_IS_VALID_OUTPUT_GPIO(pins[i])) return false;
-        // Current project: UART0, encoder, ESC and RC input are reserved.
+        // Current project: UART0, encoder, steering, ESC and RC input are reserved.
         if (pins[i] == 1 || pins[i] == 3 || pins[i] == 25 || pins[i] == 26 ||
-            pins[i] == 14 || pins[i] == 27 || (pins[i] >= 6 && pins[i] <= 11))
+            pins[i] == SteeringConfig::PIN || pins[i] == 14 || pins[i] == 27 ||
+            (pins[i] >= 6 && pins[i] <= 11))
             return false;
         for (uint8_t j = 0; j < i; ++j)
             if (pins[i] == pins[j]) return false;

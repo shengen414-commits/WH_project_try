@@ -208,6 +208,21 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.browser.post('/sync_record/convert', json={'filename': '../private.dat'}).status_code, 400)
         self.assertEqual(self.browser.get('/plot/api/data?filename=../../private.csv').status_code, 400)
 
+    def test_integrated_command_includes_real_tcp_timing_and_disk_log(self):
+        response = self.browser.post('/sync_record/device/command', json={'command': 'VER'}, headers={'X-MPS-Trace-ID': 'integrated-ver'})
+        self.assertEqual(response.status_code, 200)
+        timing = response.get_json()['_timing']
+        self.assertEqual(timing['trace_id'], 'integrated-ver')
+        self.assertEqual(timing['commands'][0]['command'], 'VER')
+        self.assertTrue(timing['commands'][0]['prompt_received'])
+        self.assertIsNotNone(timing['commands'][0]['first_tcp_byte_ms'])
+        self.assertGreaterEqual(timing['server_ms'], timing['commands'][0]['response_ms'])
+        self.assertIn('coordinator_lock_wait_ms', timing)
+        self.assertEqual(response.headers['X-MPS-Trace-ID'], 'integrated-ver')
+        path = Path(self.directory.name) / 'Sync_Records/diagnostics/command_timing.jsonl'
+        record = json.loads(path.read_text(encoding='utf-8').splitlines()[-1])
+        self.assertEqual(record['trace_id'], 'integrated-ver')
+
 
 class AlignmentTests(unittest.TestCase):
     def build(self, folder, epochs=(0, 0, 0)):

@@ -4,6 +4,8 @@
 // --- 模块私有变量 ---
 const int escPin = 14; // 设定电调连接的 GPIO 引脚
 const int rcPin = 27;  // 🚀 新增：遥控器接收机信号线接入 D27
+bool diagnosticsMuted = false;
+bool debugHoldNeutral = false;
 Servo myESC;           // 实例化 Servo 对象
 
 // --- 遥控器信号读取专用变量 (必须加 volatile 防止被编译器优化) ---
@@ -77,6 +79,7 @@ void cancelESCBoost()
 
 void requestEscOutput(int pwmValue)
 {
+    if (debugHoldNeutral) { forceEscNeutralOutput(); return; }
     int targetPwm = constrain(pwmValue, 1000, 2000);
     int targetDirection = getEscDirection(targetPwm);
     unsigned long now = millis();
@@ -156,7 +159,7 @@ void handleESCCommand(char cmd, int throttleValue)
     {
         if (millis() < estopLatchedUntil)
         {
-            Serial.println("[E-STOP] 忽略急停保护窗口内的普通油门指令");
+            if (!diagnosticsMuted) Serial.println("[E-STOP] 忽略急停保护窗口内的普通油门指令");
             return;
         }
         setESCThrottle(throttleValue);
@@ -165,11 +168,27 @@ void handleESCCommand(char cmd, int throttleValue)
     {
         if (millis() < estopLatchedUntil)
         {
-            Serial.println("[E-STOP] Ignored boost command during protection window");
+            if (!diagnosticsMuted) Serial.println("[E-STOP] Ignored boost command during protection window");
             return;
         }
         startESCBoost(throttleValue);
     }
+}
+
+void setESCDebugState(bool muteDiagnostics, bool holdNeutral)
+{
+    diagnosticsMuted = muteDiagnostics;
+    if (debugHoldNeutral != holdNeutral)
+    {
+        webThrottle = ESC_NEUTRAL_PWM;
+        currentMode = WEB_MODE;
+        lastWebCommandTime = 0;
+        rcActiveCount = 0;
+        newRcData = false;
+        cancelESCBoost();
+        forceEscNeutralOutput();
+    }
+    debugHoldNeutral = holdNeutral;
 }
 
 // --- 初始化函数 ---
@@ -198,6 +217,7 @@ void initESC()
 // --- 控制函数 ---
 void setESCThrottle(int pwmValue)
 {
+    if (debugHoldNeutral) { forceEscNeutralOutput(); return; }
     int requestedPwm = constrain(pwmValue, 1000, 2000);
     bool keepCurrentBoost = escBoostActive && requestedPwm == escBoostBasePwm;
     webThrottle = requestedPwm;
@@ -210,12 +230,15 @@ void setESCThrottle(int pwmValue)
     cancelESCBoost();
     requestEscOutput(webThrottle);
 
-    Serial.print(">>> [网页接管] 油门: ");
-    Serial.println(webThrottle);
+    if (!diagnosticsMuted) {
+        Serial.print(">>> [网页接管] 油门: ");
+        Serial.println(webThrottle);
+    }
 }
 
 void startESCBoost(int pwmValue)
 {
+    if (debugHoldNeutral) { forceEscNeutralOutput(); return; }
     webThrottle = constrain(pwmValue, 1000, 2000);
     lastWebCommandTime = millis();
     currentMode = WEB_MODE;
@@ -243,10 +266,12 @@ void startESCBoost(int pwmValue)
     escBoostActive = escBoostPeakPwm != escBoostBasePwm;
     requestEscOutput(escBoostBasePwm);
 
-    Serial.print(">>> [NUMERIC BOOST] base: ");
-    Serial.print(escBoostBasePwm);
-    Serial.print(" | peak: ");
-    Serial.println(escBoostPeakPwm);
+    if (!diagnosticsMuted) {
+        Serial.print(">>> [NUMERIC BOOST] base: ");
+        Serial.print(escBoostBasePwm);
+        Serial.print(" | peak: ");
+        Serial.println(escBoostPeakPwm);
+    }
 }
 
 void updateESCBoost()
@@ -273,12 +298,19 @@ void updateESCBoost()
 
     escBoostActive = false;
     requestEscOutput(escBoostBasePwm);
-    Serial.println(">>> [NUMERIC BOOST] complete, restored base PWM");
+    if (!diagnosticsMuted) Serial.println(">>> [NUMERIC BOOST] complete, restored base PWM");
 }
 
 // 🚀 新增：持续监控与接管逻辑
 void updateESC()
 {
+    if (debugHoldNeutral)
+    {
+        forceEscNeutralOutput();
+        rcActiveCount = 0;
+        newRcData = false;
+        return;
+    }
     // 1. 判断接收机是否存活 (如果超过 500ms 没收到脉冲，说明遥控器关机或信号丢失)
     bool isRcActive = (millis() - lastRcValidTime) < 500;
 
@@ -289,7 +321,7 @@ void updateESC()
 
         if (millis() - lastDriveStatusTime > 100)
         {
-            Serial.println("[DRIVE] 模式: WEB | 油门: 1500");
+            if (!diagnosticsMuted) Serial.println("[DRIVE] 模式: WEB | 油门: 1500");
             lastDriveStatusTime = millis();
         }
         return;
@@ -311,7 +343,7 @@ void updateESC()
                 {
                     if (currentMode != RC_MODE)
                     {
-                        Serial.println("⚠️ [警告] 检测到持续物理遥控动作，已强制切为【遥控模式】！");
+                        if (!diagnosticsMuted) Serial.println("⚠️ [警告] 检测到持续物理遥控动作，已强制切为【遥控模式】！");
                         currentMode = RC_MODE;
                         cancelESCBoost();
                     }
@@ -337,7 +369,7 @@ void updateESC()
         // 失控保护 (Failsafe)：如果遥控器突然关机
         if (currentMode == RC_MODE)
         {
-            Serial.println("🚨 [失控保护] 遥控器信号丢失！自动切回【网页模式】并刹车！");
+            if (!diagnosticsMuted) Serial.println("🚨 [失控保护] 遥控器信号丢失！自动切回【网页模式】并刹车！");
             currentMode = WEB_MODE;
             webThrottle = 1500;
             forceEscNeutralOutput(); // 强制归中刹车
@@ -357,7 +389,7 @@ void updateESC()
     if (currentMode == WEB_MODE && webThrottle != 1500 && lastWebCommandTime > 0 &&
         millis() - lastWebCommandTime > WEB_COMMAND_TIMEOUT_MS)
     {
-        Serial.println("🚨 [网页失联保护] 超过 2500ms 未收到网页油门心跳，自动归中！");
+        if (!diagnosticsMuted) Serial.println("🚨 [网页失联保护] 超过 2500ms 未收到网页油门心跳，自动归中！");
         webThrottle = 1500;
         forceEscNeutralOutput();
         lastWebCommandTime = 0;
@@ -366,10 +398,12 @@ void updateESC()
     // 🚀 新增：向 Python 汇报底层状态 (每 100ms 播报一次)
     if (millis() - lastDriveStatusTime > 100)
     {
-        Serial.print("[DRIVE] 模式: ");
-        Serial.print(currentMode == RC_MODE ? "RC" : "WEB");
-        Serial.print(" | 油门: ");
-        Serial.println(currentMode == RC_MODE ? rcPulseWidth : webThrottle);
+        if (!diagnosticsMuted) {
+            Serial.print("[DRIVE] 模式: ");
+            Serial.print(currentMode == RC_MODE ? "RC" : "WEB");
+            Serial.print(" | 油门: ");
+            Serial.println(currentMode == RC_MODE ? rcPulseWidth : webThrottle);
+        }
         lastDriveStatusTime = millis();
     }
 }

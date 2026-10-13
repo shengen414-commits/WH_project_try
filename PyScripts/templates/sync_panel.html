@@ -41,11 +41,12 @@
         <h3>连接与 UDP 配置</h3>
         <div class="sync-fields">
             <label>TCP 端口<input id="sync-control-port" type="number" min="1" max="65535" value="23"></label>
-            <label>Orange Pi 网口 IP / 掩码<input id="sync-local-cidr" value="191.30.90.82/16"></label>
-            <label>网口<input id="sync-interface" value="eth0"></label>
+            <label>Orange Pi 网口 IP / 掩码<input id="sync-local-cidr" value="{{ config.get('MPS_LOCAL_CIDR', '191.30.90.82/16') }}"></label>
+            <label>网口<input id="sync-interface" value="{{ config.get('MPS_INTERFACE', 'eth0') }}"></label>
             <label>UDP 端口<input id="sync-udp-port" type="number" min="1024" max="65535" value="50023"></label>
         </div>
-        <label><input id="sync-init-network" type="checkbox" checked>连接时检查并添加本机网口地址（已配置可取消）</label>
+        <div id="sync-network-status" role="status">网口状态等待刷新</div>
+        <label><input id="sync-init-network" type="checkbox" checked>连接时再次检查本机网口地址（已配置可取消）</label>
         <div class="sync-buttons">
             <button data-sync-config onclick="syncDevice('udp')">设置 UDP 并保存</button>
             <button data-sync-config onclick="syncDevice('reconnect')">已重启，重新连接</button>

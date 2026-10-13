@@ -10,7 +10,8 @@
 python3 PyScripts/Camera_mit_Rotation_dashboard.py
 ```
 
-启动本身不会连接扫描阀或修改网口。小车页面新增“车速＋扫描阀同步记录”区，
+主程序启动时默认检查 `eth0` 的 `191.30.90.82/16` 地址，缺少时添加，已有时跳过。
+启动不会自动连接扫描阀。小车页面的“车速＋扫描阀同步记录”区，
 通过后台的 `SyncRecorder` 使用同一个 `MPS4264Controller`。
 不要同时运行 `python3 -m mps4264_app.main` 控制同一设备或占用同一个 UDP 端口。
 
@@ -22,11 +23,24 @@ python3 PyScripts/Camera_mit_Rotation_dashboard.py
 没有单独压力文件时，命令行 SCAN 启动同步记录；新建了压力文件时，SCAN/STOP 仅管理压力采集。
 压力单独采集保存在 `Car_Records/Sync_Records/Pressure_Only/`，历史图支持浏览同步批次的压力 CSV。
 
+页面状态通过 `/dashboard/status` 合并刷新，每次回复处理完才安排下一次查询，
+最多保留一条状态请求；超时会取消，避免车速、帧率、记录状态等请求积压而拖慢设备命令。
+发送扫描阀命令时取消当前状态查询，车速原始采集和压力 UDP 保存仍在后台独立运行。
+曲线显示约每 200 ms 更新，原始车速上报频率仍约 100 Hz。
+命令窗口显示网页总耗时、后台耗时、浏览器发出前的时间、协调/设备/TCP 锁等待、
+设备首字节和完整回复耗时。日志保存到
+`Car_Records/Sync_Records/diagnostics/command_timing.jsonl`。
+网页总耗时显著高于后台时应检查网页请求排队、网络和前端负载；
+后台耗时集中在首字节等待则应检查设备/TCP 路径，不能把网页总耗时直接当作设备回复时间。
+若设备 `LIST UDP` 将 50023 回显为 `-15513`，程序会按 16 位端口值还原为 50023，
+保留原始回显，不因此重新配置设备。
+
 操作顺序：
 
-1. ESP32 使用正常 `esp32dev` 固件，保持串口正常模式（`R`）；舵机 demo 或暂停编码器的巡线调试模式不能用于车速同步。
+1. ESP32 使用正常 `esp32dev` 固件，保持串口正常模式（`R`）；独立舵机 demo 和 `L/G/V` 模块调试模式暂停编码器上报，不能用于车速同步。正常固件已支持 `V` 进入 D12 舵机调试，操作见 [舵机调试说明](PIO_RotationmitCamera/SERVO_DEMO.md)。
 2. 在同步区域核对扫描阀 IP、Orange Pi 网口 CIDR（默认 `191.30.90.82/16`）和网口名（默认 `eth0`），点击连接。
-   默认连接时检查并添加网口地址；普通用户需要先执行 `sudo -v`。已配置网络可取消该复选框。
+   启动时已检查默认网口；连接时会按页面参数再次检查。普通用户可先执行 `sudo -v` 再启动。
+   网口已配置时可取消连接检查；启动检查可用 `--skip-network-init` 跳过。
    无权限或网络初始化失败会明确返回错误，其他小车功能仍可用。
 3. 点击“读取设备信息”，核对设备版本、参数和 UDP 目标。
    若设备尚未配置为当前 Orange Pi 的 UDP 二进制输出，点击“设置 UDP 并保存”，
@@ -59,18 +73,42 @@ python3 PyScripts/Camera_mit_Rotation_dashboard.py
 USB、UDP、批量数据和线程调度延迟仍存在，本版不能证明采样时刻精确同步。
 时间戳中的 ns 是存储单位，不代表纳秒级测量精度。
 
-Linux/Orange Pi 的 Docker 部署使用单独的 host 网络配置，避免原 bridge 配置收不到扫描阀 UDP：
+### Orange Pi 本机安装与启动
+
+在项目根目录创建/使用虚拟环境：
 
 ```bash
-# 如果原 Compose 容器正在运行，先停掉它，避免同时占用相机/串口。
-docker compose down
-docker compose -f docker-compose.sync.yml up -d --build
-docker compose -f docker-compose.sync.yml logs -f wh-dashboard
+sudo apt install -y python3-venv python3-pip iproute2
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+sudo -v
+python3 PyScripts/Camera_mit_Rotation_dashboard.py
 ```
 
-该配置给容器 NET_ADMIN 用于添加主机网口地址，镜像已加入 iproute2。
-设备路径和网口名须按实际 Orange Pi 核对。Windows Docker Desktop 不适用本机硬件/host 网口部署步骤。
-其他部署方式如已在主机配置网络，可以自行去掉 NET_ADMIN 并取消网页的网口初始化复选框。
+网页端口默认 5000。在同一局域网打开 `http://OrangePi实际地址:5000`。
+默认启动检查等价于缺少地址时执行 `sudo ip addr add 191.30.90.82/16 dev eth0`，
+地址已有就不重复添加，不删除其他已有地址；必要时还会启用该网口。
+权限不足、网口名不正确等情况会写入启动日志和网页“更多扫描阀功能”的网口状态，
+小车网页仍启动，扫描阀连接前需要修复网络。
+可以手动配置后跳过程序启动检查：
+
+```bash
+sudo ip addr add 191.30.90.82/16 dev eth0
+python3 PyScripts/Camera_mit_Rotation_dashboard.py --skip-network-init
+```
+
+手动添加只在地址缺少时执行；该地址是临时配置，重启后由程序重新检查。
+查看当前地址用 `ip -br addr show eth0`。
+若接口或本机地址不同，使用：
+
+```bash
+python3 PyScripts/Camera_mit_Rotation_dashboard.py --interface 实际网口名 --local-cidr 实际地址/掩码
+```
+
+启动参数会同步到网页的网口设置。网页的“连接时再次检查”开关独立于启动检查。
+可用 `--host` / `--port` 改监听地址和端口。
+仅单独使用扫描阀时，原来的 `python3 -m mps4264_app.main` 入口仍保留，同样默认初始化网口。
 本功能仍用于现有的 MPS4264 Gen1 协议；新型号需要先确认协议。
 
 ## 无 ESP32 SD 卡版本
@@ -104,15 +142,7 @@ SD 模块的 CS=5、SCK=18、MISO=19、MOSI=23 接线不再使用；断电后可
 python3 PyScripts/Camera_mit_Rotation_dashboard.py
 ```
 
-已使用 Docker Compose 的环境可执行：
-
-```bash
-docker compose up -d --build wh-dashboard
-docker compose logs -f wh-dashboard
-```
-
-默认连接 `/dev/ttyUSB0`。直接运行时可用环境变量 `ESP32_SERIAL_PORT` 改串口；
-Docker 运行时须同时修改设备映射和容器环境变量。
+默认连接 `/dev/ttyUSB0`，可用环境变量 `ESP32_SERIAL_PORT` 改串口。
 网页端口仍为 5000。若未收到最近 1 秒内的有效新协议数据，开始记录会明确失败，
 页面速度显示 `--`，避免将旧状态误当作实时速度。
 
@@ -123,8 +153,8 @@ Docker 运行时须同时修改设备映射和容器环境变量。
   `sensor_data_enhanced.csv`、`sync_meta.json`、`record_stats.json`。
 - 每个原始 CSV 都有 `.csv.meta.json`，保存最终行数、串口缺样数、队列丢样数和停止原因。
 
-保存路径相对于进程的工作目录；使用当前 Compose 挂载时，文件位于宿主机项目的
-`Car_Records` 目录。每条有效编码器数据只提交一次；独立速度记录和多源记录可同时进行。
+主程序默认固定保存到项目根目录的 `Car_Records`，不随启动时的工作目录改变。
+可用环境变量 `CAR_RECORDS_DIR` 指定其他记录根目录。每条有效编码器数据只提交一次；独立速度记录和多源记录可同时进行。
 ESP32 每约 10 ms 上报一次，而不是把 Python 的定时读取次数当成采样数。
 原始文件保留 `Time_ms`/`Position` 列，并新增 `sequence`、`device_epoch`、主机时间戳、
 滤波速度、油门状态和控制模式，同时保留原速度文件的 `position` 列。

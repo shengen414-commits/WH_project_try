@@ -1,60 +1,82 @@
-# D12 转向舵机独立测试
+# D12 舵机调试
 
-源码为 `src/servo_demo.cpp`，PlatformIO 环境名为 `servo_demo`。
-正常小车环境仍为 `esp32dev`，默认构建正常小车固件。
-测试固件只编译 demo，不运行编码器、巡线或遥控接管功能。
-烧录 demo 会替换 ESP32 当前固件，测试后需要重新烧录 `esp32dev` 恢复小车功能。
+正常 `esp32dev` 固件已集成舵机调试。模块源码为 `src/steering_control.cpp`，
+参数在 `include/steering_control.h`。只测试舵机时仍可选择独立 `servo_demo` 环境，
+两种固件共用同一组舵机命令。旧版正常固件没有接入 demo，因此 C/L/R/A 不会控制舵机。
 
-## 接线
+## 接线和供电
 
-- 舵机信号线：D12 / GPIO12，不能同时连接接收机 S 输出。
-- 舵机正负极：保持原接收机/BEC 供电，ESP32 与接收机、电调、舵机共地。
-- 电调信号线：保持当前 GPIO14；demo 持续输出 1500 us 中位，遥控器油门不会接管。
-- ESP32 自身继续使用现有电源；舵机不能从 GPIO 或 ESP32 3.3V 引脚取电。
+- 舵机信号线接 D12 / GPIO12；该线不能同时连接接收机的信号输出。
+- 舵机正负极保持接收机 CH 的 `+` / `-`，按壳体符号确认，不按照片左右猜。
+- 电调 BEC 的红线为接收机/舵机供电，黑线连接公共地。ESP32、接收机、电调、舵机共地。
+- 舵机不要接 ESP32 3.3V 或 GPIO 取电。接收机和舵机须分别满足实测 BEC 电压要求。
+- 电调输出信号仍接 D14，接收机油门信号输入仍接 D27。
 
-先把车轮架空。启动会将舵机置于 1500 us；该值是常见中位，仍需确认你的机械连杆没有顶死。
-GPIO12 是经典 ESP32 的启动配置脚：外部电路在复位时拉高它，可能使使用 3.3V Flash 的模块启动失败。
-若烧录/启动异常，先断电并拔掉 D12 信号线，再验证能否启动；必要时把信号改接 GPIO18，
-同时将源码的 `STEERING_PIN` 改为 18，不要改写 eFuse 来绕过问题。
-依据：[Espressif GPIO12 启动配置说明](https://docs.espressif.com/projects/esp-idf/en/release-v5.4/esp32/api-reference/peripherals/sd_pullup_requirements.html)。
+常规接收机 CH 的电源针脚接公共电源，供电不依赖该 CH 是否输出 PWM。
+电调 BEC 为接收机/舵机供电的通用依据：
+[Hobbywing 官方说明](https://www.hobbywing.com/en/uploads/file/20250320/b9addd01e22cb5be3ff28e6f25db2a5f.pdf)。
+该资料不是图片接收机的专用手册；图片不能确认 Light 的电气定义，不把舵机移到 Light 作为排障方法。
+无动作时先量舵机插头的 `+` / `-` 电压（接上舵机后也测），排查插错针和压降。
+有供电不代表有控制信号：舵机要同时具备正常电源、共地和 GPIO12 的 PWM。
 
-## 构建、上传和操作
+GPIO12 是经典 ESP32 的启动配置脚。若连接 D12 后不能启动，断电后拔信号线再验证；
+必要时将信号改接 GPIO18，并修改 `SteeringConfig::PIN` 后重新烧录。
+不要改写 eFuse 绕过启动问题。
+[Espressif GPIO12 说明](https://docs.espressif.com/projects/esp-idf/en/release-v5.4/esp32/api-reference/peripherals/sd_pullup_requirements.html)。
 
-在项目根目录执行（把 COM12 换成实际串口；Linux 下例如 `/dev/ttyUSB0`）：
+## 烧录正常固件
 
-```powershell
-pio run -d PIO_RotationmitCamera -e servo_demo
-pio run -d PIO_RotationmitCamera -e servo_demo -t upload --upload-port COM12
-pio device monitor -p COM12 -b 115200
-```
-
-也可用 PlatformIO 的 `servo_demo` → Build / Upload / Monitor。
-测试前关闭占用该串口的 Orange Pi 网页后台和其他串口监视器。
-发送单个字符即可；带 CR/LF 也支持：
-
-| 指令 | 动作 |
-|---|---|
-| `C` | 中位 1500 us |
-| `L` | 1450 us，小幅向一侧转动 |
-| `R` | 1550 us，小幅向另一侧转动 |
-| `A` | 单次 1450 → 1500 → 1550 → 1500，每步 800 ms |
-| `X` 或 `E` | 取消自动测试并回中位 |
-| `?` | 打印指令说明 |
-
-大小写均可，上电不会自动左右扫描。
-先发送 C，再逐个尝试 L、C、R、C，确认方向和连杆行程后再发送 A。
-L/R 是命令标签，实际左右方向由安装和舵机方向决定。
-串口的 `[SERVO]` 只证明程序输出了指令，不能证明舵机实际转动。
-
-初始范围仅 1450–1550 us，舵机死区较大时可能看不出明显动作。
-若供电正常且没有机械顶死，可逐步把源码的 `LOW_US` / `HIGH_US` 改成 1400 / 1600，
-重新构建上传；不要直接扩到全行程。持续嗡鸣、发热或连杆顶死时停止测试并断电。
-完全不动时检查电源、共地、信号插针和 3.3V 信号兼容性。
-
-测试完成后关闭串口监视器，恢复正常固件：
+在项目根目录执行，把 COM12 换成实际串口，先关闭占用串口的后台和其他串口工具：
 
 ```powershell
 pio run -d PIO_RotationmitCamera -e esp32dev -t upload --upload-port COM12
+pio device monitor -p COM12 -b 115200 --filter send_on_enter
 ```
 
-当前正常小车固件尚未集成转向控制；本 demo 用于先确认舵机硬件能被 D12 控制。
+先把车轮架空。正常固件上电不启用舵机 PWM，首次输入 `V` 才绑定 GPIO12 并输出 1500 us。
+1500 us 是测试中位，仍须确认机械连杆没有顶死。
+
+## 按键
+
+大小写均可，单字符即可，CR/LF 也支持；启用 send_on_enter 时需回车发送。
+
+| 按键 | 功能 |
+|---|---|
+| `V` | 进入舵机专用调试、回中，电调锁定 1500 us |
+| `C` | 舵机回中 1500 us，取消自动摆动 |
+| `J` | 1450 us，小幅向一侧转动 |
+| `K` | 1550 us，小幅向另一侧转动 |
+| `A` | 单次 1450 → 1500 → 1550 → 1500，每步 800 ms |
+| `X` | 取消自动摆动并回中 |
+| `?` | 显示舵机命令帮助 |
+| `R` | 退出调试，舵机回中，正常固件恢复数据上报和油门控制 |
+| `L` / `G` | 正常固件切换为巡线调试 / 巡线原始帧模式，退出舵机测试并回中 |
+| `E` | 保留原急停，舵机模式下同时取消摆动并回中 |
+
+`C/J/K/A/X/?` 只在舵机模式有效，不占用其他模块按键。V 模式中 T/B 油门命令被丢弃，
+电调模块同时禁止 RC 接管和增速；退出时不恢复进入前的旧油门/增速，需新的控制输入。
+`R/L/G` 退出 V 后恢复正常油门控制，持续的遥控器动作也能重新接管。
+调试模式过滤日常日志，但保留 E 急停确认。V 模式每 200 ms 输出：
+
+```text
+[SERVO] GPIO12 target=1450 us PWM=ready sweep=idle
+```
+
+这是软件目标和 PWM 绑定状态，没有机械位置反馈；不能证明舵机实际转动或供电正常。
+V 模式暂停 `[ENC]` 和 `[LINE]` 串口上报，但编码器计数和巡线扫描继续运行。
+L/G 模式也暂停编码器上报并过滤电调日常日志。正式行驶和同步记录前输入 `R`。
+
+建议依次输入 `V`、`C`、`J`、`C`、`K`、`C`，确认后才输入 `A`，最后输入 `R`。
+J/K 实际左右方向由安装决定。初始行程很小，死区大的舵机可能看不出明显动作。
+确认供电、共地、信号和机械行程后，可逐步修改 LOW_US/HIGH_US 为 1400/1600 并重新烧录；
+不要直接扩至全行程。持续嗡鸣、发热或连杆顶死时停止测试并断电。
+
+## 可选独立固件
+
+```powershell
+pio run -d PIO_RotationmitCamera -e servo_demo -t upload --upload-port COM12
+```
+
+该环境上电直接进入舵机调试（回中但不自动摆动），D14 持续输出中位，不运行编码器、巡线和 RC 接管。
+`R` 关闭舵机调试，`V` 重新进入；独立固件不识别 L/G，不恢复行驶功能。
+测试完必须重新烧录 `esp32dev` 才能使用小车网页和速度记录。

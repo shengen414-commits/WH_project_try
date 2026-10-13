@@ -42,6 +42,7 @@ class MPS4264Controller:
         self._device_port = 23
         self._udp_target_ip: str | None = None
         self._udp_port = 50023
+        self._udp_reported_port: int | None = None
         self._listen_port: int | None = None
         self._udp_socket: socket.socket | None = None
         self._capture_thread: threading.Thread | None = None
@@ -134,13 +135,22 @@ class MPS4264Controller:
             match = re.search(r"SET FPS\s+(\d+)", scan_settings)
             if match:
                 self._fps = int(match.group(1))
-            match = re.search(r"SET IPUDP\s+([\d.]+)(?:\s+(\d+))?", results["LIST UDP"])
-            if match:
-                self._udp_target_ip = match.group(1)
-                if match.group(2):
-                    self._udp_port = int(match.group(2))
+            self._apply_udp_info(results["LIST UDP"])
             self._log("已读取设备版本、阀位和参数")
             return results
+
+    def _apply_udp_info(self, response: str) -> None:
+        match = re.search(r"SET IPUDP\s+([\d.]+)(?:\s+(-?\d+))?", response)
+        if not match:
+            return
+        self._udp_target_ip = match.group(1)
+        if match.group(2) is not None:
+            reported = int(match.group(2))
+            port = reported + 65536 if -32768 <= reported < 0 else reported
+            if not 1 <= port <= 65535:
+                raise ValueError(f'设备返回无效 UDP 端口: {reported}')
+            self._udp_reported_port = reported
+            self._udp_port = port
 
     def set_parameters(self, rate: float, fps: int, fast_group: int = 0,
                        read_mode: int = 0, subset_size: int = 16) -> dict:
@@ -187,6 +197,7 @@ class MPS4264Controller:
             responses = {command: client.command(command, 120 if command == "SAVE" else 10)
                          for command in commands}
             self._udp_target_ip, self._udp_port = host_ip, udp_port
+            self._udp_reported_port = udp_port
             self._reboot_required = True
             self._log(f"UDP 目标已保存为 {host_ip}:{udp_port}；须等待保存完成并重启设备")
             return {"responses": responses, "reboot_required": True}
@@ -259,11 +270,7 @@ class MPS4264Controller:
                 if match:
                     self._fast_group = int(match.group(1)) or None
             elif upper == "LIST UDP":
-                match = re.search(r"SET IPUDP\s+([\d.]+)(?:\s+(\d+))?", response)
-                if match:
-                    self._udp_target_ip = match.group(1)
-                    if match.group(2):
-                        self._udp_port = int(match.group(2))
+                self._apply_udp_info(response)
             self._log(f"命令窗口：{line}")
             return {"command": line, "response": response, "status": self.status()}
 
@@ -547,6 +554,7 @@ class MPS4264Controller:
                 "device_port": self._device_port,
                 "udp_target_ip": self._udp_target_ip,
                 "udp_port": self._udp_port,
+                "udp_reported_port": self._udp_reported_port,
                 "listen_port": self._listen_port,
                 "reboot_required": self._reboot_required,
                 "file_open": self._raw_file is not None,

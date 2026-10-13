@@ -20,13 +20,15 @@ try:
     from .telemetry import EncoderStream, CsvRecorder
     from .sync_recording import SyncRecorder
     from .sync_web import register_sync_routes
+    from .dashboard_runtime import run_dashboard
 except ImportError:
     from telemetry import EncoderStream, CsvRecorder
     from sync_recording import SyncRecorder
     from sync_web import register_sync_routes
+    from dashboard_runtime import run_dashboard
 
 # 确保录像保存根目录存在
-SAVE_DIR = "Car_Records"
+SAVE_DIR = str(Path(os.environ.get('CAR_RECORDS_DIR', str(Path(__file__).resolve().parent.parent / 'Car_Records'))).resolve())
 os.makedirs(SAVE_DIR, exist_ok=True)
 SNAPSHOT_DIR = os.path.join(SAVE_DIR, "Snapshots")
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
@@ -688,9 +690,8 @@ def capture_snapshot():
     })
 
 
-@app.route('/sensor_stats')
-def sensor_stats():
-    return jsonify({
+def sensor_public_state():
+    return {
         "position": sensor_state["position"],
         "speed": f"{sensor_state['speed_pps']:.1f}",
         "mode": sensor_state["mode"],         # 🚀 新增
@@ -701,7 +702,12 @@ def sensor_stats():
         "invalid_encoder_lines": sensor_state.get("invalid_encoder_lines", 0),
         "serial_framing_errors": sensor_state.get("serial_framing_errors", 0),
         "serial_error": sensor_state.get("serial_error")
-    })
+    }
+
+
+@app.route('/sensor_stats')
+def sensor_stats():
+    return jsonify(sensor_public_state())
 
 
 @app.route('/speed_record/start', methods=['POST'])
@@ -770,15 +776,28 @@ def finalize_session(recorder, session_id, cameras):
         record_workflow_active.clear()
 
 
-@app.route('/record/status')
-def record_status():
+def record_public_state():
     with speed_record_lock:
         state = dict(session_status)
         if state.get("active") and session_recorder:
             live = session_recorder.status()
             state.update({key: live[key] for key in ("sample_count", "queue_drops", "sequence_gaps", "elapsed_sec")})
             state["status"] = "recording" if live["active"] else "saving"
-    return jsonify(state)
+    return state
+
+
+@app.route('/record/status')
+def record_status():
+    return jsonify(record_public_state())
+
+
+@app.get('/dashboard/status')
+def dashboard_status():
+    """One bounded UI request replaces six independently queued poll streams."""
+    return jsonify(sensor=sensor_public_state(),
+                   fps={'left': f'{cam_left.real_fps:.1f}', 'right': f'{cam_right.real_fps:.1f}'},
+                   record=record_public_state(), speed_record=speed_record_public_state(),
+                   sync=sync_coordinator.status(), conversion=sync_coordinator.conversion_status())
 
 
 @app.route('/start_record')
@@ -918,8 +937,4 @@ def e_stop():
 
 
 if __name__ == '__main__':
-    try:
-        app.run(host='0.0.0.0', port=5000, threaded=True, use_reloader=False)
-    finally:
-        if not sync_coordinator.shutdown():
-            print('同步记录未能完成退出收尾，请检查扫描阀 STOP 状态及保留的原始文件')
+    run_dashboard(app, sync_coordinator)

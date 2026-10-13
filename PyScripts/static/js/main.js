@@ -150,66 +150,62 @@ loadChartVisibility();
 syncChartVisibility();
 
 // --- 后台数据轮询 ---
-setInterval(() => {
-    fetch('/fps_stats').then(r => r.json()).then(data => {
-        if (document.getElementById('cam-toggle-left').checked) {
-            document.getElementById('fps-left').innerText = "实时: " + data.left + " FPS";
+function renderFpsStats(data) {
+    if (document.getElementById('cam-toggle-left').checked) {
+        document.getElementById('fps-left').innerText = "实时: " + data.left + " FPS";
+    }
+    if (document.getElementById('cam-toggle-right').checked) {
+        document.getElementById('fps-right').innerText = "实时: " + data.right + " FPS";
+    }
+}
+
+function renderSensorStats(data) {
+    const revolutions = (parseFloat(data.position) / PPR).toFixed(2);
+    const rpmValue = (parseFloat(data.speed) / PPR) * 60;
+    const rpm = rpmValue.toFixed(1);
+    const kmhValue = Math.abs(rpmValue) * KMH_PER_RPM;
+    const kmh = kmhValue.toFixed(2);
+    maxKmh = Math.max(maxKmh, kmhValue);
+
+    document.getElementById('sensor-pos').innerText = revolutions;
+    document.getElementById('sensor-speed').innerText = data.encoder_fresh ? rpm : '--';
+    document.getElementById('sensor-kmh').innerText = data.encoder_fresh ? kmh : '--';
+    document.getElementById('sensor-max-kmh').innerText = maxKmh.toFixed(2);
+
+    posChart.data.labels.push(timeTicks);
+    posChart.data.datasets[0].data.push(revolutions);
+    speedChart.data.labels.push(timeTicks);
+    speedChart.data.datasets[0].data.push(rpm);
+    kmhChart.data.labels.push(timeTicks);
+    kmhChart.data.datasets[0].data.push(kmh);
+
+    if (posChart.data.labels.length > maxDataPoints) {
+        posChart.data.labels.shift(); posChart.data.datasets[0].data.shift();
+        speedChart.data.labels.shift(); speedChart.data.datasets[0].data.shift();
+        kmhChart.data.labels.shift(); kmhChart.data.datasets[0].data.shift();
+    }
+    posChart.update('none'); speedChart.update('none'); kmhChart.update('none');
+    timeTicks++;
+
+    // 双向同步逻辑
+    const serverMode = data.mode;
+    const serverThrottle = parseInt(data.throttle);
+    const rcWarning = document.getElementById('rc-warning');
+    isRcMode = (serverMode === 'RC');
+
+    if (isRcMode) {
+        // 遥控器夺权了！显示红条警告
+        rcWarning.style.display = 'block';
+
+        // 只要你的手没有正在按着网页摇杆，UI就会像被鬼附身一样跟着遥控器动！
+        if (!isDragging) {
+            syncUIFromRemote(serverThrottle);
         }
-        if (document.getElementById('cam-toggle-right').checked) {
-            document.getElementById('fps-right').innerText = "实时: " + data.right + " FPS";
-        }
-    });
-}, 1000);
-
-setInterval(() => {
-    fetch('/sensor_stats').then(r => r.json()).then(data => {
-        const revolutions = (parseFloat(data.position) / PPR).toFixed(2);
-        const rpmValue = (parseFloat(data.speed) / PPR) * 60;
-        const rpm = rpmValue.toFixed(1);
-        const kmhValue = Math.abs(rpmValue) * KMH_PER_RPM;
-        const kmh = kmhValue.toFixed(2);
-        maxKmh = Math.max(maxKmh, kmhValue);
-
-        document.getElementById('sensor-pos').innerText = revolutions;
-        document.getElementById('sensor-speed').innerText = data.encoder_fresh ? rpm : '--';
-        document.getElementById('sensor-kmh').innerText = data.encoder_fresh ? kmh : '--';
-        document.getElementById('sensor-max-kmh').innerText = maxKmh.toFixed(2);
-
-        posChart.data.labels.push(timeTicks);
-        posChart.data.datasets[0].data.push(revolutions);
-        speedChart.data.labels.push(timeTicks);
-        speedChart.data.datasets[0].data.push(rpm);
-        kmhChart.data.labels.push(timeTicks);
-        kmhChart.data.datasets[0].data.push(kmh);
-
-        if (posChart.data.labels.length > maxDataPoints) {
-            posChart.data.labels.shift(); posChart.data.datasets[0].data.shift();
-            speedChart.data.labels.shift(); speedChart.data.datasets[0].data.shift();
-            kmhChart.data.labels.shift(); kmhChart.data.datasets[0].data.shift();
-        }
-        posChart.update(); speedChart.update(); kmhChart.update();
-        timeTicks++;
-
-        // 双向同步逻辑
-        const serverMode = data.mode;
-        const serverThrottle = parseInt(data.throttle);
-        const rcWarning = document.getElementById('rc-warning');
-        isRcMode = (serverMode === 'RC');
-
-        if (isRcMode) {
-            // 遥控器夺权了！显示红条警告
-            rcWarning.style.display = 'block';
-            
-            // 只要你的手没有正在按着网页摇杆，UI就会像被鬼附身一样跟着遥控器动！
-            if (!isDragging) {
-                syncUIFromRemote(serverThrottle);
-            }
-        } else {
-            // 网页控制中，隐藏红条
-            rcWarning.style.display = 'none';
-        }
-    });
-}, 100);
+    } else {
+        // 网页控制中，隐藏红条
+        rcWarning.style.display = 'none';
+    }
+}
 
 // --- 录制功能 ---
 function captureSnapshot() {
@@ -240,21 +236,17 @@ function captureSnapshot() {
         });
 }
 
-async function refreshRecordStatus() {
+function renderRecordStatus(data) {
     const btn = document.getElementById('rec-btn');
     const label = document.getElementById('record-status');
-    try {
-        const response = await fetch('/record/status', { cache: 'no-store' });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json();
-        btn.disabled = !!data.active;
-        btn.innerText = data.active ? (data.status === 'recording' ? '⏳ 正在记录多源数据...' : '💾 正在保存图片和匹配数据...') : '🔴 记录多源融合数据 (3秒)';
-        if (data.status === 'error') label.innerText = `多源记录失败: ${data.message}`;
-        else if (data.status === 'saved') label.innerText = `已保存 ${data.sample_count || 0} 条传感器数据 | 缺样 ${data.sequence_gaps || 0} | 写盘丢样 ${data.queue_drops || 0}`;
-        else if (data.active) label.innerText = `多源记录: ${data.status === 'recording' ? '记录中' : '保存中'} | ${data.sample_count || 0} samples`;
-    } catch (error) {
-        label.innerText = `记录状态读取失败: ${error.message}`;
-    }
+    btn.disabled = !!data.active;
+    btn.innerText = data.active ? (data.status === 'recording' ? '⏳ 正在记录多源数据...' : '💾 正在保存图片和匹配数据...') : '🔴 记录多源融合数据 (3秒)';
+    if (data.status === 'error') label.innerText = `多源记录失败: ${data.message}`;
+    else if (data.status === 'saved') label.innerText = `已保存 ${data.sample_count || 0} 条传感器数据 | 缺样 ${data.sequence_gaps || 0} | 写盘丢样 ${data.queue_drops || 0}`;
+    else if (data.active) label.innerText = `多源记录: ${data.status === 'recording' ? '记录中' : '保存中'} | ${data.sample_count || 0} samples`;
+}
+async function refreshRecordStatus() {
+    if (window.dashboardPolling) return window.dashboardPolling.refresh();
 }
 
 async function startRecord() {
@@ -272,8 +264,6 @@ async function startRecord() {
         label.innerText = error.message;
     }
 }
-setInterval(refreshRecordStatus, 1000);
-refreshRecordStatus();
 
 let speedRecordActive = false;
 
@@ -312,10 +302,7 @@ function updateSpeedRecordUI(data) {
 }
 
 function refreshSpeedRecordStatus() {
-    fetch('/speed_record/status', { cache: 'no-store' })
-        .then(r => r.json())
-        .then(updateSpeedRecordUI)
-        .catch(error => console.error("速度记录状态读取失败:", error));
+    if (window.dashboardPolling) return window.dashboardPolling.refresh();
 }
 
 function toggleSpeedRecord() {
@@ -335,8 +322,6 @@ function toggleSpeedRecord() {
         });
 }
 
-setInterval(refreshSpeedRecordStatus, 1000);
-refreshSpeedRecordStatus();
 
 // ==========================================
 // 线控摇杆与定速巡航双模逻辑
@@ -350,9 +335,9 @@ const numericBoostToggle = document.getElementById('numeric-boost-toggle');
 
 let isDragging = false;
 let startY = 0;
-let currentTop = 80; 
-const maxTop = 160;  
-const minTop = 0;    
+let currentTop = 80;
+const maxTop = 160;
+const minTop = 0;
 let lastSendTime = 0;
 const THROTTLE_MIN = 1000;
 const THROTTLE_MAX = 2000;
@@ -421,7 +406,7 @@ function sendThrottleCommand(val, useBoost = false) {
     if (isBrakeSequenceActive()) return;
     pendingThrottle = { value: val, boost: useBoost }; // 永远用最新值覆盖暂存区
     recoverStaleThrottleRequest();
-    
+
     // 如果网络通道是空闲的，立刻开火！如果正在忙，就随它去，暂存区已经更新了
     if (!isSending) {
         flushThrottleQueue();
@@ -432,15 +417,15 @@ function flushThrottleQueue() {
     recoverStaleThrottleRequest();
     if (isSending) return;
     if (pendingThrottle === null) return;
-    
+
     // 把暂存区的值拿出来准备发送，并清空暂存区
     let commandToSend = pendingThrottle;
-    pendingThrottle = null; 
-    
+    pendingThrottle = null;
+
     isSending = true; // 上锁！
     activeThrottleController = new AbortController();
     throttleRequestStartedAt = Date.now();
-    
+
     // 发起 HTTP 请求
     const boostQuery = commandToSend.boost ? '&boost=1' : '';
     fetchWithTimeout(`/set_throttle?val=${commandToSend.value}${boostQuery}`, {
@@ -449,10 +434,10 @@ function flushThrottleQueue() {
     }, 700)
         .then(response => {
             // 请求完成，解锁！
-            isSending = false; 
+            isSending = false;
             activeThrottleController = null;
             throttleRequestStartedAt = 0;
-            
+
             // 🚀 核心：如果在我们发送的这零点几秒内，用户又拖了滑块（暂存区不为空）
             // 那就休息 100 毫秒后，再发一次最新的！
             if (pendingThrottle !== null) {
@@ -478,7 +463,7 @@ function triggerEStop() {
     const brakePwm = calculateReverseBrakePwm(sourcePwm);
 
     // 1. 强行清空节流阀的暂存区，掐断还没发出的网络请求
-    pendingThrottle = null; 
+    pendingThrottle = null;
     if (activeThrottleController) {
         activeThrottleController.abort();
         activeThrottleController = null;
@@ -490,7 +475,7 @@ function triggerEStop() {
     if (brakeNeutralTimer) {
         clearTimeout(brakeNeutralTimer);
     }
-    
+
     // 2. 将网页 UI 瞬间打到反向制动 PWM，2 秒后归中
     updateDriveState(brakePwm, 'system', false);
     brakeNeutralTimer = setTimeout(() => {
@@ -499,7 +484,7 @@ function triggerEStop() {
             brakeNeutralTimer = null;
         }
     }, BRAKE_REVERSE_DURATION_MS);
-    
+
     // 3. 呼叫后端的专属急停接口
     fetchWithTimeout('/e_stop', {
         method: 'POST',
@@ -621,7 +606,7 @@ function onDrag(clientY) {
     y = Math.max(minTop, Math.min(y, maxTop));
     currentTop = y;
     knob.style.top = y + 'px'; // 实时改变物理位置
-    
+
     let pwm = Math.round(THROTTLE_MAX - (y / maxTop) * (THROTTLE_MAX - THROTTLE_MIN));
     updateDriveState(pwm, 'joystick');
 }
@@ -630,7 +615,7 @@ function stopDrag() {
     if (isDragging) {
         isDragging = false;
         // 松开摇杆：解除一切巡航，瞬间归中！
-        updateDriveState(THROTTLE_NEUTRAL, 'system'); 
+        updateDriveState(THROTTLE_NEUTRAL, 'system');
     }
 }
 

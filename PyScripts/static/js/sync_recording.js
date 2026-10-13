@@ -37,15 +37,19 @@ function renderSyncState(data) {
     let text = `${phaseLabel} | 扫描阀：${device} | 编码器：${data.encoder_fresh ? '就绪' : '无新鲜数据'} | 车速 ${speed.sample_count || 0} 条 | 压力 ${pressure.frames_received || 0} 帧`;
     text += ` | 车速缺样 ${speed.sequence_gaps || 0} / 写盘丢样 ${speed.queue_drops || 0} | 压力缺帧 ${pressure.frame_gaps || 0}`;
     if (pressure.reboot_required) text += ' | 请等待保存完成，给扫描阀断电重启后重新连接';
+    if (pressure.udp_reported_port < 0) text += ` | UDP 端口回显 ${pressure.udp_reported_port}，按 16 位还原为 ${pressure.udp_port}`;
     if (data.folder) text += ` | 目录：${data.folder}`;
     if (data.alignment) text += ` | 成功匹配 ${data.alignment.matched_rows} / ${data.alignment.pressure_rows}`;
     if (data.error) text += ` | ${data.error}`;
     if (data.manifest_error) text += ` | 实验信息保存失败：${data.manifest_error}`;
     document.getElementById('sync-status').innerText = text;
+    const network = data.network;
+    document.getElementById('sync-network-status').innerText = network?.error ? `网口配置失败：${network.error}` : network?.skipped ? `网口配置已跳过：${network.reason}` : network ? `网口 ${network.interface} · ${network.cidr} · ${network.added ? '已添加地址' : '地址已存在'}` : '尚未检查网口地址';
     updateSyncPressure(pressure);
 }
 
 async function refreshSyncStatus() {
+    if (window.dashboardPolling) return window.dashboardPolling.refresh();
     if (syncPollPending) return;
     syncPollPending = true;
     try {
@@ -65,18 +69,23 @@ async function refreshSyncStatus() {
 async function syncPost(endpoint, data) {
     if (syncRequestPending) return;
     syncRequestPending = true;
+    if (window.dashboardPolling) window.dashboardPolling.invalidate();
     renderSyncState(syncLastState);
     document.getElementById('sync-message').innerText = '操作进行中，请等待设备返回。';
     const command = data.command;
-    const started = Date.now();
+    const started = performance.now();
+    const traceId = `car-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const url = `${endpoint}?_trace=${traceId}`;
     if (command) appendSyncTerminal(`> ${command}`);
     try {
-        const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+        const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-MPS-Trace-ID': traceId }, body: JSON.stringify(data) });
         const result = await response.json();
+        const totalMs = performance.now() - started;
+        if (command) appendSyncTerminal(result.result?.response || result.error || JSON.stringify(result.result || result));
+        appendSyncTiming(url, totalMs, result._timing, traceId);
         if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
         document.getElementById('sync-message').innerText = '操作完成';
         if (result.result) document.getElementById('sync-device-info').innerText = JSON.stringify(result.result, null, 2);
-        if (command) appendSyncTerminal(`${result.result?.response || JSON.stringify(result.result || result)}\n[${Date.now() - started} ms]`);
         if (result.status) renderSyncState(result.status);
         if (endpoint.endsWith('/close-file')) await refreshSyncFiles();
         return result;
@@ -108,6 +117,21 @@ function appendSyncTerminal(text) {
     const output = document.getElementById('sync-terminal-output');
     output.innerText = `${output.innerText}\n${text}`.slice(-30000);
     output.scrollTop = output.scrollHeight;
+}
+function appendSyncTiming(url, totalMs, timing, traceId) {
+    const ms = value => value === null || value === undefined ? '未取得' : `${Number(value).toFixed(1)} ms`;
+    const entries = performance.getEntriesByName(new URL(url, location.href).href);
+    const entry = entries.at(-1);
+    const rawBeforeSend = entry && entry.requestStart > 0 ? entry.requestStart - entry.fetchStart : null;
+    // Headless virtual time or inconsistent browser clocks can produce an
+    // impossible stage duration. Do not report it as real request queuing.
+    const beforeSend = rawBeforeSend !== null && rawBeforeSend >= 0 && rawBeforeSend <= totalMs + 5 ? rawBeforeSend : null;
+    const outsideServer = timing ? Math.max(0, totalMs - timing.server_ms) : null;
+    let message = `[${timing?.trace_id || traceId}] 总 ${ms(totalMs)} | 后台 ${ms(timing?.server_ms)} | 浏览器发出前 ${ms(beforeSend)} | 网络/排队/前端 ${ms(outsideServer)}`;
+    message += `\n  协调锁 ${ms(timing?.coordinator_lock_wait_ms)} | 设备锁 ${ms(timing?.controller_lock_wait_ms)} | TCP 锁 ${ms(timing?.tcp_lock_wait_ms)}`;
+    for (const item of timing?.commands || []) message += `\n  ${item.command}: 发送 ${ms(item.send_ms)} | 首字节 ${ms(item.first_tcp_byte_ms)} | 完整回复 ${ms(item.response_ms)} | ${item.outcome}`;
+    appendSyncTerminal(message);
+    console.info('MPS command timing', { total_ms: totalMs, before_send_ms: beforeSend, before_send_raw_ms: rawBeforeSend, outside_server_ms: outsideServer, server: timing });
 }
 function sendSyncCommand(command) {
     const line = command || syncValue('sync-terminal-input');
@@ -196,22 +220,21 @@ function downloadSyncFile(csv) {
     window.location.assign(`/sync_record/download?filename=${encodeURIComponent(filename)}`);
 }
 async function refreshSyncConversion() {
+    if (window.dashboardPolling) return window.dashboardPolling.refresh();
     if (!document.getElementById('sync-advanced').open) return;
     try {
         const response = await fetch('/sync_record/convert/status', { cache: 'no-store' });
         const job = await response.json();
         if (!response.ok) throw new Error(job.error);
-        document.getElementById('sync-convert-status').innerText = job.phase === 'running' ? '正在转换…' : job.phase === 'done' ? `已转换 ${job.result.frames} 帧 → ${job.result.csv_file}` : job.phase === 'error' ? `转换失败：${job.error}` : '尚无转换任务';
+        renderSyncConversion(job);
     } catch (error) { document.getElementById('sync-convert-status').innerText = error.message; }
+}
+function renderSyncConversion(job) {
+    document.getElementById('sync-convert-status').innerText = job.phase === 'running' ? '正在转换…' : job.phase === 'done' ? `已转换 ${job.result.frames} 帧 → ${job.result.csv_file}` : job.phase === 'error' ? `转换失败：${job.error}` : '尚无转换任务';
 }
 document.getElementById('sync-advanced').addEventListener('toggle', () => {
     if (document.getElementById('sync-advanced').open) {
         updateSyncPressure(syncLastPressure); refreshSyncFiles(); refreshSyncConversion();
     }
 });
-async function pollSyncStatus() {
-    await refreshSyncStatus();
-    setTimeout(pollSyncStatus, document.getElementById('sync-advanced').open ? 200 : 1000);
-}
-setInterval(refreshSyncConversion, 1000);
-pollSyncStatus();
+// Periodic state/conversion refresh is owned by dashboard_polling.js.

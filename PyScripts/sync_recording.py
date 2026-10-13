@@ -12,6 +12,7 @@ from pathlib import Path
 from mps4264_app.controller import MPS4264Controller
 from mps4264_app.network import ensure_ipv4_alias
 from mps4264_app.protocol import convert_binary_to_csv
+from mps4264_app.diagnostics import TimedLock
 try:
     from .telemetry import CsvRecorder
 except ImportError:
@@ -89,7 +90,7 @@ class SyncRecorder:
         self.encoder_ready = encoder_ready
         self.controller = controller or MPS4264Controller(self.root / 'Sync_Records')
         self.lock = threading.Lock()
-        self.operation_lock = threading.Lock()
+        self.operation_lock = TimedLock('coordinator')
         self.stop_event = threading.Event()
         self.state = {'active': False, 'phase': 'idle', 'events': []}
         self.recorder = None

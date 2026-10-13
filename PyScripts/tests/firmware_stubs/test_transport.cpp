@@ -8,6 +8,14 @@
 FakeSerial Serial;
 unsigned long clockMs = 0;
 std::vector<std::pair<char, int>> commands;
+bool diagnosticsMuted = false;
+bool neutralHeld = false;
+bool steeringDebug = false;
+std::string steeringCommands;
+void setESCDebugState(bool mute, bool neutral) { diagnosticsMuted = mute; neutralHeld = neutral; }
+void beginSteeringDebug() { steeringDebug = true; }
+void endSteeringDebug() { steeringDebug = false; }
+void handleSteeringCommand(char value) { steeringCommands += value; }
 unsigned long millis() { return clockMs; }
 long readEncoderPosition() { return -42; }
 LineSensorFrame sensorFrame = {0, 130, 231, 24};
@@ -55,6 +63,7 @@ int main() {
 
     Serial.output.clear();
     feed("L\n");
+    assert(diagnosticsMuted && !neutralHeld);
     publishEncoder();
     assert(Serial.output.empty());
     publishLineSensor();
@@ -73,6 +82,31 @@ int main() {
     feed("R\n");
     publishEncoder();
     assert(Serial.output == "[ENC],3,140,-42\n");
+
+    Serial.output.clear();
+    feed("v\ncjkaX\nT1900\nB1800\n");
+    assert(diagnosticsMuted && neutralHeld && steeringDebug);
+    const auto commandsBeforeDebug = commands.size();
+    assert(commandsBeforeDebug == 4);  // No throttle/boost reaches ESC in steering mode.
+    assert(steeringCommands == "\ncjkaX\n");
+    clockMs = 150;
+    ++sensorFrame.sequence;
+    publishEncoder();
+    publishLineSensor();
+    assert(Serial.output.empty());
+    feed("E");
+    assert(steeringCommands.back() == 'E' && neutralHeld);
+    feed("l");
+    assert(!steeringDebug && diagnosticsMuted && !neutralHeld);
+    feed("r");
+    assert(!diagnosticsMuted && !neutralHeld);
+    steeringCommands.clear();
+    feed("CJKAX?");
+    assert(steeringCommands.empty());  // Steering actions cannot run outside V mode.
+    feed("T19V\n");
+    assert(steeringDebug && neutralHeld);  // Mode change discards partial throttle.
+    feed("R\nT1600\n");
+    assert(commands.back() == std::make_pair('T', 1600));
 
     Serial.input = std::string(100, '?');
     pollSerialCommands();

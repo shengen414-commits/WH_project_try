@@ -23,7 +23,7 @@ python3 -m mps4264_app.main
 python3 -m mps4264_app.main --host 0.0.0.0 --port 5055
 ```
 
-面板没有账号认证；**不要向公网或不可信网络开放**。`recordings/` 自动创建并被本目录 `.gitignore` 忽略。当前项目的 Docker Compose 未映射 UDP 数据端口，首次联调建议在 Orange Pi 主机上直接运行本模块，不放进原有 `wh-dashboard` 容器。
+面板没有账号认证；**不要向公网或不可信网络开放**。`recordings/` 自动创建并被本目录 `.gitignore` 忽略。本模块在 Orange Pi 主机上直接运行。集成小车页面通过同一控制类管理扫描阀；使用集成页面时不要同时启动本独立采集服务。
 
 设备需要独立电源和网线；若为 CPx 气动阀，测量时还须确认控制气路与 `VALVESTATE=PX`。设备实际地址应以现场连通性和 `LIST IP` 为准。启动时的网口地址是临时地址，重启系统后由程序再次按需添加；它不是永久的 Ubuntu 网络配置。
 
