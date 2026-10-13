@@ -85,9 +85,10 @@ def align_records(folder, origin_ns, max_delta_ms=30):
 
 
 class SyncRecorder:
-    def __init__(self, root, encoder_ready, controller=None, speed_calibration=None):
+    def __init__(self, root, encoder_ready, controller=None, speed_calibration=None, encoder_status=None):
         self.root = Path(root).resolve()
         self.encoder_ready = encoder_ready
+        self.encoder_status = encoder_status
         self.controller = controller or MPS4264Controller(self.root / 'Sync_Records')
         self.lock = threading.Lock()
         self.operation_lock = TimedLock('coordinator')
@@ -116,6 +117,8 @@ class SyncRecorder:
         # TCP commands must never block status polling or car PWM endpoints.
         result['pressure'] = self.controller.try_status()
         result['encoder_fresh'] = self.encoder_ready()
+        if self.encoder_status:
+            result['encoder'] = self.encoder_status()
         result['network'] = self.network
         result['device_busy'] = self.operation_lock.locked()
         return result

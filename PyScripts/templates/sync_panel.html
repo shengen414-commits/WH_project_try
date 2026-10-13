@@ -15,9 +15,11 @@
         <label>速度匹配容差 / ms<input id="sync-delta" type="number" min="1" max="1000" value="30"></label>
     </div>
     <div class="sync-buttons">
-        <button id="sync-start" onclick="startSyncRecording()">开始同步记录</button>
+        <button id="sync-start" onclick="startSyncRecording()" disabled>开始同步记录</button>
         <button id="sync-stop" onclick="stopSyncRecording()" disabled>停止并保存</button>
+        <button id="sync-encoder-normal" onclick="restoreSyncEncoder()" hidden>恢复正常上报（R）</button>
     </div>
+    <div id="sync-readiness" class="sync-hint" role="status" aria-live="polite">正在检查同步记录条件…</div>
     <div id="sync-status" role="status">同步记录：空闲</div>
     <div id="sync-message" role="status"></div>
 

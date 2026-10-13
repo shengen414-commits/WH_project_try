@@ -87,6 +87,10 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(manifest['phase'], 'saved')
         self.assertIn('stop_command_confirmed', [event['event'] for event in manifest['events']])
         self.assertIn('STOP', self.fake.commands)
+        plotted = self.browser.get('/plot/api/data', query_string={'filename': f"{state['session_id']}/synchronized.csv"})
+        self.assertEqual(plotted.status_code, 200, plotted.get_json())
+        self.assertEqual(plotted.get_json()['source_format'], 'Synchronized')
+        self.assertEqual(len(plotted.get_json()['speed']), 3)
 
     def test_stop_failure_keeps_file_open_and_retry_finishes(self):
         self.feed()

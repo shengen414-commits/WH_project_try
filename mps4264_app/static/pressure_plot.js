@@ -8,9 +8,16 @@
   // an undefined dash for P61-P64 aborts drawing before the cache is updated.
   const style = n => ({color: colors[(n-1)%colors.length],
                       dash: lineDashes[Math.floor((n-1)/colors.length)%lineDashes.length]});
-  const number = key => Number(key.slice(1));
+  const SPEED='speed';
+  const number = key => key===SPEED ? Infinity : Number(key.slice(1));
+  const seriesStyle = key => key===SPEED ? {color:'#ffdd57',dash:[]} : style(number(key));
+  const seriesValues = (data,key) => key===SPEED ? data.speed : data.channels[key];
+  const seriesUnit = (data,key) => key===SPEED ? (data.speed_unit || 'km/h') : data.unit;
+  const seriesLabel = key => key===SPEED ? '速度' : key;
+  const seriesKeys = data => [...Object.keys(data.channels), ...(Array.isArray(data.speed)?[SPEED]:[])];
   const label = v => Math.abs(v)>=100000 || (v!==0 && Math.abs(v)<0.001) ? v.toExponential(2) : Number(v.toPrecision(6)).toString();
   const lowerBound = (array,value) => {let lo=0,hi=array.length;while(lo<hi){const m=(lo+hi)>>1;if(array[m]<value)lo=m+1;else hi=m;}return lo;};
+  const upperBound = (array,value) => {let lo=0,hi=array.length;while(lo<hi){const m=(lo+hi)>>1;if(array[m]<=value)lo=m+1;else hi=m;}return lo;};
 
   class PressureTimeChart {
     constructor(canvas, {tooltip=null}={}) {
@@ -27,13 +34,15 @@
     }
     setData(data) {
       if(!data.times?.length || !data.channels || data.frames?.length!==data.times.length)throw new Error('绘图数据不完整');
+      if(data.speed!=null && (!Array.isArray(data.speed) || data.speed.length!==data.times.length))throw new Error('速度数据长度不匹配');
       this.data=data;
       this.selected=Object.keys(data.channels).filter(key=>data.channels[key].some(v=>v!==null)).slice(0,4);
+      if(data.speed?.some(v=>v!==null))this.selected.push(SPEED);
       this.range=[data.times[0],data.times.at(-1)];this.draw();
     }
     setChannels(keys) {
       if(!this.data)return;
-      this.selected=[...new Set(keys)].filter(key=>this.data.channels[key]?.some(v=>v!==null)).sort((a,b)=>number(a)-number(b));this.draw();
+      this.selected=[...new Set(keys)].filter(key=>seriesValues(this.data,key)?.some(v=>v!==null)).sort((a,b)=>number(a)-number(b));this.draw();
     }
     setRange(start,end) {
       if(!this.data)return;
@@ -49,15 +58,22 @@
       if(this.tooltip)this.tooltip.hidden=true;
       if(!this.data){ctx.fillText('请先加载 CSV 文件',30,50);return;}
       const times=this.data.times;
-      const [start,end]=this.range;const first=lowerBound(times,start),last=Math.min(times.length,lowerBound(times,end)+ (times[lowerBound(times,end)]===end?1:0));
+      const [start,end]=this.range;const first=lowerBound(times,start),last=upperBound(times,end);
       let ymin=Infinity,ymax=-Infinity;
-      this.selected.forEach(key=>{const values=this.data.channels[key];for(let i=first;i<last;i++){const v=values[i];if(v!==null){ymin=Math.min(ymin,v);ymax=Math.max(ymax,v);}}});
+      this.selected.filter(key=>key!==SPEED).forEach(key=>{const values=this.data.channels[key];for(let i=first;i<last;i++){const v=values[i];if(v!==null){ymin=Math.min(ymin,v);ymax=Math.max(ymax,v);}}});
       if(!Number.isFinite(ymin)){ymin=0;ymax=1;}
       const pad=(ymax-ymin)*0.06 || Math.max(Math.abs(ymin)*0.01,0.1);ymin-=pad;ymax+=pad;
-      const left=w<450?78:94,right=w-18,top=38,bottom=h-50;
+      const showSpeed=this.selected.includes(SPEED);
+      let speedMin=Infinity,speedMax=-Infinity;
+      if(showSpeed)for(let i=first;i<last;i++){const v=this.data.speed[i];if(v!==null){speedMin=Math.min(speedMin,v);speedMax=Math.max(speedMax,v);}}
+      if(!Number.isFinite(speedMin)){speedMin=0;speedMax=1;}
+      const speedPad=(speedMax-speedMin)*0.06 || Math.max(Math.abs(speedMin)*0.01,0.1);
+      speedMin-=speedPad;speedMax+=speedPad;
+      const left=w<450?78:94,right=w-(showSpeed?(w<450?78:94):18),top=38,bottom=h-50;
       const xend=end>start?end:start+0.002;
       const sx=t=>left+(t-start)/(xend-start)*(right-left),sy=v=>bottom-(v-ymin)/(ymax-ymin)*(bottom-top);
-      this.geometry={left,right,top,bottom,sx,sy,start,end:xend,first,last,w,h};
+      const speedY=v=>bottom-(v-speedMin)/(speedMax-speedMin)*(bottom-top);
+      this.geometry={left,right,top,bottom,sx,sy,speedY,start,end:xend,first,last,w,h};
       ctx.strokeStyle='#29404f';ctx.lineWidth=1;ctx.strokeRect(left,top,right-left,bottom-top);
       const ticks=w<450?3:5;
       for(let i=0;i<=ticks;i++) {
@@ -69,13 +85,15 @@
         const y=bottom-(bottom-top)*i/5,v=ymin+(ymax-ymin)*i/5;
         ctx.strokeStyle='#203442';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();
         ctx.fillStyle='#c5d5de';ctx.textAlign='right';ctx.fillText(label(v),left-9,y+4);
+        if(showSpeed){ctx.fillStyle=seriesStyle(SPEED).color;ctx.textAlign='left';ctx.fillText(label(speedMin+(speedMax-speedMin)*i/5),right+9,y+4);}
       }
-      ctx.textAlign='center';ctx.fillStyle='#e7f2f5';ctx.fillText('设备帧时间（s）',(left+right)/2,h-8);
+      ctx.textAlign='center';ctx.fillStyle='#e7f2f5';ctx.fillText(this.data.time_label || '设备帧时间（s）',(left+right)/2,h-8);
       ctx.save();ctx.translate(16,(top+bottom)/2);ctx.rotate(-Math.PI/2);ctx.fillText(`压力（${this.data.unit}）`,0,0);ctx.restore();
-      ctx.textAlign='left';ctx.fillText(`${this.data.name} · ${this.selected.length} 路`,left,20,right-left);
+      if(showSpeed){ctx.save();ctx.translate(w-14,(top+bottom)/2);ctx.rotate(Math.PI/2);ctx.fillStyle=seriesStyle(SPEED).color;ctx.fillText(`速度（${this.data.speed_unit || 'km/h'}）`,0,0);ctx.restore();}
+      ctx.textAlign='left';ctx.fillStyle='#e7f2f5';ctx.fillText(`${this.data.name} · ${this.selected.filter(key=>key!==SPEED).length} 路${showSpeed?' + 速度':''}`,left,20,right-left);
       ctx.save();ctx.beginPath();ctx.rect(left,top,right-left,bottom-top);ctx.clip();
       this.selected.forEach(key=>{
-        const values=this.data.channels[key],s=style(number(key));ctx.strokeStyle=s.color;ctx.setLineDash(s.dash);ctx.lineWidth=1.2;
+        const values=seriesValues(this.data,key),s=seriesStyle(key),yScale=key===SPEED?speedY:sy;ctx.strokeStyle=s.color;ctx.setLineDash(s.dash);ctx.lineWidth=1.2;
         // Split at invalid readings and actual frame gaps before downsampling.
         let run=[];
         const flush=()=>{
@@ -83,8 +101,8 @@
           const step=Math.max(1,Math.ceil(run.length/Math.max(1,right-left)));
           const points=[];
           for(let k=0;k<run.length;k+=step){const group=run.slice(k,k+step);let min=group[0],max=group[0];group.forEach(i=>{if(values[i]<values[min])min=i;if(values[i]>values[max])max=i;});points.push(...[...new Set([group[0],min,max,group.at(-1)])].sort((a,b)=>a-b));}
-          ctx.beginPath();points.forEach((i,k)=>{if(k===0)ctx.moveTo(sx(times[i]),sy(values[i]));else ctx.lineTo(sx(times[i]),sy(values[i]));});ctx.stroke();
-          if(points.length===1){ctx.fillStyle=s.color;ctx.beginPath();ctx.arc(sx(times[points[0]]),sy(values[points[0]]),2,0,Math.PI*2);ctx.fill();}
+          ctx.beginPath();points.forEach((i,k)=>{if(k===0)ctx.moveTo(sx(times[i]),yScale(values[i]));else ctx.lineTo(sx(times[i]),yScale(values[i]));});ctx.stroke();
+          if(points.length===1){ctx.fillStyle=s.color;ctx.beginPath();ctx.arc(sx(times[points[0]]),yScale(values[points[0]]),2,0,Math.PI*2);ctx.fill();}
           run=[];
         };
         for(let i=first;i<last;i++){if(values[i]===null){flush();continue;}if(run.length && this.data.frames[i]!==this.data.frames[i-1]+1)flush();run.push(i);}flush();
@@ -104,7 +122,7 @@
       let i=lowerBound(times,target);if(i===times.length || (i>0 && Math.abs(times[i-1]-target)<Math.abs(times[i]-target)))i--;
       if(i<g.first||i>=g.last){this.clearHover();return;}
       this.clearHover();const x=g.sx(times[i]);this.ctx.strokeStyle='#a7becb';this.ctx.setLineDash([3,3]);this.ctx.beginPath();this.ctx.moveTo(x,g.top);this.ctx.lineTo(x,g.bottom);this.ctx.stroke();this.ctx.setLineDash([]);
-      if(this.tooltip){const rows=this.selected.slice(0,12).map(key=>`${key}：${this.data.channels[key][i]===null?'无效':label(this.data.channels[key][i])+' '+this.data.unit}`);if(this.selected.length>12)rows.push(`另有 ${this.selected.length-12} 路，减少选择可查看读数`);this.tooltip.textContent=`帧 ${this.data.frames[i]} · ${label(times[i])} s\n${rows.join('\n')}`;this.tooltip.hidden=false;this.tooltip.style.left=Math.max(0,Math.min(px+14,g.w-this.tooltip.offsetWidth-4))+'px';this.tooltip.style.top=Math.max(0,Math.min(py+14,g.h-this.tooltip.offsetHeight))+'px';}
+      if(this.tooltip){const hoverKeys=this.selected.filter(key=>key!==SPEED).slice(0,12);if(this.selected.includes(SPEED))hoverKeys.push(SPEED);const rows=hoverKeys.map(key=>`${seriesLabel(key)}：${seriesValues(this.data,key)[i]===null?'无效':label(seriesValues(this.data,key)[i])+' '+seriesUnit(this.data,key)}`);if(this.selected.length>hoverKeys.length)rows.push(`另有 ${this.selected.length-hoverKeys.length} 路，减少选择可查看读数`);this.tooltip.textContent=`帧 ${this.data.frames[i]} · ${label(times[i])} s\n${rows.join('\n')}`;this.tooltip.hidden=false;this.tooltip.style.left=Math.max(0,Math.min(px+14,g.w-this.tooltip.offsetWidth-4))+'px';this.tooltip.style.top=Math.max(0,Math.min(py+14,g.h-this.tooltip.offsetHeight))+'px';}
     }
     exportPNG() {
       if(!this.data)throw new Error('请先加载 CSV');this.clearHover();
@@ -112,7 +130,7 @@
       const columns=Math.max(1,Math.floor(w/120)),legendHeight=30+Math.ceil(this.selected.length/columns)*26;
       const out=document.createElement('canvas');out.width=this.canvas.width;out.height=Math.round((h+legendHeight)*dpr);
       const ctx=out.getContext('2d');ctx.fillStyle='#08131f';ctx.fillRect(0,0,out.width,out.height);ctx.drawImage(this.base,0,0);ctx.scale(dpr,dpr);ctx.font='13px system-ui';
-      this.selected.forEach((key,i)=>{const x=16+(i%columns)*120,y=h+22+Math.floor(i/columns)*26,s=style(number(key));ctx.strokeStyle=s.color;ctx.setLineDash(s.dash);ctx.beginPath();ctx.moveTo(x,y-4);ctx.lineTo(x+24,y-4);ctx.stroke();ctx.fillStyle='#e7f2f5';ctx.fillText(key,x+30,y);});
+      this.selected.forEach((key,i)=>{const x=16+(i%columns)*120,y=h+22+Math.floor(i/columns)*26,s=seriesStyle(key);ctx.strokeStyle=s.color;ctx.setLineDash(s.dash);ctx.beginPath();ctx.moveTo(x,y-4);ctx.lineTo(x+24,y-4);ctx.stroke();ctx.fillStyle='#e7f2f5';ctx.fillText(key===SPEED?'速度 (km/h)':key,x+30,y);});
       const a=document.createElement('a');a.download=this.data.name.replace(/\.csv$/i,'')+'-pressure.png';a.href=out.toDataURL('image/png');a.click();
     }
     destroy() {this.resizeObserver.disconnect();this.canvas.removeEventListener('pointermove',this.pointerHandler);this.canvas.removeEventListener('pointerleave',this.leaveHandler);this.canvas.removeEventListener('click',this.pointerHandler);}
@@ -124,17 +142,18 @@
   const chart=new PressureTimeChart(el('csv-pressure-chart'),{tooltip:el('plot-tooltip')});
   const inputs=el('csv-channels');let data=null,activeRequest=null;
   const notify=(text,error=false)=>{message.textContent=text;message.classList.toggle('error',error);};
-  function syncSelection(){chart.setChannels([...inputs.querySelectorAll('input:checked')].map(input=>input.value));el('selection-count').textContent=`已选 ${chart.selected.length} / ${Object.keys(data.channels).length} 路`;}
+  function syncSelection(){chart.setChannels([...inputs.querySelectorAll('input:checked')].map(input=>input.value));el('selection-count').textContent=`已选 ${chart.selected.filter(key=>key!==SPEED).length} / ${Object.keys(data.channels).length} 路${Array.isArray(data.speed)?` · 速度${chart.selected.includes(SPEED)?'已选':'未选'}`:''}`;}
   function loadData(value){
     chart.setData(value);data=value;inputs.replaceChildren();
-    Object.keys(data.channels).forEach(key=>{
+    seriesKeys(data).forEach(key=>{
       const labelEl=document.createElement('label'),input=document.createElement('input'),swatch=document.createElement('span'),text=document.createElement('span');
-      input.type='checkbox';input.value=key;input.checked=chart.selected.includes(key);input.disabled=data.invalid_counts[key]===data.frame_count;
-      swatch.className='swatch';swatch.style.background=style(number(key)).color;
-      text.textContent=key+(input.disabled?'（全部无效）':data.invalid_counts[key]?`（无效 ${data.invalid_counts[key]} 帧）`:'');
+      input.type='checkbox';input.value=key;input.checked=chart.selected.includes(key);const invalidCount=key===SPEED?data.speed.filter(v=>v===null).length:data.invalid_counts[key];input.disabled=invalidCount===data.frame_count;
+      swatch.className='swatch';swatch.style.background=seriesStyle(key).color;
+      text.textContent=(key===SPEED?'速度（km/h）':key)+(input.disabled?'（全部无效）':invalidCount?`（无效 ${invalidCount} 帧）`:'');
       if(input.disabled)labelEl.className='channel-invalid';labelEl.append(input,swatch,text);inputs.append(labelEl);input.addEventListener('change',syncSelection);
     });
     el('time-start').value=data.times[0];el('time-end').value=data.times.at(-1);syncSelection();
+    el('plot-time-note').textContent=Array.isArray(data.speed)?'横轴使用同步记录经过时间；左轴为压力，右轴为速度（km/h）。未匹配或无效速度不绘制。':'横轴使用 CSV 中的设备帧时间，不等同于主机 UTC；压力数值已是对应单位，不再乘转换系数。';
     notify(`${data.name} · ${data.source_format} · ${data.frame_count} 帧 · ${data.unit} · ${label(data.times[0])}～${label(data.times.at(-1))} s`);
   }
   async function requestData(url,options={}) {
