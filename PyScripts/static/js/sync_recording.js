@@ -8,6 +8,27 @@ let syncPressureSource = '';
 const syncValue = id => document.getElementById(id).value.trim();
 const syncPhases = { idle: '空闲', starting: '正在启动', waiting_for_data: '等待双方数据', recording: '正在记录', stopping: '正在停止', saving: '正在保存和匹配', saved: '保存完成', error: '记录失败', stop_failed: 'STOP 未确认，请重试停止' };
 
+function syncStartBlockers(data, pressure, busy) {
+    const reasons = [];
+    if (busy) reasons.push('设备操作进行中，请等待完成');
+    if (data.active) reasons.push('已有同步记录正在运行或保存');
+    if (!data.encoder_fresh) {
+        const encoder = data.encoder || {};
+        if (encoder.serial_open === false) reasons.push(`ESP32 串口未连接（${encoder.port || '请检查后台日志'}）`);
+        else if (encoder.error) reasons.push(`ESP32 串口读取失败：${encoder.error}`);
+        else if (encoder.debug_mode === 'servo') reasons.push('ESP32 正在舵机调试，只上报 [SERVO]；请恢复正常上报（R）');
+        else if (encoder.debug_mode === 'line') reasons.push('ESP32 正在巡线调试；请恢复正常上报（R）');
+        else reasons.push('未收到新鲜编码器数据；请确认正常固件、串口连接及 R 模式');
+    }
+    if (!pressure.connected) reasons.push('扫描阀未连接');
+    if (pressure.reboot_required) reasons.push('扫描阀需断电重启后重新连接');
+    if (!data.active && pressure.scanning) reasons.push('压力单独采集中，请先 STOP 并关闭压力文件');
+    else if (!data.active && pressure.file_open) reasons.push('已有压力文件未关闭，请先关闭压力文件');
+    if (pressure.connected && !busy && (pressure.rate_hz == null || pressure.fps == null || !pressure.udp_target_ip))
+        reasons.push('扫描参数不完整，请读取设备信息并确认 RATE、FPS 和 UDP 目标');
+    return reasons;
+}
+
 function renderSyncState(data) {
     syncLastState = data;
     const incomingPressure = data.pressure || {};
@@ -17,9 +38,18 @@ function renderSyncState(data) {
     const busy = syncRequestPending || data.device_busy || incomingPressure.busy;
     document.querySelectorAll('[data-sync-config]').forEach(btn => btn.disabled = !!(busy || data.active || pressure.file_open || pressure.scanning));
     document.querySelectorAll('[data-sync-command]').forEach(btn => btn.disabled = !!(busy || data.active || pressure.scanning || !pressure.connected));
-    document.getElementById('sync-start').disabled = !!(busy || data.active || pressure.file_open || pressure.scanning || !data.encoder_fresh || !pressure.connected || pressure.reboot_required);
+    const startReasons = syncStartBlockers(data, pressure, busy);
+    document.getElementById('sync-start').disabled = startReasons.length > 0;
+    document.getElementById('sync-start').title = startReasons.join('；');
     document.getElementById('sync-stop').disabled = syncRequestPending || !data.active || ['stopping', 'saving'].includes(data.phase);
     document.getElementById('sync-stop').innerText = data.phase === 'stop_failed' ? '重试停止并保存' : '停止并保存';
+    document.getElementById('sync-stop').title = !data.active ? '尚未开始同步记录，无需停止' : ['stopping', 'saving'].includes(data.phase) ? '正在停止或保存，请等待完成' : '';
+    document.getElementById('sync-readiness').innerText = data.active ? `同步记录${syncPhases[data.phase] || data.phase}；停止后会保存双方数据。` : startReasons.length ? `暂不能开始：${startReasons.join('；')}。停止并保存将在同步记录开始后可用。` : '车速和扫描阀已就绪，可以开始同步记录；停止并保存将在开始后可用。';
+    const recoverEncoder = document.getElementById('sync-encoder-normal');
+    recoverEncoder.hidden = !!(data.active || data.encoder_fresh || !data.encoder?.serial_open);
+    recoverEncoder.disabled = !!busy;
+    recoverEncoder.title = '发送 R 退出舵机/巡线调试；恢复后重新允许正常油门控制';
+    if (!recoverEncoder.hidden) document.getElementById('sync-readiness').innerText += ' 恢复 R 后将重新允许正常油门控制。';
     syncLight('sync-connection-light', busy ? 'busy' : pressure.connected ? 'on' : 'off');
     document.getElementById('sync-connection-text').innerText = busy ? '设备操作中' : pressure.connected ? '已连接' : '未连接';
     const freshUDP = pressure.scanning && pressure.last_receive_unix_ns && (Date.now() - pressure.last_receive_unix_ns / 1e6) < 1500;
@@ -84,7 +114,7 @@ async function syncPost(endpoint, data) {
         if (command) appendSyncTerminal(result.result?.response || result.error || JSON.stringify(result.result || result));
         appendSyncTiming(url, totalMs, result._timing, traceId);
         if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-        document.getElementById('sync-message').innerText = '操作完成';
+        document.getElementById('sync-message').innerText = result.message || '操作完成';
         if (result.result) document.getElementById('sync-device-info').innerText = JSON.stringify(result.result, null, 2);
         if (result.status) renderSyncState(result.status);
         if (endpoint.endsWith('/close-file')) await refreshSyncFiles();
@@ -112,6 +142,7 @@ function startSyncRecording() {
     return syncPost('/sync_record/start', { duration_sec: Number(syncValue('sync-duration')), max_delta_ms: Number(syncValue('sync-delta')) });
 }
 function stopSyncRecording() { return syncPost('/sync_record/stop', {}); }
+function restoreSyncEncoder() { return syncPost('/sync_record/encoder/normal', {}); }
 function syncLight(id, state) { document.getElementById(id).dataset.state = state; }
 function appendSyncTerminal(text) {
     const output = document.getElementById('sync-terminal-output');

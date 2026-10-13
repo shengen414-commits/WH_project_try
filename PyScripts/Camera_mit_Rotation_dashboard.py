@@ -57,6 +57,7 @@ sensor_state = {
     "throttle": 1500,   # 新增：当前真实油门
     "last_serial_line": "",
     "last_serial_rx_wall": 0.0,
+    "last_serial_rx_mono": 0.0,
     "serial_line_count": 0,
     "last_drive_line": "",
 }
@@ -122,7 +123,27 @@ def encoder_ready():
                 time.monotonic() - sensor_state.get("last_encoder_rx_mono", 0) < ENCODER_FRESH_SEC)
 
 
-sync_coordinator = SyncRecorder(SAVE_DIR, encoder_ready, speed_calibration={'ppr': PPR, 'kmh_per_rpm': KMH_PER_RPM})
+def encoder_public_state():
+    last_rx = sensor_state.get('last_encoder_rx_mono', 0)
+    last_line = sensor_state.get('last_serial_line', '')
+    serial_open = bool(esp32_serial and esp32_serial.is_open)
+    # A debug frame explains missing ENC data; do not mistake it for speed data.
+    debug_mode = None
+    if not encoder_ready() and time.monotonic() - sensor_state.get('last_serial_rx_mono', 0) < 1.5:
+        if last_line.startswith('[SERVO]'):
+            debug_mode = 'servo'
+        elif last_line.startswith(('[LINE_DBG]', '[LINE]')):
+            debug_mode = 'line'
+    return {'serial_open': serial_open,
+            'port': str(getattr(esp32_serial, 'port', os.environ.get('ESP32_SERIAL_PORT', '/dev/ttyUSB0'))),
+            'last_sample_age_ms': round(max(0, time.monotonic() - last_rx) * 1000) if last_rx else None,
+            'last_serial_line': last_line, 'debug_mode': debug_mode,
+            'error': sensor_state.get('serial_error')}
+
+
+sync_coordinator = SyncRecorder(SAVE_DIR, encoder_ready,
+                               speed_calibration={'ppr': PPR, 'kmh_per_rpm': KMH_PER_RPM},
+                               encoder_status=encoder_public_state)
 
 
 def speed_record_public_state():
@@ -345,6 +366,7 @@ def read_esp32_data():
                 sensor_state["serial_error"] = None
                 sensor_state["last_serial_line"] = line
                 sensor_state["last_serial_rx_wall"] = now_ns / 1e9
+                sensor_state["last_serial_rx_mono"] = now_mono_ns / 1e9
                 sensor_state["serial_line_count"] += 1
                 sample = encoder_stream.decode(line, now_ns, sensor_state["throttle"], sensor_state["mode"], now_mono_ns)
                 if sample is not None:
@@ -727,6 +749,25 @@ def speed_record_stop():
 @app.route('/speed_record/status')
 def speed_record_status():
     return jsonify({"status": "ok", **speed_record_public_state()})
+
+
+@app.post('/sync_record/encoder/normal')
+def restore_encoder_stream():
+    if not sync_coordinator.operation_lock.acquire(blocking=False):
+        return jsonify(error='设备操作进行中，请稍后恢复编码器上报'), 409
+    try:
+        with sync_coordinator.lock:
+            if sync_coordinator.state['active']:
+                return jsonify(error='同步记录期间不能切换 ESP32 调试模式'), 409
+        if not esp32_serial or not esp32_serial.is_open:
+            return jsonify(error='ESP32 串口未连接，请检查串口和后台启动日志'), 409
+        with serial_write_lock:
+            esp32_serial.write(b'R\n')
+    except OSError as exc:
+        return jsonify(error=f'恢复编码器上报失败：{exc}'), 503
+    finally:
+        sync_coordinator.operation_lock.release()
+    return jsonify(message='已发送 R，等待编码器数据；正常油门控制已恢复', status=sync_coordinator.status())
 
 # --- 新增：接收前端开关右摄像头的指令 ---
 

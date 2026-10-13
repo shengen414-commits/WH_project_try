@@ -12,6 +12,11 @@ SCANTEL = ('Rate,500\nUnits,PA\nConversion,6894.76\nDate,2015/01/01\n'
            'Time,00:09:27.371617472\nFrame,Valve,XTime,FTime,01Press,02Press,03Press\n'
            '1,Px,0,0.002,4.065393,-957.0143,-999999\n'
            '2,Px,0,0.004,3.656257,,nan\n')
+SYNCHRONIZED = ('session_elapsed_ms,speed_kmh,match_valid,frame,frame_time_sec,units_index,P01\n'
+                '125,0,1,1,10.002,23,12.5\n'
+                '145,3.25,1,2,10.004,23,13.5\n'
+                '165,99,0,3,10.006,23,14.5\n'
+                '185,nan,1,4,10.008,23,15.5\n')
 
 
 class CSVReaderTests(unittest.TestCase):
@@ -46,6 +51,26 @@ class CSVReaderTests(unittest.TestCase):
         self.assertEqual(data.unit, 'RAW')
         self.assertEqual(len(data.channels), 3)
 
+    def test_sync_header_speed_validity_and_host_session_time(self):
+        data = read_pressure_csv(io.StringIO(SYNCHRONIZED), name='renamed.csv')
+        self.assertEqual(data.source_format, 'Synchronized')
+        self.assertEqual(data.times, [.125, .145, .165, .185])
+        self.assertEqual(data.speed, [0, 3.25, None, None])
+        self.assertEqual(data.channels['P01'], [12.5, 13.5, 14.5, 15.5])
+        self.assertEqual(data.to_dict()['speed_unit'], 'km/h')
+        self.assertEqual(data.to_dict()['time_label'], '同步记录时间（s）')
+        self.assertIsNone(read_pressure_csv(io.StringIO(LINUX)).speed)
+
+    def test_sync_duplicate_frames_and_receive_times_are_preserved(self):
+        text = SYNCHRONIZED.replace('165,99,0,3', '145,99,0,2')
+        data = read_pressure_csv(io.StringIO(text))
+        self.assertEqual(data.times, [.125, .145, .145, .185])
+        self.assertEqual(data.frames, [1, 2, 2, 4])
+        for bad in (text.replace('185,nan', '100,nan'), text.replace('145,3.25,1', '145,bad,1'),
+                    text.replace('145,3.25,1', '145,3.25,2')):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                read_pressure_csv(io.StringIO(bad))
+
 
 class PlotWebTests(unittest.TestCase):
     def setUp(self):
@@ -79,6 +104,15 @@ class PlotWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json['channels']['P03'], [None, None])
         self.assertEqual(before, set(self.root.iterdir()))
+
+    def test_sync_server_file_and_upload_return_speed(self):
+        (self.root / 'synchronized.csv').write_text(SYNCHRONIZED, encoding='utf-8')
+        response = self.client.get('/plot/api/data?filename=synchronized.csv')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['speed'], [0, 3.25, None, None])
+        response = self.client.post('/plot/api/upload', data={'file': (io.BytesIO(SYNCHRONIZED.encode()), 'sync.csv')})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['times'][0], .125)
 
     def test_errors_and_path_restrictions(self):
         for name in ['../outside.csv', '/outside.csv', r'..\outside.csv', 'run.dat']:

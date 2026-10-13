@@ -34,7 +34,9 @@ class DashboardTests(unittest.TestCase):
         self.app.speed_recorder = self.app.session_recorder = None
         self.app.encoder_stream = EncoderStream()
         self.app.sensor_state.update({'last_encoder_rx_mono': time.monotonic(), 'throttle': 1500, 'mode': 'WEB'})
-        self.app.esp32_serial = Mock(is_open=True)
+        self.app.sensor_state.update({'last_serial_line': '', 'last_serial_rx_mono': 0, 'serial_error': None})
+        self.app.esp32_serial = Mock(is_open=True, port='/dev/ttyUSB0')
+        self.app.sync_coordinator.state = {'active': False, 'phase': 'idle', 'events': []}
         self.app.record_workflow_active.clear()
         self.app.brake_sequence_active.clear()
         self.app.estop_ignore_until = 0
@@ -94,6 +96,40 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(set(response.get_json()), {'sensor', 'fps', 'record', 'speed_record', 'sync', 'conversion'})
         self.assertEqual(response.get_json()['sensor']['throttle'], 1500)
+
+    def test_servo_debug_explains_stale_encoder_and_normal_command_restores_data(self):
+        self.app.sensor_state.update(last_encoder_rx_mono=0, last_serial_rx_mono=time.monotonic(),
+                                     last_serial_line='[SERVO] GPIO12 target=1500 us PWM=ready')
+        state = self.client.get('/dashboard/status').get_json()['sync']
+        self.assertFalse(state['encoder_fresh'])
+        self.assertEqual(state['encoder']['debug_mode'], 'servo')
+        with patch.object(self.app.time, 'monotonic', return_value=time.monotonic() + 2):
+            self.assertIsNone(self.app.encoder_public_state()['debug_mode'])  # Old last line does not prove a live debug stream.
+        response = self.client.post('/sync_record/encoder/normal')
+        self.assertEqual(response.status_code, 200)
+        self.app.esp32_serial.write.assert_called_once_with(b'R\n')
+        self.assertFalse(response.get_json()['status']['encoder_fresh'])  # Wait for real ENC, not command acknowledgment.
+        self.receive([b'[ENC],0,10,0\n'])  # Stationary wheels also produce valid samples.
+        state = self.client.get('/dashboard/status').get_json()['sync']
+        self.assertTrue(state['encoder_fresh'])
+        self.assertIsNone(state['encoder']['debug_mode'])
+
+    def test_normal_command_requires_serial_and_no_active_capture(self):
+        self.app.esp32_serial.is_open = False
+        self.assertEqual(self.client.post('/sync_record/encoder/normal').status_code, 409)
+        self.app.esp32_serial.write.assert_not_called()
+        self.app.esp32_serial.is_open = True
+        self.app.sync_coordinator.state['active'] = True
+        self.assertEqual(self.client.post('/sync_record/encoder/normal').status_code, 409)
+        self.app.esp32_serial.write.assert_not_called()
+        self.app.sync_coordinator.state['active'] = False
+        with self.app.sync_coordinator.operation_lock:
+            self.assertEqual(self.client.post('/sync_record/encoder/normal').status_code, 409)
+        self.app.esp32_serial.write.side_effect = OSError('USB disconnected')
+        response = self.client.post('/sync_record/encoder/normal')
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('USB disconnected', response.get_json()['error'])
+        self.assertFalse(self.app.sync_coordinator.operation_lock.locked())
 
     def test_multi_source_and_speed_record_simultaneously_without_sd_commands(self):
         camera = Mock(is_active=True, available=True, record_error=None)

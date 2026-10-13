@@ -26,12 +26,15 @@ class PressureCSV:
     frames: list[int]
     channels: dict[str, list[float | None]]
     metadata: dict[str, str]
+    speed: list[float | None] | None = None
+    time_label: str = '设备帧时间（s）'
 
     def to_dict(self) -> dict:
         """Full-resolution data, JSON-safe; invalid readings are None/null."""
         return {"name": self.name, "source_format": self.source_format,
                 "unit": self.unit, "times": self.times, "frames": self.frames,
                 "channels": self.channels, "metadata": self.metadata,
+                "speed": self.speed, "speed_unit": 'km/h', "time_label": self.time_label,
                 "frame_count": len(self.frames),
                 "invalid_counts": {key: sum(v is None for v in values)
                                    for key, values in self.channels.items()}}
@@ -69,7 +72,7 @@ def read_pressure_csv(source: str | Path | TextIO, *, name: str | None = None,
         row = [v.strip() for v in row]
         if not row or not any(row):
             continue
-        if row[0].lower() == "frame":
+        if row[0].lower() == "frame" or {'session_elapsed_ms', 'speed_kmh', 'match_valid', 'frame'}.issubset(row):
             header = row
             break
         if len(row) >= 2:
@@ -81,8 +84,9 @@ def read_pressure_csv(source: str | Path | TextIO, *, name: str | None = None,
     if len(set(header)) != len(header):
         raise ValueError("CSV 表头包含重复列名")
     columns = {key: index for index, key in enumerate(header)}
-    linux = "frame_time_sec" in columns
-    time_key = "frame_time_sec" if linux else "FTime"
+    synchronized = {'session_elapsed_ms', 'speed_kmh', 'match_valid', 'frame'}.issubset(columns)
+    linux = synchronized or "frame_time_sec" in columns
+    time_key = "session_elapsed_ms" if synchronized else "frame_time_sec" if linux else "FTime"
     frame_key = "frame" if linux else "Frame"
     if time_key not in columns or frame_key not in columns:
         raise ValueError("缺少时间列；需要 frame_time_sec 或 FTime（不支持 .index.csv）")
@@ -93,6 +97,7 @@ def read_pressure_csv(source: str | Path | TextIO, *, name: str | None = None,
     times: list[float] = []
     frames: list[int] = []
     values: dict[str, list[float | None]] = {key: [] for key in channel_columns}
+    speeds: list[float | None] | None = [] if synchronized else None
     unit = metadata.get("Units", "未知单位")
     unit_index: int | None = None
     for line_number, row in enumerate(rows, line_number + 1):
@@ -102,10 +107,14 @@ def read_pressure_csv(source: str | Path | TextIO, *, name: str | None = None,
             raise ValueError(f"第 {line_number} 行列数不正确")
         try:
             t = float(row[columns[time_key]])
+            if synchronized:
+                t /= 1000.0
             frame = int(row[columns[frame_key]])
             if not math.isfinite(t):
                 raise ValueError("时间必须为有限数值")
-            if times and (t <= times[-1] or frame <= frames[-1]):
+            if synchronized and times and t < times[-1]:
+                raise ValueError('同步记录时间倒退，请检查 session_elapsed_ms')
+            if not synchronized and times and (t <= times[-1] or frame <= frames[-1]):
                 raise ValueError("帧号或时间不递增；请将重复记录或多次扫描拆分后绘图")
             if linux and "units_index" in columns:
                 current_unit = int(row[columns["units_index"]])
@@ -118,10 +127,21 @@ def read_pressure_csv(source: str | Path | TextIO, *, name: str | None = None,
                 v = float(cell) if cell else None
                 parsed[key] = (v if v is not None and math.isfinite(v)
                                and v != invalid_value else None)
+            speed = None
+            if synchronized:
+                valid = row[columns['match_valid']].strip()
+                if valid not in ('0', '1'):
+                    raise ValueError('match_valid 必须为 0 或 1')
+                cell = row[columns['speed_kmh']].strip()
+                if valid == '1' and cell:
+                    v = float(cell)
+                    speed = v if math.isfinite(v) and v != invalid_value else None
         except ValueError as exc:
             raise ValueError(f"第 {line_number} 行：{exc}") from exc
         times.append(t)
         frames.append(frame)
+        if speeds is not None:
+            speeds.append(speed)
         for key, v in parsed.items():
             values[key].append(v)
     if not times:
@@ -130,8 +150,9 @@ def read_pressure_csv(source: str | Path | TextIO, *, name: str | None = None,
         unit = {23: "Pa", 27: "RAW"}.get(unit_index, f"单位索引 {unit_index}")
     elif unit.upper() == "PA":
         unit = "Pa"
-    return PressureCSV(filename, "Linux" if linux else "ScanTel", unit,
-                       times, frames, values, metadata)
+    return PressureCSV(filename, "Synchronized" if synchronized else "Linux" if linux else "ScanTel", unit,
+                       times, frames, values, metadata, speeds,
+                       '同步记录时间（s）' if synchronized else '设备帧时间（s）')
 
 
 def register_plot_routes(app, *, data_dir: str | Path | None = None,
