@@ -2,8 +2,8 @@
 #include <Arduino.h>
 
 namespace MPU6050Config {
-constexpr int SDA_PIN = 2;
-constexpr int SCL_PIN = 15;
+constexpr int SDA_PIN = 16;
+constexpr int SCL_PIN = 4;
 constexpr int AD0_PIN = 17; // -1 if AD0 is physically tied to GND/3.3V instead.
 constexpr int INT_PIN = 5;  // -1 if disconnected; this demo polls, no interrupt needed.
 constexpr uint32_t SAMPLE_MS = 10;

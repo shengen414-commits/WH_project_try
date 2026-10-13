@@ -45,10 +45,10 @@ int main() {
     word(0, 16384); word(2, -8192); word(4, 16384); word(6, 3400);
     word(8, 655); word(10, -1310); word(12, 131);
     feed("T1800\nM\n");
-    assert(Wire.sda == 2 && Wire.scl == 15 && Wire.frequency == 100000 && Wire.timeoutMs == 3);
+    assert(Wire.sda == 16 && Wire.scl == 4 && Wire.frequency == 100000 && Wire.timeoutMs == 3);
     assert(fakePinModes()[17] == OUTPUT && fakePinLevels()[17] == LOW);
     assert(fakePinModes()[5] == INPUT);
-    assert(fakePinModes().count(4) == 0 && fakePinModes().count(16) == 0); // Auxiliary pins never driven.
+    // GPIO4/16 now serve SCL/SDA, not the MPU auxiliary XCL/XDA interface.
     assert(pwmOutputs[14] == 1500 && !serialNormalMode());
     tick(45);
     assert(readMPU6050Sample(sample));

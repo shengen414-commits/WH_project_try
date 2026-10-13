@@ -2,18 +2,18 @@
 
 测试模块已经接入正常 `esp32dev` 固件，不用烧录替换整个小车功能的独立固件。
 按 M 后才初始化 I2C；上电正常模式不会驱动 MPU 的相关 GPIO，也不读取 MPU。
-XDA/XCL 不由程序使用，不会配置 GPIO4/GPIO16 为输出。
+XDA/XCL 不由程序使用；GPIO4/GPIO16 现在用于主 I2C 的 SCL/SDA。
 
 ## 当前接线与可选引脚
 
 | MPU6050 引脚 | 当前连接 | 测试程序处理 |
 |---|---|---|
-| SDA | D2 / GPIO2 | I2C 数据，Wire.begin 第一个参数 |
-| SCL | D15 / GPIO15 | I2C 时钟，Wire.begin 第二个参数 |
+| SDA | D16 / GPIO16 | I2C 数据，Wire.begin 第一个参数 |
+| SCL | D4 / GPIO4 | I2C 时钟，Wire.begin 第二个参数 |
 | AD0 | D17 / GPIO17 | 进入 M 后输出 LOW，选择 0x68 |
 | INT | D5 / GPIO5 | 只设为 INPUT，不启用中断，轮询即可 |
-| XDA | D4 / GPIO4 | 本次不需要，建议断电后拔掉 |
-| XCL | D16 / GPIO16 | 本次不需要，建议断电后拔掉 |
+| XDA | 不接 | 本次不需要，不连接 SDA/SCL 的 ESP32 引脚 |
+| XCL | 不接 | 本次不需要，不连接 SDA/SCL 的 ESP32 引脚 |
 | VCC/GND | 按模块供电规格/公共地 | SDA/SCL 的高电平及上拉须符合 ESP32 的 3.3V 接口 |
 
 XDA/XCL 是 MPU 用于连接外部传感器的辅助 I2C 总线，不是读取自身六轴数据必须接的线。
@@ -21,10 +21,10 @@ AD0 是地址选择脚：LOW 对应 0x68，HIGH 对应 0x69；WHO_AM_I 在两种
 依据：[TDK 引脚定义](https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Datasheet.pdf)、
 [寄存器手册](https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Register-Map1.pdf)。
 
-当前 SDA2/SCL15 软件可用，没有占用编码器、巡线、ESC 或舵机 GPIO。
-不过经典 ESP32 的 GPIO2、GPIO5、GPIO15 是启动配置脚；外部上拉/下拉可能影响启动和烧录配置。
-尤其模块 SDA 上拉会拉高 GPIO2，在下载模式中可能造成问题。
-遇到烧录/启动异常时，断电移除相关连接后排查，优先改到没有该问题的空闲引脚。
+当前 SDA16/SCL4 软件可用，没有占用编码器、巡线、ESC 或舵机 GPIO。
+GPIO4/16 现在只接 SDA/SCL，请先断电移除原来的 XDA/XCL 连接，不能把两个接口并接到这两个 GPIO。
+INT 所接 GPIO5 是经典 ESP32 的启动配置脚，本次轮询无需 INT，可以不接。
+GPIO16/17 在带 PSRAM 的部分模组上被占用（如 WROVER）；当前接法适用于这两个 GPIO 可用的模组。
 [Espressif GPIO 说明](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/gpio.html)。
 
 本项目优先推荐 SDA21/SCL22，也可以用 SDA18/SCL19 或 SDA19/SCL23。
