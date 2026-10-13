@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "line_controller.h"
 
 enum class AutomaticSteeringMode { Off, Line, ExternalYaw, Fault };
 struct AutomaticSteeringState {
@@ -9,6 +10,9 @@ struct AutomaticSteeringState {
     uint8_t lineMask;
     bool gyroEnabled;
     const char* reason;
+    LineControlAlgorithm algorithm;
+    int direction;  // PWM calibration sign; +1 is provisional until wheel testing.
+    float requestedPwm;
 };
 
 bool startLineFollowing();

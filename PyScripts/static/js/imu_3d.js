@@ -82,6 +82,11 @@
         $('calibration').textContent = fresh?({NO:'未标定',RUN:'静止标定中…',OK:'Z 零偏已标定'}[sample.calibration]):'—';
         $('age').textContent = state.age_ms===null?'—':`${state.age_ms} ms`;
         $('data-message').textContent = state.serial_error || state.message;
+        const diagnostics = state.diagnostics || {}, last = diagnostics.last_invalid;
+        $('invalid-count').textContent = diagnostics.invalid_frames || 0;
+        const ago = diagnostics.last_invalid_age_ms == null ? '' : `（${(diagnostics.last_invalid_age_ms/1000).toFixed(1)} 秒前）`;
+        $('invalid-reason').textContent = last ? `最近原因${ago}：${last.reason}；连续无效 ${diagnostics.consecutive_invalid || 0} 帧；累计有效 ${state.count || 0} 帧` : '尚未检测到无效帧';
+        $('invalid-raw').textContent = last ? last.raw : '';
         draw();
     }
     let timer = null, polling = false, commandBusy = false;

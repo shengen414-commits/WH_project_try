@@ -5,7 +5,6 @@ import json
 import os
 import time
 import threading
-import serial
 import re
 import numpy as np
 from collections import deque
@@ -22,12 +21,14 @@ try:
     from .sync_web import register_sync_routes
     from .dashboard_runtime import run_dashboard
     from .imu_visualization import ImuVisualization
+    from .serial_connection import open_esp32_serial
 except ImportError:
     from telemetry import EncoderStream, CsvRecorder
     from sync_recording import SyncRecorder
     from sync_web import register_sync_routes
     from dashboard_runtime import run_dashboard
     from imu_visualization import ImuVisualization
+    from serial_connection import open_esp32_serial
 
 # 确保录像保存根目录存在
 SAVE_DIR = str(Path(os.environ.get('CAR_RECORDS_DIR', str(Path(__file__).resolve().parent.parent / 'Car_Records'))).resolve())
@@ -67,13 +68,13 @@ sensor_state = {
 }
 
 try:
-    esp32_serial = serial.Serial(
-        os.environ.get('ESP32_SERIAL_PORT', '/dev/ttyUSB0'), 115200, timeout=0.01, write_timeout=0.05)
+    esp32_serial = open_esp32_serial(os.environ.get('ESP32_SERIAL_PORT', '/dev/ttyUSB0'))
     esp32_serial.reset_input_buffer()
     print("已清空启动积压数据！")
     print("✅ 成功连接到 ESP32 霍尔传感器模块！")
 except Exception as e:
-    print(f"⚠️ 无法连接到 ESP32: {e}")
+    sensor_state['serial_error'] = f'无法独占连接 ESP32 串口：{e}；请关闭串口监视器或其他后台后重启 Dashboard'
+    print(f"⚠️ {sensor_state['serial_error']}")
     esp32_serial = None
 
 
@@ -360,14 +361,33 @@ def read_esp32_data():
     last_debug = 0.0
     while True:
         try:
-            chunk = esp32_serial.read(min(max(esp32_serial.in_waiting, 1), 4096))
+            try:
+                chunk = esp32_serial.read(min(max(esp32_serial.in_waiting, 1), 4096))
+            except Exception as exc:
+                # Fail closed: never join a pre-disconnect half-frame to data
+                # from a different connection or repeatedly hammer a dead fd.
+                pending.clear()
+                message = f'ESP32 串口读取中断：{exc}；请关闭其他串口程序，检查 USB 后重启 Dashboard'
+                sensor_state['serial_error'] = message
+                sensor_state['last_encoder_rx_mono'] = 0
+                sensor_state['last_steering_rx_mono'] = 0
+                imu_visualization.invalidate(message)
+                with serial_write_lock:
+                    try:
+                        esp32_serial.close()
+                    except Exception:
+                        pass
+                print(message)
+                return
             if not chunk:
                 continue
             pending.extend(chunk)
             while b'\n' in pending:
                 raw_line, _, remainder = pending.partition(b'\n')
                 pending = bytearray(remainder)
-                line = raw_line.decode('utf-8', errors='ignore').strip()
+                # Preserve corrupt bytes as replacement characters for diagnostics;
+                # silently deleting them can turn damaged numeric fields into numbers.
+                line = raw_line.decode('utf-8', errors='replace').strip()
                 now_ns = time.time_ns()
                 now_mono_ns = time.monotonic_ns()
                 sensor_state["serial_error"] = None

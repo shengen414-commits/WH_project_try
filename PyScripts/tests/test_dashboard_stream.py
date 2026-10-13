@@ -103,6 +103,41 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(self.client.get('/imu/status').get_json()['fresh'])
         self.app.esp32_serial.reset_input_buffer.assert_not_called()
 
+    def test_imu_bad_uart_byte_is_reported_instead_of_silently_deleted(self):
+        raw = b'[IMU],100,0\xff,0,1,0,0,0,25,0,NO\n'
+        self.receive([raw[:15],raw[15:]])
+        state = self.client.get('/imu/status').get_json()
+        self.assertFalse(state['fresh'])
+        self.assertIn('ax 不是数字',state['diagnostics']['last_invalid']['reason'])
+        self.assertIn('\ufffd',state['diagnostics']['last_invalid']['raw'])
+        self.receive([b'[IMU],120,0,0,1,0,0,0,25,0,NO\n'])
+        state = self.client.get('/imu/status').get_json()
+        self.assertTrue(state['fresh'])
+        self.assertEqual(state['diagnostics']['invalid_frames'],1)
+        self.assertEqual(state['diagnostics']['consecutive_invalid'],0)
+
+    def test_uart_read_failure_closes_once_and_invalidates_sensor_streams(self):
+        self.app.imu_visualization.feed('[IMU],100,0,0,1,0,0,0,25,0,NO')
+        self.app.sensor_state['last_steering_rx_mono'] = time.monotonic()
+        port = self.app.esp32_serial
+        port.in_waiting = 1
+        port.read.side_effect = [b'[IMU],120,0,0',OSError('device disconnected or multiple access on port?')]
+        port.close.side_effect = lambda: setattr(port,'is_open',False)
+        self.app.read_esp32_data()
+        port.close.assert_called_once()
+        self.assertEqual(port.read.call_count,2)
+        self.assertFalse(self.app.encoder_ready())
+        self.assertFalse(self.app.imu_visualization.status()['fresh'])
+        self.assertEqual(self.app.sensor_state['last_steering_rx_mono'],0)
+        self.assertIn('重启 Dashboard',self.app.sensor_state['serial_error'])
+        self.assertEqual(self.client.post('/imu/command',json={'action':'start'}).status_code,409)
+        self.assertFalse(self.client.get('/imu/status').get_json()['serial_open'])
+
+    def test_uart_timeout_is_not_treated_as_disconnection(self):
+        self.receive([b'',b'[IMU],120,0,0,1,0,0,0,25,0,NO\n'])
+        self.app.esp32_serial.close.assert_not_called()
+        self.assertTrue(self.client.get('/imu/status').get_json()['fresh'])
+
     def test_imu_commands_block_recording_bad_requests_and_closed_port(self):
         self.assertEqual(self.client.post('/imu/command', json=[]).status_code, 400)
         self.assertEqual(self.client.post('/imu/command', json={'action':'zero'}).status_code, 409)

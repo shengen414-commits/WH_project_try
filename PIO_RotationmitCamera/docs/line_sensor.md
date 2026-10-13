@@ -32,15 +32,15 @@ OUT 接入前须确认高电平不超过 ESP32 的允许电压；若为 5V，先
 
 ```text
 [LINE],sequence,time_ms,raw_mask,line_mask
-[LINE],0,1234,231,24
+[LINE],0,1234,24,24
 ```
 
 - `sequence`：完整扫描的编号，从 0 开始；串口拥塞时可能跳号。
 - `time_ms`：ESP32 启动后的毫秒数，取扫描完成时刻，uint32 回绕。
 - `raw_mask`：0～255 的十进制位掩码，bit0 对应 CH1，bit7 对应 CH8；置位表示 OUT 电平为 HIGH。
-- `line_mask`：与 `LINE_LEVEL` 匹配的通道置位。默认 LOW 表示检测到目标线，需要实测确认；若目标线为 HIGH，修改配置。
+- `line_mask`：与 `LINE_LEVEL` 匹配的通道置位。本版本按扫线 CSV 采用 HIGH 表示检测到目标线，安装后应核对 raw 电平与亮灯位置。
 
-示例 231 = 二进制 11100111，默认 LOW 极性时 line_mask 为 24 = 00011000，表示 CH4、CH5 命中。地址 AD2 AD1 AD0 的 000～111 对应 CH1～CH8；探头的物理左右方向需按安装方向确认。
+示例 raw_mask=24、line_mask=24，按 HIGH 极性表示 CH4、CH5 命中。地址 AD2 AD1 AD0 的 000～111 对应 CH1～CH8；已确认 CH1 在车辆左侧。
 
 TX 缓冲不足时不等待，尝试在后续循环发送最近完整帧，旧帧可能被新帧覆盖。该机制优先保持现有控制和编码器上报的及时性，不保证每一帧传输。
 
@@ -49,7 +49,7 @@ TX 缓冲不足时不等待，尝试在后续循环发送最近完整帧，旧�
 串口监视器输入 `L`（小写 `l` 也可）进入巡线调试模式：停止发送 `[ENC]` 和电调日常日志，只输出巡线信息，每 200ms 至多打印一行可读的探头状态。扫描仍按原频率运行，编码器计数、电调控制和失联保护继续运行；`E` 急停确认消息仍会显示。
 
 ```text
-[LINE_DBG] raw=11100111 line=00011000
+[LINE_DBG] raw=00011000 line=00011000
 ```
 
 两组数字都按 **CH1 → CH8** 从左到右排列。`raw` 是原始电平，`line` 的 1 表示符合配置的目标线电平。上例表示 CH4、CH5 命中。固定输入未变化时也定期打印，便于确认采集仍在运行。
@@ -112,7 +112,7 @@ python PyScripts/line_debug_plot.py --demo
 python PyScripts/line_debug_plot.py --csv Car_Records/Line_Debug/实际文件名.csv --no-show
 ```
 
-静态校验：全木板时 raw 应为 11111111；只把 CH1 放到黑胶带上时应为 01111111；只把 CH8 放到黑胶带上时应为 11111110（均按 CH1→CH8 排列）。每个位置保持约一秒，逐个测试。
+静态校验（当前 HIGH 极性）：无黑胶带时 raw 应为 00000000；只把 CH1 放到黑胶带上时应为 10000000；只把 CH8 放到黑胶带上时应为 00000001（均按 CH1→CH8 排列）。每个位置保持约一秒，逐个测试。若实测相反，核对原始电平后改变 LINE_LEVEL，不要混淆 line 命中标记和 raw 电平。
 
 `0 missing frames` 只表示接收的序号连续，不保证通道选择或电平读取正确。all_black 表示读数认为八路全黑；multiple 表示不连续通道命中。不要通过强行计算这些样本的均值来掩盖异常，也不要仅凭图就断定某一根线有故障。
 
@@ -124,7 +124,7 @@ python PyScripts/line_debug_plot.py --csv Car_Records/Line_Debug/实际文件名
 
 `--line-level high/low` 从 raw_mask 重新计算命中位置，也适用于实时录制。原文件不会被修改，新 CSV 用 reported_line_mask 保留固件上报的掩码，并记录 center_line_level。未指定该参数时继续使用固件上报的 line_mask。
 
-仅当静态单探头测试确认黑线对应 HIGH 后，才将固件 include/line_sensor.h 的 LINE_LEVEL 改为 HIGH 并烧录。原始 raw_mask 的电平含义不受此配置影响；调试文本中的 line= 是命中标记，不是原始电平，命中时对应位总为 1。
+当前固件 include/line_sensor.h 已按此前扫线数据设置 LINE_LEVEL=HIGH；重新安装后仍应做静态单探头核对。原始 raw_mask 的电平含义不受此配置影响；调试文本中的 line= 是命中标记，不是原始电平，命中时对应位总为 1。
 
 1. 修正 AD0 接线与配置，确认 OUT 电平，给模块供电并共地。
 2. 在工程目录运行 `pio run`，烧录后打开 115200 波特率串口监视器。

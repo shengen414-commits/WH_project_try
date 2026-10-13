@@ -22,7 +22,8 @@ class FirmwareTransportTests(unittest.TestCase):
     def test_automatic_steering_and_pid_against_real_firmware_modules(self):
         root = Path(__file__).resolve().parents[2]
         stubs = Path(__file__).resolve().parent / 'firmware_stubs'
-        sources = ['esc_control.cpp', 'steering_control.cpp', 'automatic_steering.cpp', 'serial_transport.cpp']
+        sources = ['esc_control.cpp', 'steering_control.cpp', 'automatic_steering.cpp',
+                   'line_position.cpp', 'line_controller.cpp', 'serial_transport.cpp']
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / 'automatic_test.exe'
             result = subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
@@ -50,13 +51,29 @@ class FirmwareTransportTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         stubs = Path(__file__).resolve().parent / 'firmware_stubs'
         sources = ['esc_control.cpp', 'steering_control.cpp', 'automatic_steering.cpp',
-                   'serial_transport.cpp', 'mpu6050_debug.cpp']
+                   'line_position.cpp', 'line_controller.cpp', 'serial_transport.cpp', 'mpu6050_debug.cpp']
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / 'mpu_test.exe'
             result = subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
                                      '-I', str(stubs), '-I', str(root / 'PIO_RotationmitCamera/include'),
                                      *(str(root / 'PIO_RotationmitCamera/src' / name) for name in sources),
                                      str(stubs / 'test_mpu6050.cpp'), '-o', str(executable)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            subprocess.run([str(executable)], check=True, timeout=5)
+
+    @unittest.skipUnless(shutil.which('g++'), 'host g++ is optional; ESP32 build uses PlatformIO')
+    def test_line_position_and_replaceable_controllers(self):
+        root = Path(__file__).resolve().parents[2]
+        stubs = Path(__file__).resolve().parent / 'firmware_stubs'
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / 'line_controller_test.exe'
+            result = subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
+                                     '-I', str(stubs), '-I', str(root / 'PIO_RotationmitCamera/include'),
+                                     str(root / 'PIO_RotationmitCamera/src/line_position.cpp'),
+                                     str(root / 'PIO_RotationmitCamera/src/line_controller.cpp'),
+                                     str(root / 'PIO_RotationmitCamera/src/line_sensor.cpp'),
+                                     str(stubs / 'test_line_controller.cpp'), '-o', str(executable)],
+                                    capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(executable)], check=True, timeout=5)
 

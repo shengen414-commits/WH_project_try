@@ -1,6 +1,7 @@
 #include "automatic_steering.h"
 #include "feedback_pid.h"
 #include "line_sensor.h"
+#include "line_position.h"
 #include "steering_control.h"
 #include "esc_control.h"
 #include <cmath>
@@ -14,7 +15,10 @@ constexpr float SLEW_US_PER_SEC = 150;
 constexpr float LINE_TO_YAW_DEG_PER_SEC = 60;
 constexpr float MAX_YAW_DEG_PER_SEC = 90;
 AutomaticSteeringMode mode = AutomaticSteeringMode::Off;
-FeedbackPID linePID, yawPID;
+BasicLineController basicController;
+PIDLineController pidController;
+FeedbackPID yawPID;
+LineControlAlgorithm lineAlgorithm = LineControlAlgorithm::Basic;
 bool prepared = false, gyroEnabled = false;
 bool yawValid = false, targetValid = false, haveFrame = false;
 uint32_t yawAt = 0, targetAt = 0, lastFrameSequence = 0, lastControlAt = 0, lastPublishAt = 0;
@@ -26,13 +30,23 @@ const char* reason = "disabled";
 
 void prepare() {
     if (prepared) return;
-    linePID.tune(35, 0, 0); yawPID.tune(1, 0, 0); prepared = true;
+    pidController.tune(35, 0, 0); yawPID.tune(1, 0, 0); prepared = true;
+}
+LineController& activeLineController() {
+    return lineAlgorithm == LineControlAlgorithm::Basic
+        ? static_cast<LineController&>(basicController) : static_cast<LineController&>(pidController);
+}
+void resetControllers() { basicController.reset(); pidController.reset(); yawPID.reset(); }
+const char* algorithmName() {
+    return mode == AutomaticSteeringMode::ExternalYaw || gyroEnabled ? "GYRO"
+         : lineAlgorithm == LineControlAlgorithm::Basic ? "BASIC" : "PID";
 }
 void message(const char* text) {
     char line[128];
     const char* name = mode == AutomaticSteeringMode::Line ? "LINE" : mode == AutomaticSteeringMode::ExternalYaw ? "YAW" : mode == AutomaticSteeringMode::Fault ? "FAULT" : "OFF";
-    int n = snprintf(line, sizeof(line), "[FOLLOW] mode=%s e=%.3f pwm=%d mask=%u gyro=%d reason=%s\n",
-                     name, lineError, (int)std::lround(outputUs), (unsigned int)lastMask, gyroEnabled, text);
+    int n = snprintf(line, sizeof(line), "[FOLLOW] mode=%s e=%.3f pwm=%d mask=%u gyro=%d algo=%s dir=%d reason=%s\n",
+                     name, lineError, (int)std::lround(outputUs), (unsigned int)lastMask, gyroEnabled,
+                     algorithmName(), direction, text);
     if (n > 0 && n < (int)sizeof(line) && Serial.availableForWrite() >= n)
         Serial.write((const uint8_t*)line, n);
 }
@@ -40,22 +54,14 @@ bool fresh(uint32_t now, uint32_t at, uint32_t timeout) { return uint32_t(now - 
 bool yawFresh(uint32_t now) { return yawValid && fresh(now, yawAt, FEEDBACK_TIMEOUT_MS); }
 bool targetFresh(uint32_t now) { return targetValid && fresh(now, targetAt, TARGET_TIMEOUT_MS); }
 bool linePosition(const LineSensorFrame& frame, float& error) {
-    if (!frame.lineMask || frame.lineMask == 0xff) return false;
-    int count = 0, segments = 0;
-    float sum = 0;
-    bool previous = false;
-    for (int i = 0; i < 8; ++i) {
-        bool active = (frame.lineMask >> i) & 1;
-        if (active) { ++count; sum += float(i) - 3.5f; if (!previous) ++segments; }
-        previous = active;
-    }
-    if (segments != 1) return false;  // Crossings/multiple lines need a future route planner.
-    error = sum / (float(count) * 3.5f);
+    const LinePosition position = estimateLinePosition(frame);
+    if (!position.valid()) return false;
+    error = position.normalizedError;
     return true;
 }
 void fault(const char* why) {
     mode = AutomaticSteeringMode::Fault; reason = why;
-    linePID.reset(); yawPID.reset();
+    resetControllers();
     outputUs = steeringCenterUs(); centerSteeringOutput();
     lastRequestedUs = outputUs;
     setESCSteeringInhibit(true);
@@ -71,7 +77,7 @@ bool canArm() {
 }
 void armed(AutomaticSteeringMode next) {
     mode = next; reason = "armed";
-    linePID.reset(); yawPID.reset(); haveFrame = false;
+    resetControllers(); haveFrame = false;
     outputUs = steeringCenterUs(); centerSteeringOutput();
     lastRequestedUs = outputUs;
     lastControlAt = millis(); lastPublishAt = millis() - 200;
@@ -81,7 +87,8 @@ float clamp(float value, float low, float high) { return value < low ? low : val
 }
 
 AutomaticSteeringState automaticSteeringState() {
-    return {mode, lineError, (int)std::lround(outputUs), lastMask, gyroEnabled, reason};
+    return {mode, lineError, (int)std::lround(outputUs), lastMask, gyroEnabled, reason,
+            lineAlgorithm, direction, lastRequestedUs};
 }
 bool submitYawRateFeedback(float value, uint32_t at, bool valid) {
     yawValid = valid && std::isfinite(value) && std::fabs(value) <= 500 && fresh(millis(), at, FEEDBACK_TIMEOUT_MS);
@@ -115,7 +122,8 @@ bool startExternalYawControl() {
 void stopAutomaticSteering(bool resetDrive) {
     if (mode == AutomaticSteeringMode::Off) return;
     mode = AutomaticSteeringMode::Off; reason = "disabled";
-    linePID.reset(); yawPID.reset(); outputUs = steeringCenterUs(); centerSteeringOutput();
+    resetControllers(); outputUs = steeringCenterUs(); centerSteeringOutput();
+    lastRequestedUs = outputUs;
     if (resetDrive) setESCSteeringInhibit(false);
     message(reason);
 }
@@ -152,26 +160,33 @@ void updateAutomaticSteering() {
         if (drive.pwm <= 1550) {
             yawPID.reset(); outputUs = steeringCenterUs(); centerSteeringOutput(); reason = "waiting_forward_motion"; return;
         }
-        float target = mode == AutomaticSteeringMode::Line ? lineError * LINE_TO_YAW_DEG_PER_SEC : targetYawRate;
+        float target = mode == AutomaticSteeringMode::Line ? -lineError * LINE_TO_YAW_DEG_PER_SEC : targetYawRate;
         correction = yawPID.compute(target, yawRate, dt, controlLow, controlHigh, actuatorReady);
     } else {
-        if (drive.pwm <= 1550) linePID.reset(); // Do not carry accumulated correction through a stop.
-        correction = linePID.compute(0, -lineError, dt, controlLow, controlHigh, drive.pwm > 1550 && actuatorReady);
+        if (drive.pwm <= 1550) pidController.reset(); // Basic steering also works with neutral throttle.
+        const LineControlContext context = {dt, controlLow, controlHigh, drive.pwm > 1550 && actuatorReady};
+        // User-requested basic response: steer opposite the measured tape offset.
+        // PWM direction calibration is applied later; the algorithms share this convention.
+        if (!activeLineController().compute(-lineError, context, correction)) {
+            fault("controller_invalid"); return;
+        }
     }
     const float requested = steeringCenterUs() + direction * correction;
     lastRequestedUs = requested;
     const float step = SLEW_US_PER_SEC * dt;
     outputUs = clamp(requested, outputUs - step, outputUs + step);
     if (!writeAutomaticSteeringPulse((int)std::lround(outputUs))) { fault("steering_output_failed"); return; }
-    reason = "tracking";
+    reason = mode == AutomaticSteeringMode::Line && !gyroEnabled && correction == 0
+        ? (std::fabs(outputUs - steeringCenterUs()) <= 1 ? "centered" : "centering") : "tracking";
 }
 
 void publishAutomaticSteering() {
     if (mode == AutomaticSteeringMode::Off || uint32_t(millis() - lastPublishAt) < 200) return;
     const char* name = mode == AutomaticSteeringMode::Line ? "LINE" : mode == AutomaticSteeringMode::ExternalYaw ? "YAW" : "FAULT";
     char line[128];
-    int n = snprintf(line, sizeof(line), "[FOLLOW] mode=%s e=%.3f pwm=%d mask=%u gyro=%d reason=%s\n",
-                     name, lineError, (int)std::lround(outputUs), (unsigned int)lastMask, gyroEnabled, reason);
+    int n = snprintf(line, sizeof(line), "[FOLLOW] mode=%s e=%.3f pwm=%d mask=%u gyro=%d algo=%s dir=%d reason=%s\n",
+                     name, lineError, (int)std::lround(outputUs), (unsigned int)lastMask, gyroEnabled,
+                     algorithmName(), direction, reason);
     if (n > 0 && n < (int)sizeof(line) && Serial.availableForWrite() >= n) {
         Serial.write((const uint8_t*)line, n); lastPublishAt = millis();
     }
@@ -188,8 +203,18 @@ bool handleAutomaticSteeringConfig(const char* packet) {
     if (mode != AutomaticSteeringMode::Off && mode != AutomaticSteeringMode::Fault) return false;
     bool result = false;
     switch (packet[0]) {
+    case 'C': case 'c':
+        if (sscanf(packet + 1, "%d %c", &x, &extra) == 1 && (x == 0 || x == 1)) {
+            lineAlgorithm = x == 0 ? LineControlAlgorithm::Basic : LineControlAlgorithm::PID;
+            gyroEnabled = false; resetControllers(); result = true;
+        }
+        break;
+    case 'F': case 'f':
+        if (sscanf(packet + 1, "%f,%f,%f %c", &a, &b, &c, &extra) == 3)
+            result = basicController.tune(a, b, c);
+        break;
     case 'P': case 'p':
-        if (sscanf(packet + 1, "%f,%f,%f %c", &a, &b, &c, &extra) == 3) result = linePID.tune(a, b, c);
+        if (sscanf(packet + 1, "%f,%f,%f %c", &a, &b, &c, &extra) == 3) result = pidController.tune(a, b, c);
         break;
     case 'Q': case 'q':
         if (sscanf(packet + 1, "%f,%f,%f %c", &a, &b, &c, &extra) == 3) result = yawPID.tune(a, b, c);

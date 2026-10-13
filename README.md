@@ -2,7 +2,7 @@
 目前主程序是 `PIO_RotationmitCamera`（ESP32 固件）和
 `PyScripts/Camera_mit_Rotation_dashboard.py`（Orange Pi 网页后台）。
 
-正常固件已加入八路巡线自动转向第一版：默认关闭，可在驱动台点击“开启巡线转向”或串口发送 `N1`，`N0` 关闭并归中。巡线控制使用 D12 舵机，继续上报车速以支持同步记录；丢线/反馈超时会停止并锁定动力。后续 MPU6050 和外部目标接口已预留，具体命令、保护和实测步骤见 [巡线自动转向说明](PIO_RotationmitCamera/docs/automatic_steering.md)。
+正常固件已有八路巡线转向：默认关闭，当前默认算法为基础反向响应（偏离居中区后固定小幅偏转、回中带滞回）。驱动台点击“开启巡线转向”或串口 `N1` 开启，`N0` 关闭并归中；`@C 0/1` 可切基础/PID，`@D +/-1` 标定 PWM 方向。使用 D12 舵机，继续上报车速；丢线/反馈超时会锁定动力。位置估计、控制算法、硬件输出已分层，MPU6050 和视觉目标接口保留，见 [巡线转向说明](PIO_RotationmitCamera/docs/automatic_steering.md)。
 
 MPU6050 硬件读数测试也在正常固件中：串口 `M` 进入专用输出，`Z` 静止标定陀螺 Z 零偏，`R` 退出。按当前接线使用 SDA16/SCL4/AD0=17/INT=5，XDA/XCL 不使用；其他可用引脚和接线说明见 [MPU6050 测试说明](PIO_RotationmitCamera/docs/mpu6050_debug.md)。M 模式锁定电调中位并暂停编码器上报，测试数据暂不接入舵机 PID。
 
@@ -150,6 +150,7 @@ python3 PyScripts/Camera_mit_Rotation_dashboard.py
 ```
 
 默认连接 `/dev/ttyUSB0`，可用环境变量 `ESP32_SERIAL_PORT` 改串口。
+Dashboard 运行时，同一 ESP32 串口只能由它读取；请关闭 PlatformIO/Arduino 串口监视器、巡线独立绘图脚本及重复的 Dashboard。终端查看 MPU 数据与网页三维测试二选一，网页已复用后台串口线程。Linux 上新增 pySerial 独占锁及 `TIOCEXCL` 保护，阻止后续普通程序再次打开端口；已打开的读者仍需先关闭。串口读取异常会清除未完成的数据帧、将编码器/姿态标记失效并关闭端口，避免无限重试旧句柄。解决占用或 USB 问题后重启 Dashboard。如果仍有断开，先用 `sudo fuser -v /dev/ttyUSB0` 检查占用，再用 `sudo dmesg -w` 检查是否实际发生 USB 拔插、重置；不要放宽数据校验来掩盖传输问题。
 网页端口仍为 5000。若未收到最近 1 秒内的有效新协议数据，开始记录会明确失败，
 页面速度显示 `--`，避免将旧状态误当作实时速度。
 

@@ -30,8 +30,10 @@ vm.runInContext(controls, context);
     await start;
     assert.ok(element('line-steering-message').innerText.includes('等待固件确认'));
     assert.ok(element('line-steering-status').innerText.includes('动力已锁定')); // No guessed success.
-    context.renderLineSteering({mode: 'LINE', fresh: true, reason: 'tracking', pwm: '1504', e: '0.143'});
+    context.renderLineSteering({mode: 'LINE', fresh: true, reason: 'tracking', pwm: '1504', e: '0.143', algo: 'BASIC', dir: '1'});
     assert.ok(element('line-steering-status').innerText.includes('巡线已开启'));
+    assert.ok(element('line-steering-status').innerText.includes('基础反向响应'));
+    assert.ok(element('line-steering-status').innerText.includes('方向 1'));
     assert.equal(element('line-steering-on').disabled, true);
     const stop = context.requestLineSteering(false);
     resolveRequest({ok: true, json: async () => ({message: '等待固件确认'})});

@@ -13,12 +13,13 @@ void setup() {
     initESC();
     if (initLineSensor()) {
         Serial.println("[LINE_READY] Eight-channel digital sensor enabled");
+        Serial.println(LineSensorConfig::LINE_LEVEL == HIGH ? "[LINE_POLARITY] black=HIGH" : "[LINE_POLARITY] black=LOW");
     } else {
         Serial.println("[LINE_ERROR] Invalid pins: AD0/AD1/AD2 require output-capable GPIO; GPIO35 is input-only");
     }
     Serial.println("[READY] Encoder stream v1; storage on Orange Pi");
     Serial.println("[HELP] L: line debug; G: line capture; V: servo debug; M: MPU6050 debug; O: IMU 3D; R: normal; E: emergency stop");
-    Serial.println("[FOLLOW_HELP] N1: line steering ON; N0: OFF; @P kp,ki,kd; @D +/-1; @S status (newline required)");
+    Serial.println("[FOLLOW_HELP] N1: line steering ON; N0: OFF; @C0 basic/@C1 PID; @F offset,enter,exit; @D +/-1; @S status");
 }
 
 void loop() {

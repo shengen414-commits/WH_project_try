@@ -27,6 +27,8 @@ assert.ok(Math.abs(turned[0])<1e-12 && Math.abs(turned[1]-1)<1e-12);
                 return route.fulfill({json:{fresh,serial_open:true,serial_error:null,age_ms:fresh?12:800,
                     quaternion:[Math.cos(angle/2),0,0,Math.sin(angle/2)],angles:[0,0,angle*180/Math.PI],
                     message:fresh?'三维数据接收中':'数据已断流',
+                    count:100, diagnostics:{invalid_frames:1,consecutive_invalid:0,last_invalid_age_ms:2000,
+                        last_invalid:{reason:'ax 不是数字',raw:'[IMU],100,0�,0,1,0,0,0,25,0,NO'}},
                     sample:{acceleration:[0,0,1],gyro:[0,0,20],corrected_z:20,temperature:27,calibration:'OK'}}});
             }
             if (url.pathname === '/imu/command') {
@@ -41,6 +43,10 @@ assert.ok(Math.abs(turned[0])<1e-12 && Math.abs(turned[1]-1)<1e-12);
         });
         await page.goto('http://imu.test/imu');
         await page.waitForFunction(()=>document.getElementById('connection').textContent==='实时姿态');
+        assert.equal(await page.locator('#invalid-count').innerText(),'1');
+        await page.locator('.imu-diagnostics summary').click();
+        assert.ok((await page.locator('#invalid-reason').innerText()).includes('ax 不是数字'));
+        assert.ok((await page.locator('#invalid-raw').innerText()).includes('0�'));
         const initial = await page.locator('canvas').evaluate(c=>c.toDataURL());
         angle = .7;
         await page.waitForFunction(()=>document.getElementById('yaw').textContent==='40.1');
@@ -63,6 +69,6 @@ assert.ok(Math.abs(turned[0])<1e-12 && Math.abs(turned[1]-1)<1e-12);
         assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
         assert.ok(requests>4 && maxInflight===1);
         assert.deepEqual(errors,[]);
-        console.log('PASS: quaternion axes, live rotation, stale freeze, command errors, bounded polling, mobile layout');
+        console.log('PASS: quaternion axes, live rotation, stale freeze, frame diagnostics, command errors, bounded polling, mobile layout');
     } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

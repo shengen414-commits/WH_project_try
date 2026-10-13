@@ -31,7 +31,7 @@ void endSteeringDebug() { steeringDebug = false; }
 void handleSteeringCommand(char value) { steeringCommands += value; }
 unsigned long millis() { return clockMs; }
 long readEncoderPosition() { return -42; }
-LineSensorFrame sensorFrame = {0, 130, 231, 24};
+LineSensorFrame sensorFrame = {0, 130, 24, 24};
 bool readLineSensorFrame(LineSensorFrame &frame) { frame = sensorFrame; return true; }
 void handleESCCommand(char cmd, int pwm) {
     commands.emplace_back(cmd, pwm);
@@ -80,7 +80,7 @@ int main() {
     publishEncoder();
     assert(Serial.output.empty());
     publishLineSensor();
-    assert(Serial.output == "[LINE_DBG] raw=11100111 line=00011000\n");
+    assert(Serial.output == "[LINE_DBG] raw=00011000 line=00011000\n");
     Serial.output.clear();
     ++sensorFrame.sequence;
     clockMs = 140;
@@ -90,7 +90,7 @@ int main() {
     publishEncoder();
     assert(Serial.output.empty());
     publishLineSensor();
-    assert(Serial.output == "[LINE],1,130,231,24\n");
+    assert(Serial.output == "[LINE],1,130,24,24\n");
     Serial.output.clear();
     feed("R\n");
     publishEncoder();

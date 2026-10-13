@@ -14,7 +14,7 @@ FakeSerial Serial;
 unsigned long clockMs = 10000;
 bool rcHigh = false, servoAttachSucceeds = true, frameReady = true;
 std::map<int, int> pwmOutputs;
-LineSensorFrame frame = {1, 10000, 0, 0x18};
+LineSensorFrame frame = {1, 10000, 0x18, 0x18};
 unsigned long clockUs = 10000000;
 unsigned long millis() { return clockMs; }
 unsigned long micros() { return clockUs; }
@@ -28,7 +28,7 @@ void handleMPU6050DebugCommand(char) {}
 void feed(const char* value) { Serial.input += value; pollSerialCommands(); }
 void cycle(uint8_t mask, unsigned long dt = 10) {
     clockMs += dt; clockUs += dt * 1000;
-    frame.timeMs = clockMs; ++frame.sequence; frame.lineMask = mask;
+    frame.timeMs = clockMs; ++frame.sequence; frame.rawMask = mask; frame.lineMask = mask;
     updateESC(); updateAutomaticSteering();
 }
 void rcFrame(int width) {
@@ -62,18 +62,25 @@ int main() {
     assert(!handleAutomaticSteeringConfig("W1600,1500,1550"));
     feed("N1\n");
     assert(automaticSteeringState().mode == AutomaticSteeringMode::Line);
+    assert(automaticSteeringState().algorithm == LineControlAlgorithm::Basic);
     updateAutomaticSteering(); // A cached frame earlier than arming remains usable.
     assert(pwmOutputs[12] == 1500);
     feed("T1600\n");
     const int before = pwmOutputs[12]; cycle(0x80);
-    assert(pwmOutputs[12] > before && pwmOutputs[12] - before <= 2); // Slew limit.
+    assert(pwmOutputs[12] < before && before - pwmOutputs[12] <= 2); // Opposite response, slew limit.
     const int stable = pwmOutputs[12]; updateAutomaticSteering();
     assert(pwmOutputs[12] == stable); // Do not recompute cached samples.
     for (int i = 0; i < 40; ++i) cycle(0x80);
-    assert(pwmOutputs[12] <= 1550 && pwmOutputs[12] > 1500);
+    assert(pwmOutputs[12] == 1460); // Basic mode uses a fixed 40us correction.
+    for (int i = 0; i < 40; ++i) cycle(0x08); // CH4 alone is in the center zone.
+    assert(pwmOutputs[12] == 1500);
+    for (int i = 0; i < 40; ++i) cycle(0x10); // CH5 alone is also in the center zone.
+    assert(pwmOutputs[12] == 1500);
     Serial.output.clear(); publishEncoder(); publishLineSensor();
     assert(Serial.output.find("[ENC]") != std::string::npos && Serial.output.find("[LINE]") != std::string::npos);
     assert(!handleAutomaticSteeringConfig("P70,0,0")); // No gain changes in motion.
+    assert(!handleAutomaticSteeringConfig("C1"));
+    assert(!handleAutomaticSteeringConfig("F45,0.25,0.16"));
     cycle(0);
     assert(automaticSteeringState().mode == AutomaticSteeringMode::Fault);
     assert(pwmOutputs[12] == 1500 && pwmOutputs[14] == 1500);
@@ -85,7 +92,7 @@ int main() {
     assert(automaticSteeringState().mode == AutomaticSteeringMode::Off && pwmOutputs[14] == 1500);
     feed("@D -1\n@P 35,0,0\nN1\n");
     cycle(0x80);
-    assert(pwmOutputs[12] < 1500);
+    assert(pwmOutputs[12] > 1500);
     feed("L\n");
     assert(automaticSteeringState().mode == AutomaticSteeringMode::Off && !serialNormalMode());
     feed("V\nN1\n");
@@ -130,4 +137,11 @@ int main() {
     clockMs = 20;
     assert(submitTargetYawRate(0, 0xfffffff0UL, true)); // Timestamp freshness works across wrap.
     assert(!submitYawRateFeedback(0, uint32_t(clockMs - 101), true));
+    // New parameter packets remain separate from V-mode C and existing T/B/N commands.
+    feed("N0\nR\n@C 1\n@P 20,0,0\n");
+    assert(automaticSteeringState().algorithm == LineControlAlgorithm::PID);
+    feed("@C 0\n@F 45,0.25,0.16\n");
+    assert(automaticSteeringState().algorithm == LineControlAlgorithm::Basic);
+    assert(!handleAutomaticSteeringConfig("C2"));
+    assert(!handleAutomaticSteeringConfig("F-10,0.22,0.16"));
 }

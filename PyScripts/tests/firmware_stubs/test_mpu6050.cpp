@@ -18,7 +18,7 @@ unsigned long millis() { return clockMs; }
 unsigned long micros() { return clockMs * 1000; }
 int digitalRead(int) { return LOW; }
 long readEncoderPosition() { return 42; }
-bool readLineSensorFrame(LineSensorFrame& frame) { frame = {1, (uint32_t)clockMs, 0, 0x18}; return true; }
+bool readLineSensorFrame(LineSensorFrame& frame) { frame = {1, (uint32_t)clockMs, 0x18, 0x18}; return true; }
 void feed(const char* text) { Serial.input += text; pollSerialCommands(); }
 void word(int offset, int16_t value) {
     Wire.sample[offset] = uint16_t(value) >> 8;

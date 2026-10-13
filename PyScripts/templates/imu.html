@@ -40,8 +40,14 @@
     </section>
     <p id="message" role="status">先烧录新版 esp32dev 固件，再启动 Dashboard。无需另开串口程序。</p>
     <p id="data-message" role="status"></p>
+    <details class="readout imu-diagnostics">
+        <summary>串口帧诊断 · <span id="invalid-count">0</span> 个无效帧</summary>
+        <p id="invalid-reason">尚未检测到无效帧</p>
+        <pre id="invalid-raw"></pre>
+        <p>记录最近一条被拒绝的原始帧。快速晃动导致重力校正暂时停用，与串口帧无效是不同的情况。无效帧仍会被丢弃，不放宽量程或用零值替代。</p>
+    </details>
     <p class="note">进入测试时停止自动转向，保持电调中立，暂停编码器上报；记录期间不能启动测试。关闭页面不会退出模式，请点击退出或输入 R。偏航为陀螺仪积分值，会漂移；姿态归零只改变显示参考，Z 标定只修正 Z 轴零偏。此页面不测位移、不启用舵机 PID。</p>
 </main>
-<script src="{{ url_for('static', filename='js/imu_3d.js') }}"></script>
+<script src="{{ url_for('static', filename='js/imu_3d.js') }}?v=frame-diagnostics-2"></script>
 </body>
 </html>

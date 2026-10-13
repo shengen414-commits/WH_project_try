@@ -138,6 +138,7 @@
         </div>
         <div id="line-steering-status" class="sync-hint" role="status">巡线转向：等待固件状态。先归中油门再开启；丢线或反馈超时会停止动力。</div>
         <div id="line-steering-message" class="sync-hint" role="status"></div>
+        <div class="sync-hint">默认基础反向响应：CH1 在车左侧，CH4/CH5 为居中区；偏离后固定小幅转向。PWM 左右方向需静止测试确认。</div>
         <div class="sync-buttons"><a href="/imu">MPU6050 三维姿态测试 →</a></div>
 
         <div style="margin-top: 20px; gap: 20px; display: flex; justify-content: center;">
@@ -148,7 +149,7 @@
 
     </div>
 
-    <script src="{{ url_for('static', filename='js/main.js') }}?v=line-steering-1"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}?v=line-basic-2"></script>
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-4"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=1"></script>
 </body>

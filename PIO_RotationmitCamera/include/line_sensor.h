@@ -10,8 +10,9 @@ constexpr uint8_t AD0_PIN = 13;
 constexpr uint8_t OUT_PIN = 34;
 constexpr uint32_t SETTLE_US = 50;
 constexpr uint32_t SCAN_INTERVAL_US = 10000;
-// Verify on the real track. Raw values remain available regardless of polarity.
-constexpr uint8_t LINE_LEVEL = LOW;
+// The recorded single-tape sweep had sparse HIGH bits. Keep raw bits available
+// for installation checks; set LOW here only if a new raw-level test confirms it.
+constexpr uint8_t LINE_LEVEL = HIGH;
 }
 
 struct LineSensorFrame {
