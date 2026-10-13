@@ -2,6 +2,69 @@
 目前主程序是 `PIO_RotationmitCamera`（ESP32 固件）和
 `PyScripts/Camera_mit_Rotation_dashboard.py`（Orange Pi 网页后台）。
 
+## 车速＋扫描阀同步记录（第一版）
+
+启动入口仍为小车后台，网页仍使用 5000 端口：
+
+```bash
+python3 PyScripts/Camera_mit_Rotation_dashboard.py
+```
+
+启动本身不会连接扫描阀或修改网口。小车页面新增“车速＋扫描阀同步记录”区，
+通过后台的 `SyncRecorder` 使用同一个 `MPS4264Controller`。
+不要同时运行 `python3 -m mps4264_app.main` 控制同一设备或占用同一个 UDP 端口。
+
+操作顺序：
+
+1. ESP32 使用正常 `esp32dev` 固件，保持串口正常模式（`R`）；舵机 demo 或暂停编码器的巡线调试模式不能用于车速同步。
+2. 在同步区域核对扫描阀 IP、Orange Pi 网口 CIDR（默认 `191.30.90.82/16`）和网口名（默认 `eth0`），点击连接。
+   默认连接时检查并添加网口地址；普通用户需要先执行 `sudo -v`。已配置网络可取消该复选框。
+   无权限或网络初始化失败会明确返回错误，其他小车功能仍可用。
+3. 点击“读取设备信息”，核对设备版本、参数和 UDP 目标。
+   若设备尚未配置为当前 Orange Pi 的 UDP 二进制输出，点击“设置 UDP 并保存”，
+   等待返回后给扫描阀断电重启，再点“已重启，重新连接”，重新读取信息。
+   该设置包含 `SET TRIG 0`；本版没有外部硬件触发。
+4. 设置 RATE、FPS 和扫描组后点“发送采样参数”。默认 RATE=100 Hz、FPS=0（直到 STOP）、64 通道。
+   参数只是页面初始输入值，必须发送或从设备读取，才会成为本次记录的实际配置。
+5. 确认编码器就绪，点击“开始同步记录”。先监听压力 UDP，再记录车速，最后发送 SCAN。
+   收到双方数据后显示“正在记录”；记录按钮不改变油门、不启动相机，车速原有独立记录可以同时使用。
+6. 点“停止并保存”；也可达到时长上限自动结束，有限 FPS 完成后自动收尾。
+   STOP 未确认时显示“重试停止并保存”，压力文件仍保持打开，禁止开始新记录或更改设备参数。
+   恢复设备通信后重试停止。编码器中断、压力长时间无数据或写盘错误会自动收尾并显示失败，保留已有数据。
+
+每次实验位于 `Car_Records/Sync_Records/唯一实验编号/`：
+
+| 文件 | 内容 |
+|---|---|
+| `speed.csv`、`speed.csv.meta.json` | 原始脉冲、ESP32 时间/序号、主机单调时间、滤波速度、控制状态和保存统计 |
+| `pressure.dat` | 压力原始二进制帧 |
+| `pressure.index.csv` | 每帧对应的主机接收时间和设备帧号/时间 |
+| `pressure.meta.json`、`pressure.csv` | 扫描参数、接收统计和转换后的压力数据 |
+| `session.json` | 共同时间起点、开始/停止事件、第一条数据时间、双方状态、失败原因和匹配统计 |
+| `synchronized.csv` | 每个压力帧匹配的车速、相对时间、匹配时间差和有效性标记 |
+
+压力 CSV 与索引按记录顺序关联并校验帧号；不会用字典合并而丢掉重复帧。
+同步 CSV 采用主机单调时间的最近邻匹配，默认容差 30 ms，可在页面修改。
+超出速度覆盖、超出容差或跨设备重启边界时 `match_valid=0`，速度值留空。
+第一版 `speed_rpm` / `speed_kmh` 使用现有滑动窗口及 EMA 的滤波速度，存在滤波延迟；
+原始 `Position` / `Time_ms` 保留，可用于后续离线速度计算。
+USB、UDP、批量数据和线程调度延迟仍存在，本版不能证明采样时刻精确同步。
+时间戳中的 ns 是存储单位，不代表纳秒级测量精度。
+
+Linux/Orange Pi 的 Docker 部署使用单独的 host 网络配置，避免原 bridge 配置收不到扫描阀 UDP：
+
+```bash
+# 如果原 Compose 容器正在运行，先停掉它，避免同时占用相机/串口。
+docker compose down
+docker compose -f docker-compose.sync.yml up -d --build
+docker compose -f docker-compose.sync.yml logs -f wh-dashboard
+```
+
+该配置给容器 NET_ADMIN 用于添加主机网口地址，镜像已加入 iproute2。
+设备路径和网口名须按实际 Orange Pi 核对。Windows Docker Desktop 不适用本机硬件/host 网口部署步骤。
+其他部署方式如已在主机配置网络，可以自行去掉 NET_ADMIN 并取消网页的网口初始化复选框。
+本功能仍用于现有的 MPS4264 Gen1 协议；新型号需要先确认协议。
+
 ## 无 ESP32 SD 卡版本
 
 ESP32 负责编码器中断计数、电调 PWM 输出、遥控接管和失联保护。

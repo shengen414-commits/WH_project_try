@@ -65,6 +65,8 @@ class MPS4264Controller:
         self._last_frame_number: int | None = None
         self._last_frame: PressureFrame | None = None
         self._last_receive_unix_ns: int | None = None
+        self._first_receive_monotonic_ns: int | None = None
+        self._first_receive_unix_ns: int | None = None
         self._last_error: str | None = None
         self._status_epoch = uuid.uuid4().hex
         self._status_revision = 0
@@ -312,6 +314,8 @@ class MPS4264Controller:
             self._last_frame_number = None
             self._last_frame = None
             self._last_receive_unix_ns = None
+            self._first_receive_monotonic_ns = None
+            self._first_receive_unix_ns = None
             self._last_error = None
             self._capture_stop.clear()
             self._capture_thread = threading.Thread(target=self._receive_loop,
@@ -361,6 +365,9 @@ class MPS4264Controller:
                                 frame.frame_number > self._last_frame_number + 1):
                             self._frame_gaps += frame.frame_number - self._last_frame_number - 1
                         self._frames += 1
+                        if self._first_receive_monotonic_ns is None:
+                            self._first_receive_monotonic_ns = monotonic_ns
+                            self._first_receive_unix_ns = unix_ns
                         self._last_frame_number = frame.frame_number
                         self._last_frame = frame
                         self._last_receive_unix_ns = unix_ns
@@ -555,6 +562,8 @@ class MPS4264Controller:
                 "bad_datagrams": self._bad_datagrams,
                 "foreign_datagrams": self._foreign_datagrams,
                 "last_receive_unix_ns": self._last_receive_unix_ns,
+                "first_receive_monotonic_ns": self._first_receive_monotonic_ns,
+                "first_receive_unix_ns": self._first_receive_unix_ns,
                 "last_error": self._last_error,
                 "no_udp_warning": no_udp_warning,
                 "last_frame": ({

@@ -69,3 +69,14 @@ button:disabled { background: #555; cursor: not-allowed; transform: none; }
 .numeric-boost-switch { margin-left: 8px; }
 
 @keyframes flash { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+
+.sync-panel { max-width: 1120px; margin: 24px auto; padding: 22px; background: #1a1a1a; border: 1px solid #345; border-radius: 12px; color: #ddd; }
+.sync-panel h2 { color: #00aaff; margin-top: 0; }
+.sync-fields { display: flex; flex-wrap: wrap; align-items: end; gap: 14px; margin: 18px 0; }
+.sync-fields label { display: flex; flex-direction: column; gap: 6px; text-align: left; }
+.sync-fields input, .sync-fields select { padding: 8px; background: #252525; color: #eee; border: 1px solid #666; border-radius: 5px; max-width: 240px; }
+.sync-buttons { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
+.sync-panel button { font-size: 14px; padding: 10px 16px; }
+.sync-panel button:disabled { opacity: .5; cursor: default; }
+#sync-status, #sync-message { margin-top: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+#sync-device-info { text-align: left; max-height: 240px; overflow: auto; white-space: pre-wrap; }

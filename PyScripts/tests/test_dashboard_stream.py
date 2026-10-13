@@ -80,6 +80,15 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.client.get('/start_record').status_code, 409)
         self.assertFalse(self.client.get('/sensor_stats').get_json()['encoder_fresh'])
 
+    def test_dashboard_exposes_sync_panel_without_connecting_a_device(self):
+        response = self.client.get('/')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('sync-start', response.get_data(as_text=True))
+        self.assertIn('js/sync_recording.js', response.get_data(as_text=True))
+        status = self.client.get('/sync_record/status')
+        self.assertEqual(status.status_code, 200)
+        self.assertFalse(status.get_json()['pressure']['connected'])
+
     def test_multi_source_and_speed_record_simultaneously_without_sd_commands(self):
         camera = Mock(is_active=True, available=True, record_error=None)
         camera.record_done = threading.Event()

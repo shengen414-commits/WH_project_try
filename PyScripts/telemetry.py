@@ -8,7 +8,7 @@ import time
 from collections import deque
 from datetime import datetime
 
-FIELDS = ["Time_ms", "Position", "position", "sequence", "device_epoch", "unix_time_ns",
+FIELDS = ["Time_ms", "Position", "position", "sequence", "device_epoch", "unix_time_ns", "host_receive_monotonic_ns",
           "iso_time", "elapsed_ms", "speed_pps", "rpm", "kmh", "throttle",
           "mode", "sequence_gaps", "queue_drops"]
 
@@ -23,7 +23,7 @@ class EncoderStream:
         self.sequence_gaps = 0
         self.device_epoch = 0
 
-    def decode(self, line, received_ns, throttle=1500, mode="WEB"):
+    def decode(self, line, received_ns, throttle=1500, mode="WEB", received_monotonic_ns=None):
         if not line.startswith("[ENC],"):
             return None
         try:
@@ -65,6 +65,7 @@ class EncoderStream:
         rpm = self.speed / self.ppr * 60.0
         return {"Time_ms": ms, "Position": pos, "position": pos, "sequence": seq,
                 "device_epoch": self.device_epoch, "unix_time_ns": received_ns,
+                "host_receive_monotonic_ns": received_monotonic_ns if received_monotonic_ns is not None else time.monotonic_ns(),
                 "iso_time": datetime.fromtimestamp(received_ns / 1e9).astimezone().isoformat(timespec="milliseconds"),
                 "speed_pps": self.speed, "rpm": rpm, "kmh": abs(rpm) * self.kmh_per_rpm,
                 "throttle": throttle, "mode": mode, "sequence_gaps": self.sequence_gaps}
@@ -75,7 +76,8 @@ class CsvRecorder:
     def __init__(self, path, duration_sec=600, queue_size=4096):
         self.path = str(path)
         self.started_ns = time.time_ns()
-        self.started_mono = time.monotonic()
+        self.started_mono_ns = time.monotonic_ns()
+        self.started_mono = self.started_mono_ns / 1e9
         self.duration_sec = duration_sec
         self.queue = queue.Queue(maxsize=queue_size)
         self.lock = threading.Lock()
@@ -85,6 +87,7 @@ class CsvRecorder:
         self.queue_drops = 0
         self.stop_reason = None
         self.stopped_ns = None
+        self.stopped_mono_ns = None
         self.first_sequence_gaps = None
         self.last_sequence_gaps = None
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
@@ -108,9 +111,9 @@ class CsvRecorder:
                 self._stop_locked("max_duration")
                 return
             row = dict(sample)
-            if row["unix_time_ns"] < self.started_ns:
+            if row["host_receive_monotonic_ns"] < self.started_mono_ns:
                 return
-            row["elapsed_ms"] = (row["unix_time_ns"] - self.started_ns) / 1e6
+            row["elapsed_ms"] = (row["host_receive_monotonic_ns"] - self.started_mono_ns) / 1e6
             row["queue_drops"] = self.queue_drops
             if self.first_sequence_gaps is None:
                 self.first_sequence_gaps = row["sequence_gaps"]
@@ -125,6 +128,7 @@ class CsvRecorder:
             self.active = False
             self.stop_reason = reason
             self.stopped_ns = time.time_ns()
+            self.stopped_mono_ns = time.monotonic_ns()
 
     def stop(self, reason="manual_stop"):
         with self.lock:
@@ -134,11 +138,13 @@ class CsvRecorder:
         with self.lock:
             return {"active": self.active, "file_path": self.path,
                     "started_at_ns": self.started_ns, "stopped_at_ns": self.stopped_ns,
+                    "started_monotonic_ns": self.started_mono_ns,
+                    "stopped_monotonic_ns": self.stopped_mono_ns,
                     "sample_count": self.sample_count, "queue_drops": self.queue_drops,
                     "sequence_gaps": (self.last_sequence_gaps or 0) - (self.first_sequence_gaps or 0),
                     "stop_reason": self.stop_reason, "finalized": self.done.is_set(),
                     "elapsed_sec": min(time.monotonic() - self.started_mono, self.duration_sec)
-                    if self.active else (self.stopped_ns - self.started_ns) / 1e9}
+                    if self.active else (self.stopped_mono_ns - self.started_mono_ns) / 1e9}
 
     def _write(self):
         last_flush = time.monotonic()

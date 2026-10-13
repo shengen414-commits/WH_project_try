@@ -8,6 +8,7 @@ WORKDIR /app
 
 # OpenCV on slim images usually needs a few runtime libraries.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    iproute2 \
     libgl1 \
     libglib2.0-0 \
     libsm6 \

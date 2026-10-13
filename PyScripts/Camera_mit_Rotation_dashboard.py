@@ -10,11 +10,20 @@ import re
 import numpy as np
 from collections import deque
 from datetime import datetime
+from pathlib import Path
+import sys
+# Direct script execution must also resolve the sibling mps4264_app package.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from flask import Flask, Response, render_template, jsonify, request
 try:
     from .telemetry import EncoderStream, CsvRecorder
+    from .sync_recording import SyncRecorder
+    from .sync_web import register_sync_routes
 except ImportError:
     from telemetry import EncoderStream, CsvRecorder
+    from sync_recording import SyncRecorder
+    from sync_web import register_sync_routes
 
 # 确保录像保存根目录存在
 SAVE_DIR = "Car_Records"
@@ -109,6 +118,9 @@ def write_esp32_boost(pwm):
 def encoder_ready():
     return bool(esp32_serial and esp32_serial.is_open and
                 time.monotonic() - sensor_state.get("last_encoder_rx_mono", 0) < ENCODER_FRESH_SEC)
+
+
+sync_coordinator = SyncRecorder(SAVE_DIR, encoder_ready, speed_calibration={'ppr': PPR, 'kmh_per_rpm': KMH_PER_RPM})
 
 
 def speed_record_public_state():
@@ -327,11 +339,12 @@ def read_esp32_data():
                 pending = bytearray(remainder)
                 line = raw_line.decode('utf-8', errors='ignore').strip()
                 now_ns = time.time_ns()
+                now_mono_ns = time.monotonic_ns()
                 sensor_state["serial_error"] = None
                 sensor_state["last_serial_line"] = line
                 sensor_state["last_serial_rx_wall"] = now_ns / 1e9
                 sensor_state["serial_line_count"] += 1
-                sample = encoder_stream.decode(line, now_ns, sensor_state["throttle"], sensor_state["mode"])
+                sample = encoder_stream.decode(line, now_ns, sensor_state["throttle"], sensor_state["mode"], now_mono_ns)
                 if sample is not None:
                     sensor_state.update({"position": sample["Position"], "speed_pps": sample["speed_pps"],
                                          "last_time_ms": sample["Time_ms"], "last_pos": sample["Position"],
@@ -341,6 +354,7 @@ def read_esp32_data():
                         for recorder in (speed_recorder, session_recorder):
                             if recorder is not None:
                                 recorder.submit(sample)
+                    sync_coordinator.submit(sample)
                 else:
                     match = drive_pattern.search(line)
                     if match:
@@ -587,6 +601,7 @@ class HighSpeedCamera:
 # Flask 逻辑
 # =================================================================
 app = Flask(__name__)
+register_sync_routes(app, sync_coordinator)
 
 cam_left = HighSpeedCamera(src=0, name="Left", fps=210)
 cam_right = HighSpeedCamera(src=2, name="Right", fps=210)
@@ -903,4 +918,8 @@ def e_stop():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    try:
+        app.run(host='0.0.0.0', port=5000, threaded=True, use_reloader=False)
+    finally:
+        if not sync_coordinator.shutdown():
+            print('同步记录未能完成退出收尾，请检查扫描阀 STOP 状态及保留的原始文件')
