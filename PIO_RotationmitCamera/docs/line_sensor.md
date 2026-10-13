@@ -131,7 +131,7 @@ python PyScripts/line_debug_plot.py --csv Car_Records/Line_Debug/实际文件名
 3. 应先看到 `[LINE_READY]`，随后持续出现 `[LINE]` 和 `[ENC]`。
 4. 依次将每个探头放到黑线和白底上，检查对应位变化，确认通道顺序和 `LINE_LEVEL`。
 
-本模块实现巡线传感器读取和串口上报。当前 Orange Pi 的 EncoderStream 只解析 `[ENC]`，会忽略 `[LINE]`；网页显示、CSV 保存巡线数据尚未接入。本代码也未加入自动转向或 PID 控制。
+本模块实现巡线传感器读取和串口上报。当前 Orange Pi 的 EncoderStream 只解析 `[ENC]`，会忽略 `[LINE]`；CSV 保存巡线原始数据尚未接入。正常固件已有独立的 [巡线自动转向模块](automatic_steering.md)，使用本模块的完整帧计算偏差和控制舵机；网页显示 `[FOLLOW]` 状态，默认不自动开启。
 
 资料：
 - https://www.yahboom.net/public/upload/upload-html/1763523992/Data%20reading.html

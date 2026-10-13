@@ -35,6 +35,7 @@ class DashboardTests(unittest.TestCase):
         self.app.encoder_stream = EncoderStream()
         self.app.sensor_state.update({'last_encoder_rx_mono': time.monotonic(), 'throttle': 1500, 'mode': 'WEB'})
         self.app.sensor_state.update({'last_serial_line': '', 'last_serial_rx_mono': 0, 'serial_error': None})
+        self.app.sensor_state.update(steering={}, last_steering_rx_mono=0)
         self.app.esp32_serial = Mock(is_open=True, port='/dev/ttyUSB0')
         self.app.sync_coordinator.state = {'active': False, 'phase': 'idle', 'events': []}
         self.app.record_workflow_active.clear()
@@ -114,6 +115,13 @@ class DashboardTests(unittest.TestCase):
         self.assertTrue(state['encoder_fresh'])
         self.assertIsNone(state['encoder']['debug_mode'])
 
+    def test_mpu_debug_explains_paused_encoder(self):
+        self.app.sensor_state.update(last_encoder_rx_mono=0)
+        self.receive([b'[MPU] a=0.00,0.00,1.00 w=0.0,0.0,0.0 T=25.0 z=0.0 cal=NO\n'])
+        state = self.client.get('/dashboard/status').get_json()['sync']
+        self.assertFalse(state['encoder_fresh'])
+        self.assertEqual(state['encoder']['debug_mode'], 'imu')
+
     def test_normal_command_requires_serial_and_no_active_capture(self):
         self.app.esp32_serial.is_open = False
         self.assertEqual(self.client.post('/sync_record/encoder/normal').status_code, 409)
@@ -130,6 +138,31 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn('USB disconnected', response.get_json()['error'])
         self.assertFalse(self.app.sync_coordinator.operation_lock.locked())
+
+    def test_line_steering_request_waits_for_firmware_confirmation_and_keeps_encoder(self):
+        response = self.client.post('/steering/line', json={'enabled': True})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['status'], 'requested')
+        self.app.esp32_serial.write.assert_called_with(b'N1\n')
+        self.assertNotIn('mode', self.client.get('/sensor_stats').get_json()['steering'])
+        self.receive([b'[FOLLOW] mode=LINE e=0.143 pwm=1504 mask=16 gyro=0 reason=tracking\n[ENC],0,10,0\n'])
+        state = self.client.get('/sensor_stats').get_json()
+        self.assertTrue(state['encoder_fresh'])
+        self.assertEqual(state['steering']['mode'], 'LINE')
+        self.assertTrue(state['steering']['fresh'])
+        self.assertEqual(self.client.post('/steering/line', json={'enabled': False}).status_code, 200)
+        self.app.esp32_serial.write.assert_called_with(b'N0\n')
+
+    def test_line_steering_requires_idle_controls_and_valid_payload(self):
+        for payload in ({}, {'enabled': 'true'}, []):
+            self.assertEqual(self.client.post('/steering/line', json=payload).status_code, 400)
+        self.app.sensor_state['throttle'] = 1600
+        self.assertEqual(self.client.post('/steering/line', json={'enabled': True}).status_code, 409)
+        self.assertEqual(self.client.post('/steering/line', json={'enabled': False}).status_code, 200)
+        self.app.sensor_state.update(throttle=1500, mode='RC')
+        self.assertEqual(self.client.post('/steering/line', json={'enabled': True}).status_code, 409)
+        self.app.esp32_serial.is_open = False
+        self.assertEqual(self.client.post('/steering/line', json={'enabled': False}).status_code, 409)
 
     def test_multi_source_and_speed_record_simultaneously_without_sd_commands(self):
         camera = Mock(is_active=True, available=True, record_error=None)

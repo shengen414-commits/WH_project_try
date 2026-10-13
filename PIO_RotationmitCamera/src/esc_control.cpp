@@ -6,6 +6,8 @@ const int escPin = 14; // 设定电调连接的 GPIO 引脚
 const int rcPin = 27;  // 🚀 新增：遥控器接收机信号线接入 D27
 bool diagnosticsMuted = false;
 bool debugHoldNeutral = false;
+bool steeringHoldNeutral = false;
+int appliedEscPwm = 1500;
 Servo myESC;           // 实例化 Servo 对象
 
 // --- 遥控器信号读取专用变量 (必须加 volatile 防止被编译器优化) ---
@@ -67,6 +69,7 @@ void forceEscNeutralOutput()
     pendingEscPwm = ESC_NEUTRAL_PWM;
     appliedEscDirection = 0;
     myESC.writeMicroseconds(ESC_NEUTRAL_PWM);
+    appliedEscPwm = ESC_NEUTRAL_PWM;
 }
 
 void cancelESCBoost()
@@ -79,7 +82,7 @@ void cancelESCBoost()
 
 void requestEscOutput(int pwmValue)
 {
-    if (debugHoldNeutral) { forceEscNeutralOutput(); return; }
+    if (debugHoldNeutral || steeringHoldNeutral) { forceEscNeutralOutput(); return; }
     int targetPwm = constrain(pwmValue, 1000, 2000);
     int targetDirection = getEscDirection(targetPwm);
     unsigned long now = millis();
@@ -95,6 +98,7 @@ void requestEscOutput(int pwmValue)
         if (now < directionChangeReleaseAt)
         {
             myESC.writeMicroseconds(ESC_NEUTRAL_PWM);
+            appliedEscPwm = ESC_NEUTRAL_PWM;
             return;
         }
         directionChangePending = false;
@@ -107,10 +111,12 @@ void requestEscOutput(int pwmValue)
         directionChangeReleaseAt = now + ESC_DIRECTION_CHANGE_NEUTRAL_MS;
         appliedEscDirection = 0;
         myESC.writeMicroseconds(ESC_NEUTRAL_PWM);
+        appliedEscPwm = ESC_NEUTRAL_PWM;
         return;
     }
 
     myESC.writeMicroseconds(targetPwm);
+    appliedEscPwm = targetPwm;
     appliedEscDirection = targetDirection;
 }
 
@@ -191,6 +197,21 @@ void setESCDebugState(bool muteDiagnostics, bool holdNeutral)
     debugHoldNeutral = holdNeutral;
 }
 
+ESCSteeringState escSteeringState() {
+    return {appliedEscPwm, currentMode == RC_MODE, millis() < estopLatchedUntil, debugHoldNeutral};
+}
+void setESCSteeringInhibit(bool holdNeutral) {
+    // Always clear old throttle/boost, including explicit cancellation/rearming.
+    steeringHoldNeutral = holdNeutral;
+    webThrottle = ESC_NEUTRAL_PWM;
+    currentMode = WEB_MODE;
+    lastWebCommandTime = 0;
+    rcActiveCount = 0;
+    newRcData = false;
+    cancelESCBoost();
+    forceEscNeutralOutput();
+}
+
 // --- 初始化函数 ---
 void initESC()
 {
@@ -217,7 +238,7 @@ void initESC()
 // --- 控制函数 ---
 void setESCThrottle(int pwmValue)
 {
-    if (debugHoldNeutral) { forceEscNeutralOutput(); return; }
+    if (debugHoldNeutral || steeringHoldNeutral) { forceEscNeutralOutput(); return; }
     int requestedPwm = constrain(pwmValue, 1000, 2000);
     bool keepCurrentBoost = escBoostActive && requestedPwm == escBoostBasePwm;
     webThrottle = requestedPwm;
@@ -238,7 +259,7 @@ void setESCThrottle(int pwmValue)
 
 void startESCBoost(int pwmValue)
 {
-    if (debugHoldNeutral) { forceEscNeutralOutput(); return; }
+    if (debugHoldNeutral || steeringHoldNeutral) { forceEscNeutralOutput(); return; }
     webThrottle = constrain(pwmValue, 1000, 2000);
     lastWebCommandTime = millis();
     currentMode = WEB_MODE;
@@ -304,11 +325,15 @@ void updateESCBoost()
 // 🚀 新增：持续监控与接管逻辑
 void updateESC()
 {
-    if (debugHoldNeutral)
+    if (debugHoldNeutral || steeringHoldNeutral)
     {
         forceEscNeutralOutput();
         rcActiveCount = 0;
         newRcData = false;
+        if (!diagnosticsMuted && millis() - lastDriveStatusTime > 100) {
+            Serial.println("[DRIVE] 模式: WEB | 油门: 1500");
+            lastDriveStatusTime = millis();
+        }
         return;
     }
     // 1. 判断接收机是否存活 (如果超过 500ms 没收到脉冲，说明遥控器关机或信号丢失)

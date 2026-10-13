@@ -17,4 +17,8 @@ void handleESCCommand(char incomingChar, int throttleValue);
 void updateESC();
 // Filter routine logs in module debug; steering tests additionally hold neutral.
 void setESCDebugState(bool muteDiagnostics, bool holdNeutral);
+struct ESCSteeringState { int pwm; bool rcMode; bool emergency; bool debugNeutral; };
+ESCSteeringState escSteeringState();
+// A lost/stale steering feedback latches neutral until explicit mode reset.
+void setESCSteeringInhibit(bool holdNeutral);
 #endif

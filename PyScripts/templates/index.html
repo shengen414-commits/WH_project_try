@@ -132,6 +132,13 @@
         
         <div>PWM 输出指令: <span id="throttle-val" class="throttle-display">1500</span> <span style="color:#888;">us</span></div>
 
+        <div class="sync-buttons">
+            <button id="line-steering-on" onclick="requestLineSteering(true)">开启巡线转向</button>
+            <button id="line-steering-off" onclick="requestLineSteering(false)">关闭巡线并归中</button>
+        </div>
+        <div id="line-steering-status" class="sync-hint" role="status">巡线转向：等待固件状态。先归中油门再开启；丢线或反馈超时会停止动力。</div>
+        <div id="line-steering-message" class="sync-hint" role="status"></div>
+
         <div style="margin-top: 20px; gap: 20px; display: flex; justify-content: center;">
             <button class="btn-neutral" onclick="setThrottle(1500)">归中 (Neutral)</button>
             <button class="btn-estop" onclick="triggerEStop()">🚨 紧急刹车 (E-STOP)</button>
@@ -140,7 +147,7 @@
 
     </div>
 
-    <script src="{{ url_for('static', filename='js/main.js') }}?v=bounded-polls-1"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}?v=line-steering-1"></script>
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-4"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=1"></script>
 </body>

@@ -5,9 +5,12 @@
 #include <string>
 #include <cmath>
 #include <algorithm>
+#include <map>
 #define IRAM_ATTR
 constexpr int INPUT_PULLDOWN = 2;
 constexpr int CHANGE = 3;
+constexpr int INPUT = 0;
+constexpr int OUTPUT = 1;
 using std::min;
 using std::max;
 template <typename T> T constrain(T value, T low, T high) {
@@ -36,6 +39,9 @@ extern FakeSerial Serial;
 unsigned long millis();
 unsigned long micros();
 int digitalRead(int pin);
-inline void pinMode(int, int) {}
+inline std::map<int, int>& fakePinModes() { static std::map<int, int> pins; return pins; }
+inline std::map<int, int>& fakePinLevels() { static std::map<int, int> pins; return pins; }
+inline void pinMode(int pin, int mode) { fakePinModes()[pin] = mode; }
+inline void digitalWrite(int pin, int level) { fakePinLevels()[pin] = level; }
 inline int digitalPinToInterrupt(int pin) { return pin; }
 inline void attachInterrupt(int, void (*)(), int) {}

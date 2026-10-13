@@ -17,6 +17,7 @@ function syncStartBlockers(data, pressure, busy) {
         if (encoder.serial_open === false) reasons.push(`ESP32 串口未连接（${encoder.port || '请检查后台日志'}）`);
         else if (encoder.error) reasons.push(`ESP32 串口读取失败：${encoder.error}`);
         else if (encoder.debug_mode === 'servo') reasons.push('ESP32 正在舵机调试，只上报 [SERVO]；请恢复正常上报（R）');
+        else if (encoder.debug_mode === 'imu') reasons.push('ESP32 正在 MPU6050 调试，只上报 [MPU]；请恢复正常上报（R）');
         else if (encoder.debug_mode === 'line') reasons.push('ESP32 正在巡线调试；请恢复正常上报（R）');
         else reasons.push('未收到新鲜编码器数据；请确认正常固件、串口连接及 R 模式');
     }

@@ -60,6 +60,8 @@ sensor_state = {
     "last_serial_rx_mono": 0.0,
     "serial_line_count": 0,
     "last_drive_line": "",
+    "steering": {},
+    "last_steering_rx_mono": 0.0,
 }
 
 try:
@@ -132,6 +134,8 @@ def encoder_public_state():
     if not encoder_ready() and time.monotonic() - sensor_state.get('last_serial_rx_mono', 0) < 1.5:
         if last_line.startswith('[SERVO]'):
             debug_mode = 'servo'
+        elif last_line.startswith('[MPU]'):
+            debug_mode = 'imu'
         elif last_line.startswith(('[LINE_DBG]', '[LINE]')):
             debug_mode = 'line'
     return {'serial_open': serial_open,
@@ -380,6 +384,11 @@ def read_esp32_data():
                                 recorder.submit(sample)
                     sync_coordinator.submit(sample)
                 else:
+                    if line.startswith('[FOLLOW]'):
+                        fields = dict(re.findall(r'(\w+)=([^\s]+)', line))
+                        if 'mode' in fields:
+                            sensor_state['steering'] = fields
+                            sensor_state['last_steering_rx_mono'] = now_mono_ns / 1e9
                     match = drive_pattern.search(line)
                     if match:
                         sensor_state["mode"] = match.group(1)
@@ -723,7 +732,9 @@ def sensor_public_state():
         "device_epoch": sensor_state.get("device_epoch", 0),
         "invalid_encoder_lines": sensor_state.get("invalid_encoder_lines", 0),
         "serial_framing_errors": sensor_state.get("serial_framing_errors", 0),
-        "serial_error": sensor_state.get("serial_error")
+        "serial_error": sensor_state.get("serial_error"),
+        "steering": {**sensor_state.get('steering', {}),
+                     'fresh': time.monotonic() - sensor_state.get('last_steering_rx_mono', 0) < 1.0}
     }
 
 
@@ -877,6 +888,25 @@ def start_record():
 
 # --- 新增：接收前端油门控制指令 ---
 
+@app.post('/steering/line')
+def set_line_steering():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get('enabled'), bool):
+        return jsonify(error='enabled 必须是布尔值'), 400
+    enabled = payload['enabled']
+    if not esp32_serial or not esp32_serial.is_open:
+        return jsonify(error='ESP32 串口未连接'), 409
+    if enabled and (sensor_state.get('throttle', 1500) != 1500 or sensor_state.get('mode') == 'RC' or
+                    brake_sequence_active.is_set() or time.monotonic() < estop_ignore_until):
+        return jsonify(error='请先归中油门并退出遥控接管/制动，再开启巡线'), 409
+    try:
+        with serial_write_lock:
+            esp32_serial.write(b'N1\n' if enabled else b'N0\n')
+    except OSError as exc:
+        return jsonify(error=str(exc)), 503
+    # A successful write is only a request; firmware checks live sensor validity.
+    return jsonify(status='requested', message='命令已发送，等待固件状态确认', enabled=enabled)
+
 
 @app.route('/set_throttle', methods=['GET', 'POST'])
 def set_throttle():
@@ -958,6 +988,7 @@ def e_stop():
 
         with serial_write_lock:
             esp32_serial.reset_output_buffer()
+            esp32_serial.write(b'N0\n')  # Disable automatic steering before the existing reverse-brake sequence.
 
         threading.Thread(
             target=reverse_brake_sequence,

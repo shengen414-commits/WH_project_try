@@ -192,6 +192,7 @@ function renderSensorStats(data) {
     const serverThrottle = parseInt(data.throttle);
     const rcWarning = document.getElementById('rc-warning');
     isRcMode = (serverMode === 'RC');
+    renderLineSteering(data.steering || {});
 
     if (isRcMode) {
         // 遥控器夺权了！显示红条警告
@@ -205,6 +206,45 @@ function renderSensorStats(data) {
         // 网页控制中，隐藏红条
         rcWarning.style.display = 'none';
     }
+}
+
+let lineSteeringPending = false;
+let lastLineSteeringState = {};
+function renderLineSteering(state) {
+    lastLineSteeringState = state;
+    const labels = { LINE: '巡线已开启', YAW: '外部横摆控制已开启', FAULT: '故障，动力已锁定中位', OFF: '已关闭' };
+    const reasons = {tracking:'正在跟踪', armed:'已就绪，等待新油门指令', disabled:'已关闭',
+        line_lost:'未检测到线，请重新对准后开启', line_ambiguous:'多条线或全通道命中，请检查赛道及极性',
+        line_stale:'巡线数据超时', no_valid_line:'没有有效巡线数据，未开启', gyro_stale:'陀螺仪反馈超时',
+        no_valid_gyro:'没有有效陀螺仪数据', no_valid_yaw_source:'外部目标或陀螺仪尚未接入',
+        target_stale:'外部目标超时', rc_takeover:'遥控油门已接管，自动转向关闭',
+        reverse_not_supported:'巡线仅支持前进，倒车指令已停止', control_gap:'控制采样间隔过长',
+        arm_requires_neutral_normal_mode:'需归中油门并退出遥控或制动状态',
+        pwm_attach_failed:'舵机 PWM 初始化失败', steering_output_failed:'舵机输出失败',
+        waiting_forward_motion:'等待前进油门，陀螺仪控制暂未运行'};
+    const target = document.getElementById('line-steering-status');
+    target.innerText = state.mode && (state.fresh || state.mode === 'OFF') ?
+        `巡线转向：${labels[state.mode] || state.mode} | 偏差 ${state.e || '—'} | 舵机 ${state.pwm || '—'} us | ${reasons[state.reason] || state.reason || ''}` :
+        '巡线转向：暂无新鲜状态，请确认已烧录新版正常固件。';
+    document.getElementById('line-steering-on').disabled = lineSteeringPending || isRcMode || (state.fresh && ['LINE', 'YAW'].includes(state.mode));
+    document.getElementById('line-steering-off').disabled = lineSteeringPending;
+}
+async function requestLineSteering(enabled) {
+    if (lineSteeringPending) return;
+    lineSteeringPending = true;
+    document.getElementById('line-steering-on').disabled = true;
+    document.getElementById('line-steering-off').disabled = true;
+    const label = document.getElementById('line-steering-message');
+    try {
+        const response = await fetchWithTimeout('/steering/line', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled})
+        }, 1500);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        label.innerText = data.message;
+        if (!enabled) { numericOutputToggle.checked = false; pendingThrottle = null; updateDriveState(1500, 'system', false); }
+    } catch (error) { label.innerText = error.message; }
+    finally { lineSteeringPending = false; renderLineSteering(lastLineSteeringState); }
 }
 
 // --- 录制功能 ---

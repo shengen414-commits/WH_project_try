@@ -12,6 +12,19 @@ bool diagnosticsMuted = false;
 bool neutralHeld = false;
 bool steeringDebug = false;
 std::string steeringCommands;
+int autoStarts = 0, yawStarts = 0;
+std::string autoConfig;
+void stopAutomaticSteering(bool) {}
+bool startLineFollowing() { ++autoStarts; return true; }
+bool startExternalYawControl() { ++yawStarts; return false; }
+bool handleAutomaticSteeringConfig(const char* value) { autoConfig = value; return true; }
+void setESCSteeringInhibit(bool) {}
+void centerSteeringOutput() {}
+bool mpuDebug = false;
+std::string mpuCommands;
+void beginMPU6050Debug() { mpuDebug = true; }
+void endMPU6050Debug() { mpuDebug = false; }
+void handleMPU6050DebugCommand(char value) { mpuCommands += value; }
 void setESCDebugState(bool mute, bool neutral) { diagnosticsMuted = mute; neutralHeld = neutral; }
 void beginSteeringDebug() { steeringDebug = true; }
 void endSteeringDebug() { steeringDebug = false; }
@@ -107,6 +120,21 @@ int main() {
     assert(steeringDebug && neutralHeld);  // Mode change discards partial throttle.
     feed("R\nT1600\n");
     assert(commands.back() == std::make_pair('T', 1600));
+
+    Serial.output.clear();
+    const auto beforeMPU = commands.size();
+    feed("m\nz\nT1900\nB1800\n");
+    assert(mpuDebug && neutralHeld && diagnosticsMuted);
+    assert(commands.size() == beforeMPU);
+    clockMs += 10;
+    ++sensorFrame.sequence;
+    publishEncoder(); publishLineSensor();
+    assert(Serial.output.empty());
+    assert(mpuCommands.find('z') != std::string::npos);
+    feed("E");
+    assert(mpuCommands.back() == 'E' && mpuDebug);
+    feed("R\n");
+    assert(!mpuDebug && !neutralHeld && serialNormalMode());
 
     Serial.input = std::string(100, '?');
     pollSerialCommands();

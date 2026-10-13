@@ -1,5 +1,6 @@
 #include "line_sensor.h"
 #include "steering_control.h"
+#include "mpu6050_debug.h"
 #include <driver/gpio.h>
 
 namespace {
@@ -22,6 +23,8 @@ bool pinsValid() {
         // Current project: UART0, encoder, steering, ESC and RC input are reserved.
         if (pins[i] == 1 || pins[i] == 3 || pins[i] == 25 || pins[i] == 26 ||
             pins[i] == SteeringConfig::PIN || pins[i] == 14 || pins[i] == 27 ||
+            pins[i] == MPU6050Config::SDA_PIN || pins[i] == MPU6050Config::SCL_PIN ||
+            pins[i] == MPU6050Config::AD0_PIN || pins[i] == MPU6050Config::INT_PIN ||
             (pins[i] >= 6 && pins[i] <= 11))
             return false;
         for (uint8_t j = 0; j < i; ++j)

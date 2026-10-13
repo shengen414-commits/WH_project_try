@@ -2,6 +2,10 @@
 目前主程序是 `PIO_RotationmitCamera`（ESP32 固件）和
 `PyScripts/Camera_mit_Rotation_dashboard.py`（Orange Pi 网页后台）。
 
+正常固件已加入八路巡线自动转向第一版：默认关闭，可在驱动台点击“开启巡线转向”或串口发送 `N1`，`N0` 关闭并归中。巡线控制使用 D12 舵机，继续上报车速以支持同步记录；丢线/反馈超时会停止并锁定动力。后续 MPU6050 和外部目标接口已预留，具体命令、保护和实测步骤见 [巡线自动转向说明](PIO_RotationmitCamera/docs/automatic_steering.md)。
+
+MPU6050 硬件读数测试也在正常固件中：串口 `M` 进入专用输出，`Z` 静止标定陀螺 Z 零偏，`R` 退出。按当前接线使用 SDA2/SCL15/AD0=17/INT=5，XDA/XCL 不使用；其他可用引脚和接线说明见 [MPU6050 测试说明](PIO_RotationmitCamera/docs/mpu6050_debug.md)。M 模式锁定电调中位并暂停编码器上报，测试数据暂不接入舵机 PID。
+
 ## 车速＋扫描阀同步记录（第一版）
 
 启动入口仍为小车后台，网页仍使用 5000 端口：
