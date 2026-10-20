@@ -77,6 +77,19 @@ class FirmwareTransportTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(executable)], check=True, timeout=5)
 
+    @unittest.skipUnless(shutil.which('g++'), 'host g++ is optional; ESP32 build uses PlatformIO')
+    def test_servo_calibration_persistence_limits_and_no_jump(self):
+        root = Path(__file__).resolve().parents[2]
+        stubs = Path(__file__).resolve().parent / 'firmware_stubs'
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / 'calibration_test.exe'
+            subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
+                            '-I', str(stubs), '-I', str(root / 'PIO_RotationmitCamera/include'),
+                            str(root / 'PIO_RotationmitCamera/src/steering_control.cpp'),
+                            str(stubs / 'test_steering_calibration.cpp'), '-o', str(executable)], check=True, capture_output=True)
+            for args in ([], ['saved'], ['invalid']):
+                subprocess.run([str(executable), *args], check=True, timeout=5)
+
 
 if __name__ == '__main__':
     unittest.main()

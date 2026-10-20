@@ -13,13 +13,19 @@ bool diagnosticsMuted = false;
 bool neutralHeld = false;
 bool steeringDebug = false;
 int steeringPulse = 1500;
+int steeringMiddle = 1500;
 bool steeringOutputReady() { return steeringDebug; }
 int steeringTargetUs() { return steeringPulse; }
-int steeringLowUs() { return 1450; }
-int steeringCenterUs() { return 1500; }
-int steeringHighUs() { return 1550; }
+int steeringLowUs() { return steeringMiddle - 300; }
+int steeringCenterUs() { return steeringMiddle; }
+int steeringHighUs() { return steeringMiddle + 300; }
+bool saveCurrentSteeringCenter() {
+    if (!steeringDebug || steeringPulse < 1300 || steeringPulse > 1700) return false;
+    steeringMiddle = steeringPulse;
+    return true;
+}
 bool setSteeringDebugPulse(int value) {
-    if (!steeringDebug || value < 1450 || value > 1550) return false;
+    if (!steeringDebug || value < steeringLowUs() || value > steeringHighUs()) return false;
     steeringPulse = value;
     return true;
 }
@@ -41,8 +47,8 @@ void beginMPU6050Debug() { mpuDebug = true; }
 void endMPU6050Debug() { mpuDebug = false; }
 void handleMPU6050DebugCommand(char value) { mpuCommands += value; }
 void setESCDebugState(bool mute, bool neutral) { diagnosticsMuted = mute; neutralHeld = neutral; }
-void beginSteeringDebug() { steeringDebug = true; steeringPulse = 1500; }
-void endSteeringDebug() { steeringDebug = false; steeringPulse = 1500; }
+void beginSteeringDebug() { steeringDebug = true; steeringPulse = steeringMiddle; }
+void endSteeringDebug() { steeringDebug = false; steeringPulse = steeringMiddle; }
 void handleSteeringCommand(char value) { steeringCommands += value; }
 unsigned long millis() { return clockMs; }
 long readEncoderPosition() { return -42; }
@@ -193,6 +199,15 @@ int main() {
     assert(!steeringDebug && !neutralHeld && serialNormalMode());
     feed("@S\n");
     assert(autoConfig == "S");  // The manual packet prefix must not steal @S configuration.
+
+    feed("V\nS1540,36\nS0002,37\n");
+    assert(steeringMiddle == 1540 && steeringPulse == 1540);
+    assert(Serial.output.find("id=37 ok=1 target=1540 low=1240 mid=1540 high=1840") != std::string::npos);
+    feed("S1800,38\nS0002,39\n");
+    assert(steeringMiddle == 1540 && steeringPulse == 1800);
+    assert(Serial.output.find("id=39 ok=0") != std::string::npos);
+    feed("S0000,40\nS0001,41\n");
+    assert(steeringPulse == 1540 && serialNormalMode());
 
     Serial.input = std::string(100, '?');
     pollSerialCommands();

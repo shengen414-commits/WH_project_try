@@ -7,6 +7,7 @@ namespace { Servo neutralESC; }
 
 void setup() {
     Serial.begin(115200);
+    initSteeringCalibration();
     ESP32PWM::allocateTimer(0);
     neutralESC.setPeriodHertz(50);
     neutralESC.attach(14, 1000, 2000);

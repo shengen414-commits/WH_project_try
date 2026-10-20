@@ -79,12 +79,18 @@ void manualSteeringRequest(int pulse, uint32_t id) {
         if (debugMode == DebugMode::Steering) selectMode(DebugMode::Normal);
         ok = true;
     } else if (debugMode == DebugMode::Steering) {
-        ok = setSteeringDebugPulse(pulse == 0 ? steeringCenterUs() : pulse);
-        reason = !steeringOutputReady() ? "pwm_failed" : "out_of_range";
+        if (pulse == 2) {
+            ok = saveCurrentSteeringCenter();
+            reason = steeringTargetUs() < SteeringConfig::CENTER_LOW_US || steeringTargetUs() > SteeringConfig::CENTER_HIGH_US
+                     ? "center_range" : "save_failed";
+        } else {
+            ok = setSteeringDebugPulse(pulse == 0 ? steeringCenterUs() : pulse);
+            reason = !steeringOutputReady() ? "pwm_failed" : "out_of_range";
+        }
     }
     if (ok) reason = "ok";
     pendingSteeringAckLength = snprintf(pendingSteeringAck, sizeof(pendingSteeringAck),
-        "[SERVO_ACK] id=%lu ok=%d target=%d low=%d mid=%d high=%d manual=%d ready=%d reason=%s\n",
+        "[SERVO_ACK] id=%lu ok=%d target=%d low=%d mid=%d high=%d manual=%d ready=%d proto=2 reason=%s\n",
         (unsigned long)id, ok, steeringTargetUs(), steeringLowUs(), steeringCenterUs(), steeringHighUs(),
         debugMode == DebugMode::Steering, steeringOutputReady(), reason);
     if (pendingSteeringAckLength >= (int)sizeof(pendingSteeringAck)) pendingSteeringAckLength = 0;

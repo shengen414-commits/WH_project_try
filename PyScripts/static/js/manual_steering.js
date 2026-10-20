@@ -4,7 +4,7 @@
     const panel = el('manual-steering-panel');
     if (!panel) return;
     let state = { active: false, blocking: false, serial_open: false, request: {},
-        low_us: 1450, center_us: 1500, high_us: 1550 };
+        low_us: 1200, center_us: 1500, high_us: 1800 };
     let busy = false, actionInFlight = '', error = '', exitQueued = false, confirmationTimer = null;
     const blocking = () => !!state.blocking || (busy && actionInFlight === 'start');
 
@@ -27,6 +27,12 @@
         document.querySelectorAll('[data-manual-adjust]').forEach(control => control.disabled = !adjust);
         el('manual-steering-minus').disabled = !adjust || data.target_us <= data.low_us;
         el('manual-steering-plus').disabled = !adjust || data.target_us >= data.high_us;
+        const centerLow = data.center_min_us ?? 1300, centerHigh = data.center_max_us ?? 1700;
+        el('manual-steering-save-center').disabled = !adjust || !data.calibration_supported ||
+            data.target_us < centerLow || data.target_us > centerHigh;
+        el('manual-steering-calibration-hint').textContent = !data.calibration_supported
+            ? '保存中位需要本次更新的固件。默认1500μs不一定对应车轮直行。'
+            : `先微调至车轮直行，再保存当前输出；掉电后仍有效。可标定中位 ${centerLow}～${centerHigh}μs，保存后范围为新中位±300μs。`;
         for (const id of ['manual-steering-slider', 'manual-steering-input']) {
             el(id).min = data.low_us;
             el(id).max = data.high_us;

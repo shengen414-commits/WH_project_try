@@ -4,10 +4,17 @@
 namespace SteeringConfig {
 constexpr int PIN = 12;
 constexpr int CENTER_US = 1500;
-constexpr int LOW_US = 1450;
-constexpr int HIGH_US = 1550;
+constexpr int HALF_RANGE_US = 300;
+constexpr int LOW_US = CENTER_US - HALF_RANGE_US;
+constexpr int HIGH_US = CENTER_US + HALF_RANGE_US;
+constexpr int ABS_LOW_US = 1000;
+constexpr int ABS_HIGH_US = 2000;
+constexpr int CENTER_LOW_US = ABS_LOW_US + HALF_RANGE_US;
+constexpr int CENTER_HIGH_US = ABS_HIGH_US - HALF_RANGE_US;
 }
 
+void initSteeringCalibration();
+bool saveCurrentSteeringCenter();
 void beginSteeringDebug();
 void endSteeringDebug();
 void handleSteeringCommand(char command);

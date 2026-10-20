@@ -7,8 +7,8 @@ class ManualSteeringTests(unittest.TestCase):
         self.now = [100.0]
         self.manual = ManualSteering(clock=lambda: self.now[0])
 
-    def ack(self, request_id, target=1500, manual=1, ok=1, ready=1):
-        return self.manual.feed(f'[SERVO_ACK] id={request_id} ok={ok} target={target} low=1450 mid=1500 high=1550 manual={manual} ready={ready} reason={"ok" if ok else "pwm_failed"}')
+    def ack(self, request_id, target=1500, manual=1, ok=1, ready=1, center=1500, proto=2):
+        return self.manual.feed(f'[SERVO_ACK] id={request_id} ok={ok} target={target} low={center-300} mid={center} high={center+300} manual={manual} ready={ready} proto={proto} reason={"ok" if ok else "pwm_failed"}')
 
     def test_commands_wait_for_matching_firmware_ack(self):
         request_id, packet = self.manual.begin('start')
@@ -44,6 +44,30 @@ class ManualSteeringTests(unittest.TestCase):
         self.manual.normal_frame()
         self.assertFalse(self.manual.blocking())
         self.assertEqual(self.manual.snapshot()['request']['status'], 'confirmed')
+
+    def test_save_center_requires_explicit_action_and_matching_ack(self):
+        request_id, _ = self.manual.begin('start')
+        self.ack(request_id)
+        move, _ = self.manual.begin('set', 1540)
+        self.ack(move, target=1540)
+        save, packet = self.manual.begin('calibrate')
+        self.assertEqual(packet, f'S0002,{save}\n'.encode())
+        self.assertEqual(self.manual.snapshot()['center_us'], 1500)
+        self.assertFalse(self.ack(save, target=1540, center=1540, proto=1))
+        self.assertTrue(self.ack(save, target=1540, center=1540))
+        state = self.manual.snapshot()
+        self.assertEqual((state['low_us'], state['center_us'], state['high_us'], state['target_us']), (1240, 1540, 1840, 1540))
+        self.assertIn('掉电保留', state['request']['message'])
+        move, _ = self.manual.begin('set', 1800)
+        self.ack(move, target=1800, center=1540)
+        with self.assertRaisesRegex(ValueError, '1300～1700'):
+            self.manual.begin('calibrate')
+
+    def test_older_protocol_can_move_but_cannot_save_center(self):
+        request_id, _ = self.manual.begin('start')
+        self.ack(request_id, proto=1)
+        with self.assertRaisesRegex(ValueError, '不支持保存中位'):
+            self.manual.begin('calibrate')
 
     def test_old_firmware_can_be_detected_and_exited_but_not_fine_adjusted(self):
         self.manual.feed('[SERVO] GPIO12 target=1500 us PWM=ready sweep=idle')

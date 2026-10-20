@@ -317,7 +317,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         request_id = response.get_json()['request_id']
         self.app.esp32_serial.write.assert_called_with(f'V\nS0000,{request_id}\n'.encode())
-        self.receive([f'[SERVO_ACK] id={request_id} ok=1 target=1500 low=1450 mid=1500 high=1550 manual=1 ready=1 reason=ok\n'.encode()])
+        self.receive([f'[SERVO_ACK] id={request_id} ok=1 target=1500 low=1200 mid=1500 high=1800 manual=1 ready=1 proto=2 reason=ok\n'.encode()])
         return request_id
 
     def test_manual_panel_is_folded_and_commands_have_firmware_confirmation(self):
@@ -349,6 +349,20 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.client.get('/start_record').status_code, 409)
         self.assertEqual(self.client.post('/imu/command', json={'action': 'start'}).status_code, 409)
         self.app.esp32_serial.reset_input_buffer.assert_not_called()
+
+    def test_manual_can_reach_wider_range_and_save_current_straight_position(self):
+        self.manual_start()
+        response = self.client.post('/steering/manual', json={'action': 'set', 'pulse_us': 1600})
+        self.assertEqual(response.status_code, 200)
+        request_id = response.get_json()['request_id']
+        self.receive([f'[SERVO_ACK] id={request_id} ok=1 target=1600 low=1200 mid=1500 high=1800 manual=1 ready=1 proto=2 reason=ok\n'.encode()])
+        response = self.client.post('/steering/manual', json={'action': 'calibrate'})
+        self.assertEqual(response.status_code, 200)
+        save = response.get_json()['request_id']
+        self.app.esp32_serial.write.assert_called_with(f'S0002,{save}\n'.encode())
+        self.receive([f'[SERVO_ACK] id={save} ok=1 target=1600 low=1300 mid=1600 high=1900 manual=1 ready=1 proto=2 reason=ok\n'.encode()])
+        state = self.client.get('/steering/manual/status').get_json()
+        self.assertEqual((state['low_us'], state['center_us'], state['high_us']), (1300, 1600, 1900))
 
     def test_manual_entry_rejects_recording_throttle_rc_and_conflicting_operations(self):
         self.app.sensor_state['throttle'] = 1600

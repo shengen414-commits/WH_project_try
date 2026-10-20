@@ -988,7 +988,7 @@ def manual_steering_status():
 def manual_steering_command():
     body = request.get_json(silent=True)
     action = body.get('action') if isinstance(body, dict) else None
-    if action not in ('start', 'set', 'center', 'stop'):
+    if action not in ('start', 'set', 'center', 'stop', 'calibrate'):
         return jsonify(error='无效的手动舵机操作'), 400
     pulse = body.get('pulse_us')
     if action == 'set':

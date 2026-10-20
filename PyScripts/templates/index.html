@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>双路高速感知终端</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='manual-servo-1') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='manual-servo-2') }}">
 </head>
 <body>
     <div class="top-bar">
@@ -161,13 +161,13 @@
                     <button id="manual-steering-start" onclick="manualSteeringAction('start')">进入手动测试</button>
                     <button id="manual-steering-stop" onclick="manualSteeringAction('stop')" disabled>归中并退出</button>
                 </div>
-                <div class="manual-steering-reading">固件输出 <strong id="manual-steering-current">—</strong> μs <span id="manual-steering-range">范围 1450～1550 μs</span></div>
+                <div class="manual-steering-reading">固件输出 <strong id="manual-steering-current">—</strong> μs <span id="manual-steering-range">范围 1200～1800 μs</span></div>
                 <label class="manual-steering-slider-label" for="manual-steering-slider">目标脉宽</label>
-                <input id="manual-steering-slider" type="range" min="1450" max="1550" step="5" value="1500" data-manual-adjust disabled>
-                <div class="manual-steering-values"><span id="manual-steering-low">1450</span><span id="manual-steering-mid">中位 1500</span><span id="manual-steering-high">1550</span></div>
+                <input id="manual-steering-slider" type="range" min="1200" max="1800" step="5" value="1500" data-manual-adjust disabled>
+                <div class="manual-steering-values"><span id="manual-steering-low">1200</span><span id="manual-steering-mid">中位 1500</span><span id="manual-steering-high">1800</span></div>
                 <div class="manual-steering-input-row">
                     <label for="manual-steering-input">目标</label>
-                    <input id="manual-steering-input" type="number" min="1450" max="1550" step="1" value="1500" inputmode="numeric" data-manual-adjust disabled>
+                    <input id="manual-steering-input" type="number" min="1200" max="1800" step="1" value="1500" inputmode="numeric" data-manual-adjust disabled>
                     <span>μs</span><button id="manual-steering-apply" onclick="applyManualSteering()" data-manual-adjust disabled>应用</button>
                 </div>
                 <div class="sync-buttons manual-steering-steps">
@@ -175,6 +175,8 @@
                     <button id="manual-steering-center" onclick="manualSteeringAction('center')" data-manual-adjust disabled>舵机回中</button>
                     <button id="manual-steering-plus" onclick="stepManualSteering(5)" data-manual-adjust disabled>＋5 μs</button>
                 </div>
+                <div class="sync-buttons"><button id="manual-steering-save-center" onclick="manualSteeringAction('calibrate')" data-manual-adjust disabled>将当前输出保存为直行中位</button></div>
+                <div id="manual-steering-calibration-hint" class="sync-hint">先微调至车轮直行，再保存当前输出。上电回中会采用已保存的中位。</div>
                 <div id="manual-steering-status" class="sync-hint" role="status" aria-live="polite">先归中油门，再进入手动测试。</div>
                 <small class="sync-hint">先用小步调整确认实际左右方向。显示值为固件脉宽指令，并非实测车轮角度。</small>
             </div>
@@ -192,7 +194,7 @@
     <script src="{{ url_for('static', filename='js/main.js') }}?v=manual-servo-1"></script>
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
     <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=1"></script>
-    <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=2"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=3"></script>
 </body>
 </html>

@@ -16,13 +16,16 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         const errors = [], commands = [], throttle = [];
         page.on('pageerror', error => errors.push(error.message));
         const manual = { active: false, blocking: false, fresh: false, ready: false, precise: false,
-            target_us: null, low_us: 1450, center_us: 1500, high_us: 1550, serial_open: true, request: { status: 'idle' } };
+            calibration_supported: true, center_min_us: 1300, center_max_us: 1700,
+            target_us: null, low_us: 1200, center_us: 1500, high_us: 1800, serial_open: true, request: { status: 'idle' } };
         let next = 100, rejectEntry = false, delayEntry = 0;
-        function ack(target = 1500) {
+        function ack(target = manual.center_us) {
             const stopping = manual.request.action === 'stop';
+            const calibrating = manual.request.action === 'calibrate';
+            if (calibrating) Object.assign(manual, { center_us: target, low_us: target - 300, high_us: target + 300 });
             Object.assign(manual, { active: !stopping, blocking: !stopping, fresh: true,
                 ready: true, precise: true, target_us: target });
-            manual.request = { ...manual.request, status: 'confirmed', message: stopping ? '已归中并退出手动测试' : `ESP32 已确认输出 ${target}μs` };
+            manual.request = { ...manual.request, status: 'confirmed', message: stopping ? '已归中并退出手动测试' : calibrating ? `已保存直行中位 ${target}μs，掉电保留` : `ESP32 已确认输出 ${target}μs` };
         }
         await page.route('https://cdn.jsdelivr.net/**', route => route.fulfill({ contentType: 'text/javascript',
             body: 'window.Chart=class { constructor(ctx,config){this.data=config.data;this.options=config.options||{};ctx.canvas.style.maxWidth="100%";} update(){} resize(){} destroy(){} };' }));
@@ -76,17 +79,26 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         assert.deepEqual(commands.at(-1), { action: 'set', pulse_us: 1520 });
         ack(1520);
         await page.waitForFunction(() => !document.getElementById('manual-steering-apply').disabled);
-        await page.locator('#manual-steering-input').fill('1560');
+        await page.locator('#manual-steering-input').fill('1810');
         const beforeInvalid = commands.length;
         await page.locator('#manual-steering-apply').click();
         assert.equal(commands.length, beforeInvalid);
-        assert.ok((await page.locator('#manual-steering-status').innerText()).includes('1450～1550'));
+        assert.ok((await page.locator('#manual-steering-status').innerText()).includes('1200～1800'));
         await page.locator('#manual-steering-input').fill('1540');
         await page.locator('#manual-steering-apply').click();
         await page.waitForFunction(() => document.getElementById('manual-steering-plus').disabled);
         assert.deepEqual(commands.at(-1), { action: 'set', pulse_us: 1540 });
         ack(1540);
         await page.waitForFunction(() => !document.getElementById('manual-steering-center').disabled);
+        await page.locator('#manual-steering-save-center').click();
+        await page.waitForFunction(() => document.getElementById('manual-steering-save-center').disabled);
+        assert.equal(commands.at(-1).action, 'calibrate');
+        assert.equal(await page.locator('#manual-steering-current').innerText(), '1540');
+        ack(1540);
+        await page.waitForFunction(() => document.getElementById('manual-steering-mid').textContent.includes('1540'));
+        assert.equal(await page.locator('#manual-steering-slider').getAttribute('min'), '1240');
+        assert.equal(await page.locator('#manual-steering-slider').getAttribute('max'), '1840');
+        assert.ok((await page.locator('#manual-steering-status').innerText()).includes('掉电保留'));
         await page.locator('#manual-steering-center').click();
         await page.waitForFunction(() => document.getElementById('manual-steering-center').disabled);
         assert.equal(commands.at(-1).action, 'center');
