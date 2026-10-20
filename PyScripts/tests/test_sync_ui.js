@@ -50,6 +50,8 @@ render({ phase: 'recording', active: true });
 assert.strictEqual(element('sync-start').disabled, true);
 assert.strictEqual(element('sync-stop').disabled, false);
 assert.ok(configButtons.every(button => button.disabled));
+render({ phase: 'recording', active: true, speed: { sample_count: 1000, saved_hz: 99.8 } });
+assert.ok(element('sync-status').innerText.includes('车速保存 99.8 Hz'));
 render({ phase: 'stopping', active: true });
 assert.strictEqual(element('sync-stop').disabled, true);
 render({ phase: 'stop_failed', active: true, error: 'STOP timeout' });

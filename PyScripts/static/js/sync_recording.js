@@ -66,6 +66,7 @@ function renderSyncState(data) {
     const device = pressure.busy ? '设备操作中' : pressure.connected ? `已连接 ${pressure.device_ip}` : '未连接';
     const phaseLabel = !data.active && pressure.file_open ? (pressure.scanning ? '压力单独采集中' : '压力文件已打开') : syncPhases[data.phase] || data.phase;
     let text = `${phaseLabel} | 扫描阀：${device} | 编码器：${data.encoder_fresh ? '就绪' : '无新鲜数据'} | 车速 ${speed.sample_count || 0} 条 | 压力 ${pressure.frames_received || 0} 帧`;
+    if (Number.isFinite(speed.saved_hz)) text += ` | 车速保存 ${speed.saved_hz.toFixed(1)} Hz`;
     text += ` | 车速缺样 ${speed.sequence_gaps || 0} / 写盘丢样 ${speed.queue_drops || 0} | 压力缺帧 ${pressure.frame_gaps || 0}`;
     if (pressure.reboot_required) text += ' | 请等待保存完成，给扫描阀断电重启后重新连接';
     if (pressure.udp_reported_port < 0) text += ` | UDP 端口回显 ${pressure.udp_reported_port}，按 16 位还原为 ${pressure.udp_port}`;

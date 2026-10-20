@@ -16,7 +16,7 @@ enum class DebugMode { Normal, Line, Capture, Steering, MPU };
 DebugMode debugMode = DebugMode::Normal;
 unsigned long lastLineDebugAt = 0;
 char command = 0;
-char digits[13]; // Four throttle digits, or N<action>,<uint32 request id>.
+char digits[16]; // Four pulse digits plus comma and uint32 request id.
 unsigned int digitCount = 0;
 unsigned long commandStartedAt = 0;
 bool configPending = false;
@@ -32,16 +32,21 @@ void publishSteeringAck() {
         pendingSteeringAckLength = 0;
     }
 }
-bool parseSteeringRequest(uint32_t& id) {
-    id = 0; // Legacy N1/N0 commands remain valid without a request id.
-    if (digitCount == 1) return true;
-    if (digitCount < 3 || digits[1] != ',') return false;
-    for (unsigned int i = 2; i < digitCount; ++i) {
+bool parseRequestId(unsigned int start, uint32_t& id) {
+    if (digitCount <= start) return false;
+    id = 0;
+    for (unsigned int i = start; i < digitCount; ++i) {
         const uint32_t digit = digits[i] - '0';
         if (digit > 9 || id > (UINT32_MAX - digit) / 10) return false;
         id = id * 10 + digit;
     }
-    return true;
+    return id != 0;
+}
+bool parseSteeringRequest(uint32_t& id) {
+    id = 0; // Legacy N1/N0 commands remain valid without a request id.
+    if (digitCount == 1) return true;
+    if (digitCount < 3 || digits[1] != ',') return false;
+    return parseRequestId(2, id);
 }
 void acknowledgeSteering(uint32_t id, char action, bool ok) {
     const auto state = automaticSteeringState();
@@ -66,6 +71,24 @@ void selectMode(DebugMode mode) {
     if (mode == DebugMode::Line) lastLineDebugAt = millis() - LINE_DEBUG_INTERVAL_MS;
     if (mode == DebugMode::Steering) beginSteeringDebug();
     if (mode == DebugMode::MPU) beginMPU6050Debug();
+}
+void manualSteeringRequest(int pulse, uint32_t id) {
+    bool ok = false;
+    const char* reason = "not_manual";
+    if (pulse == 1 && (debugMode == DebugMode::Normal || debugMode == DebugMode::Steering)) {
+        if (debugMode == DebugMode::Steering) selectMode(DebugMode::Normal);
+        ok = true;
+    } else if (debugMode == DebugMode::Steering) {
+        ok = setSteeringDebugPulse(pulse == 0 ? steeringCenterUs() : pulse);
+        reason = !steeringOutputReady() ? "pwm_failed" : "out_of_range";
+    }
+    if (ok) reason = "ok";
+    pendingSteeringAckLength = snprintf(pendingSteeringAck, sizeof(pendingSteeringAck),
+        "[SERVO_ACK] id=%lu ok=%d target=%d low=%d mid=%d high=%d manual=%d ready=%d reason=%s\n",
+        (unsigned long)id, ok, steeringTargetUs(), steeringLowUs(), steeringCenterUs(), steeringHighUs(),
+        debugMode == DebugMode::Steering, steeringOutputReady(), reason);
+    if (pendingSteeringAckLength >= (int)sizeof(pendingSteeringAck)) pendingSteeringAckLength = 0;
+    publishSteeringAck();
 }
 }
 bool serialNormalMode() { return debugMode == DebugMode::Normal; }
@@ -97,6 +120,9 @@ void pollSerialCommands() {
         if (value == 'N' || value == 'n') {
             resetCommand(); command = 'N'; commandStartedAt = millis(); continue;
         }
+        if (!configPending && (value == 'S' || value == 's')) {
+            resetCommand(); command = 'S'; commandStartedAt = millis(); continue;
+        }
         if (value == 'T' || value == 't' || value == 'B' || value == 'b') {
             command = (value == 'T' || value == 't') ? 'T' : 'B';
             digitCount = 0;
@@ -124,13 +150,19 @@ void pollSerialCommands() {
             if (debugMode == DebugMode::MPU) handleMPU6050DebugCommand(value);
             continue;
         }
-        if (command == 'N' && value == ',' && digitCount == 1) {
+        if ((command == 'N' && digitCount == 1 && value == ',') ||
+            (command == 'S' && digitCount == 4 && value == ',')) {
             digits[digitCount++] = value;
-        } else if (value >= '0' && value <= '9' && digitCount < (command == 'N' ? 12U : 4U)) {
+        } else if (value >= '0' && value <= '9' && digitCount < (command == 'S' ? 15U : command == 'N' ? 12U : 4U)) {
             digits[digitCount++] = value;
         } else if (value == '\n') {
             uint32_t requestId = 0;
-            if (command == 'N' && digitCount >= 1 && digits[0] >= '0' && digits[0] <= '2' && parseSteeringRequest(requestId)) {
+            if (command == 'S') {
+                if (digitCount >= 6 && digits[4] == ',' && parseRequestId(5, requestId)) {
+                    digits[4] = '\0';
+                    manualSteeringRequest(atoi(digits), requestId);
+                }
+            } else if (command == 'N' && digitCount >= 1 && digits[0] >= '0' && digits[0] <= '2' && parseSteeringRequest(requestId)) {
                 const char action = digits[0];
                 selectMode(DebugMode::Normal); // Autonomous control keeps ENC and LINE streams running.
                 bool ok = true;

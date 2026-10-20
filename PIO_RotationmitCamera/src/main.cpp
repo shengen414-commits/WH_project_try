@@ -31,7 +31,7 @@ void loop() {
     updateMPU6050Debug();
     updateAutomaticSteering();
     publishLineSensor();
-    publishSteeringDebug();
+    publishSteeringDebug(true);
     publishMPU6050Debug();
     if (serialNormalMode()) publishAutomaticSteering();
 }

@@ -84,6 +84,7 @@ class CsvRecorder:
         self.done = threading.Event()
         self.active = True
         self.sample_count = 0
+        self.first_saved_mono_ns = self.last_saved_mono_ns = None
         self.queue_drops = 0
         self.stop_reason = None
         self.stopped_ns = None
@@ -136,11 +137,14 @@ class CsvRecorder:
 
     def status(self):
         with self.lock:
+            span = ((self.last_saved_mono_ns - self.first_saved_mono_ns) / 1e9
+                    if self.sample_count > 1 else 0)
             return {"active": self.active, "file_path": self.path,
                     "started_at_ns": self.started_ns, "stopped_at_ns": self.stopped_ns,
                     "started_monotonic_ns": self.started_mono_ns,
                     "stopped_monotonic_ns": self.stopped_mono_ns,
                     "sample_count": self.sample_count, "queue_drops": self.queue_drops,
+                    "saved_hz": (self.sample_count - 1) / span if span > 0 else None,
                     "sequence_gaps": (self.last_sequence_gaps or 0) - (self.first_sequence_gaps or 0),
                     "stop_reason": self.stop_reason, "finalized": self.done.is_set(),
                     "elapsed_sec": min(time.monotonic() - self.started_mono, self.duration_sec)
@@ -162,6 +166,9 @@ class CsvRecorder:
                 self.writer.writerow(row)
                 with self.lock:
                     self.sample_count += 1
+                    if self.first_saved_mono_ns is None:
+                        self.first_saved_mono_ns = row["host_receive_monotonic_ns"]
+                    self.last_saved_mono_ns = row["host_receive_monotonic_ns"]
                 if time.monotonic() - last_flush >= 0.5:
                     self.file.flush()
                     last_flush = time.monotonic()

@@ -111,5 +111,29 @@ button:disabled { background: #555; cursor: not-allowed; transform: none; }
 #sync-channel-grid > div { padding: 8px; background: #18232a; border-radius: 4px; overflow-wrap: anywhere; }
 #sync-events { max-height: 180px; }
 .sync-panel a { color: #72c3f7; }
+.replay-panel { box-sizing: border-box; width: 100%; max-width: 1400px; margin: 16px auto; padding: 20px; border: 1px solid #345262; border-radius: 12px; background: #142029; text-align: left; }
+.replay-panel h2 { margin: 0 0 8px; font-size: 20px; color: #72c3f7; }
+.replay-panel p, .replay-panel small { color: #b2c4cf; line-height: 1.6; }
+.replay-controls, .replay-files { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 12px 0; }
+.replay-controls input { width: 72px; padding: 8px; color: #fff; background: #0a1015; border: 1px solid #506773; border-radius: 6px; }
+.replay-controls button { padding: 10px 16px; font-size: 15px; }
+.replay-status { color: #c8e1ee; margin: 8px 0; white-space: pre-line; overflow-wrap: anywhere; }
+.replay-files a { color: #72c3f7; }
+.manual-steering-panel { align-self: stretch; border: 1px solid #3b596b; border-radius: 9px; background: #111c25; margin-top: 12px; text-align: left; min-width: 0; }
+.manual-steering-panel summary { cursor: pointer; padding: 13px 15px; font-weight: bold; color: #9ed9ff; }
+#manual-steering-badge { float: right; font-size: 12px; font-weight: normal; color: #b8c7d1; }
+.manual-steering-panel[data-error="true"] #manual-steering-badge { color: #ffb19a; }
+.manual-steering-content { padding: 0 15px 15px; }
+.manual-steering-content .sync-buttons { justify-content: flex-start; flex-wrap: wrap; }
+.manual-steering-content button { font-size: 14px; padding: 9px 12px; }
+.manual-steering-reading { margin: 14px 0; color: #d8e8f2; font-size: 14px; }
+#manual-steering-range { display: block; margin-top: 5px; font-size: 12px; color: #a0b4c0; }
+.manual-steering-slider-label, .manual-steering-values { color: #a0b4c0; font-size: 12px; }
+#manual-steering-slider { width: 100%; max-width: none; margin: 10px 0; accent-color: #46b8ff; box-sizing: border-box; }
+.manual-steering-values { display: flex; justify-content: space-between; }
+.manual-steering-input-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 14px 0; color: #d8e8f2; }
+#manual-steering-input { box-sizing: border-box; width: 88px; min-width: 0; padding: 8px; border: 1px solid #506773; border-radius: 5px; color: #fff; background: #0a1015; }
+.manual-steering-content .sync-hint { line-height: 1.65; overflow-wrap: anywhere; }
+body.manual-steering-active .joystick-track { pointer-events: none; opacity: .45; }
 @media (max-width: 1000px) { .operation-columns { grid-template-columns: minmax(0, 1fr); width: 100%; } }
 @media (max-width: 620px) { body { padding: 10px; } .operation-columns > .sync-panel, .operation-columns > .control-panel { padding: 15px; } .joystick-wrapper { gap: 24px; } #sync-channel-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } img, .single-mode img { max-width: 100%; height: auto; aspect-ratio: 4 / 3; } .camera-box { min-width: 0; max-width: 100%; } }

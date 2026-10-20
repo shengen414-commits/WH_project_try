@@ -253,6 +253,10 @@ function renderLineSteering(state) {
     document.getElementById('line-steering-off').disabled = lineSteeringPending;
 }
 async function requestLineSteering(enabled) {
+    if (enabled && globalThis.manualSteeringBlocking && globalThis.manualSteeringBlocking()) {
+        document.getElementById('line-steering-message').innerText = '请先归中退出手动舵机测试';
+        return;
+    }
     if (lineSteeringPending || (enabled && lineSteeringAwaitingConfirmation)) return;
     lineSteeringPending = true;
     document.getElementById('line-steering-on').disabled = true;
@@ -362,7 +366,8 @@ function updateSpeedRecordUI(data) {
     const elapsed = formatDuration(data.elapsed_sec || 0);
     const maxDuration = formatDuration(data.max_duration_sec || 600);
     const samples = data.sample_count || 0;
-    const losses = `缺样 ${data.sequence_gaps || 0} | 写盘丢样 ${data.queue_drops || 0}`;
+    const rate = Number.isFinite(data.saved_hz) ? `${data.saved_hz.toFixed(1)} Hz` : '等待数据';
+    const losses = `保存频率 ${rate} | 缺样 ${data.sequence_gaps || 0} | 写盘丢样 ${data.queue_drops || 0}`;
     if (data.message) {
         status.innerText = data.message;
         return;
@@ -479,6 +484,7 @@ function calculateReverseBrakePwm(currentPwm) {
 }
 
 function sendThrottleCommand(val, useBoost = false) {
+    if (Number(val) !== THROTTLE_NEUTRAL && globalThis.manualSteeringBlocking && globalThis.manualSteeringBlocking()) return;
     if (isBrakeSequenceActive()) return;
     pendingThrottle = { value: val, boost: useBoost }; // 永远用最新值覆盖暂存区
     recoverStaleThrottleRequest();
@@ -491,6 +497,8 @@ function sendThrottleCommand(val, useBoost = false) {
 
 function flushThrottleQueue() {
     recoverStaleThrottleRequest();
+    if (pendingThrottle && Number(pendingThrottle.value) !== THROTTLE_NEUTRAL &&
+            globalThis.manualSteeringBlocking && globalThis.manualSteeringBlocking()) pendingThrottle = null;
     if (isSending) return;
     if (pendingThrottle === null) return;
 
@@ -586,6 +594,13 @@ function readNumericThrottleValue() {
     const pwm = clampThrottleValue(throttleInput.value, THROTTLE_NEUTRAL);
     throttleInput.value = pwm;
     return pwm;
+}
+
+function parkThrottleForManualSteering() {
+    numericOutputToggle.checked = false;
+    pendingThrottle = null;
+    if (activeThrottleController) activeThrottleController.abort();
+    updateDriveState(THROTTLE_NEUTRAL, 'system', false);
 }
 
 function toggleNumericThrottleOutput() {

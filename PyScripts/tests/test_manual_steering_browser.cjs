@@ -1,0 +1,130 @@
+// Optional: PYTHON=<Python with Flask> NODE_PATH=<Playwright modules> node this_file [screenshot.png]
+// Render the real dashboard; every hardware response is simulated.
+const { chromium } = require('playwright');
+const { execFileSync } = require('child_process');
+const fs = require('fs'), path = require('path');
+const assert = require('node:assert/strict');
+const root = path.resolve(__dirname, '..');
+const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '-c',
+    "from flask import Flask,render_template; from pathlib import Path; p=Path('PyScripts').resolve(); app=Flask('manual_test',template_folder=str(p/'templates'),static_folder=str(p/'static')); app.add_url_rule('/pressure_plot',endpoint='pressure_plot.page',view_func=lambda:''); ctx=app.test_request_context('/'); ctx.push(); print(render_template('index.html'))"],
+    { encoding: 'utf8', cwd: path.resolve(root, '..') });
+
+(async () => {
+    const browser = await chromium.launch({ channel: 'msedge', headless: true });
+    try {
+        const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+        const errors = [], commands = [], throttle = [];
+        page.on('pageerror', error => errors.push(error.message));
+        const manual = { active: false, blocking: false, fresh: false, ready: false, precise: false,
+            target_us: null, low_us: 1450, center_us: 1500, high_us: 1550, serial_open: true, request: { status: 'idle' } };
+        let next = 100, rejectEntry = false, delayEntry = 0;
+        function ack(target = 1500) {
+            const stopping = manual.request.action === 'stop';
+            Object.assign(manual, { active: !stopping, blocking: !stopping, fresh: true,
+                ready: true, precise: true, target_us: target });
+            manual.request = { ...manual.request, status: 'confirmed', message: stopping ? '已归中并退出手动测试' : `ESP32 已确认输出 ${target}μs` };
+        }
+        await page.route('https://cdn.jsdelivr.net/**', route => route.fulfill({ contentType: 'text/javascript',
+            body: 'window.Chart=class { constructor(ctx,config){this.data=config.data;this.options=config.options||{};ctx.canvas.style.maxWidth="100%";} update(){} resize(){} destroy(){} };' }));
+        await page.route('http://manual.test/**', async route => {
+            const url = new URL(route.request().url());
+            if (url.pathname === '/') return route.fulfill({ contentType: 'text/html', body: html });
+            if (url.pathname.startsWith('/static/')) return route.fulfill({ contentType: url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript', body: fs.readFileSync(path.join(root, url.pathname.slice(1)), 'utf8') });
+            if (url.pathname.startsWith('/video_feed/')) return route.fulfill({ status: 204 });
+            if (url.pathname === '/dashboard/status') return route.fulfill({ json: {
+                sensor: { position: 0, speed: '0', mode: 'WEB', throttle: 1500, encoder_fresh: !manual.blocking,
+                    steering: { mode: 'OFF', fresh: true, reason: 'disabled' }, manual_steering: manual },
+                fps: { left: '210.0', right: '0.0' }, record: { active: false }, speed_record: { active: false },
+                sync: { phase: 'idle', active: false, pressure: {}, encoder: {}, encoder_fresh: !manual.blocking },
+                conversion: { phase: 'idle' }, replay: { enabled: false, cameras: {}, export: {} } } });
+            if (url.pathname === '/steering/manual') {
+                const body = route.request().postDataJSON(); commands.push(body);
+                if (body.action === 'start' && rejectEntry) return route.fulfill({ status: 409, json: { error: '请先结束同步记录' } });
+                manual.request = { id: ++next, action: body.action, target_us: body.pulse_us ?? null,
+                    status: 'pending', sent_at: next, message: '命令已发送，等待 ESP32 确认（最多3秒）' };
+                manual.blocking = true;
+                if (body.action === 'start' && delayEntry) await new Promise(resolve => setTimeout(resolve, delayEntry));
+                return route.fulfill({ json: { status: 'requested', request_id: next, state: manual } });
+            }
+            if (url.pathname === '/set_throttle') { throttle.push(url.searchParams.get('val')); return route.fulfill({ json: { status: 'success' } }); }
+            return route.fulfill({ status: 404, body: '' });
+        });
+        await page.goto('http://manual.test/');
+        await page.waitForFunction(() => !document.getElementById('manual-steering-start').disabled);
+        const panel = page.locator('#manual-steering-panel');
+        assert.equal(await panel.getAttribute('open'), null);
+        assert.equal(await page.locator('.manual-steering-content').isVisible(), false);
+        assert.ok(await panel.evaluate(node => document.querySelector('.control-panel').contains(node)));
+        await panel.locator('summary').click();
+        await page.locator('#manual-steering-start').click();
+        await page.waitForFunction(() => document.getElementById('manual-steering-status').textContent.includes('等待 ESP32'));
+        assert.ok(await page.locator('#manual-steering-plus').isDisabled());
+        ack();
+        await page.waitForFunction(() => !document.getElementById('manual-steering-plus').disabled);
+        assert.ok(await page.locator('#throttle-slider').isDisabled());
+        assert.ok(await page.locator('#line-steering-on').isDisabled());
+        await page.locator('#manual-steering-plus').click();
+        await page.waitForFunction(() => document.getElementById('manual-steering-plus').disabled);
+        assert.deepEqual(commands.at(-1), { action: 'set', pulse_us: 1505 });
+        assert.equal(await page.locator('#manual-steering-current').innerText(), '1500');
+        ack(1505);
+        await page.waitForFunction(() => document.getElementById('manual-steering-current').textContent === '1505');
+        await page.locator('#manual-steering-slider').evaluate(node => {
+            node.value = '1520'; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        await page.waitForFunction(() => document.getElementById('manual-steering-plus').disabled);
+        assert.deepEqual(commands.at(-1), { action: 'set', pulse_us: 1520 });
+        ack(1520);
+        await page.waitForFunction(() => !document.getElementById('manual-steering-apply').disabled);
+        await page.locator('#manual-steering-input').fill('1560');
+        const beforeInvalid = commands.length;
+        await page.locator('#manual-steering-apply').click();
+        assert.equal(commands.length, beforeInvalid);
+        assert.ok((await page.locator('#manual-steering-status').innerText()).includes('1450～1550'));
+        await page.locator('#manual-steering-input').fill('1540');
+        await page.locator('#manual-steering-apply').click();
+        await page.waitForFunction(() => document.getElementById('manual-steering-plus').disabled);
+        assert.deepEqual(commands.at(-1), { action: 'set', pulse_us: 1540 });
+        ack(1540);
+        await page.waitForFunction(() => !document.getElementById('manual-steering-center').disabled);
+        await page.locator('#manual-steering-center').click();
+        await page.waitForFunction(() => document.getElementById('manual-steering-center').disabled);
+        assert.equal(commands.at(-1).action, 'center');
+        ack();
+        await page.waitForFunction(() => !document.getElementById('manual-steering-center').disabled);
+        if (process.argv[2]) await panel.screenshot({ path: process.argv[2] });
+        await panel.locator('summary').click();
+        await page.waitForFunction(() => document.getElementById('manual-steering-badge').textContent.includes('等待'));
+        assert.equal(commands.at(-1).action, 'stop');
+        ack();
+        await page.waitForFunction(() => !document.getElementById('throttle-slider').disabled);
+        assert.equal(await panel.getAttribute('open'), null);
+
+        // Entry errors stay visible across subsequent dashboard polls.
+        await panel.locator('summary').click();
+        rejectEntry = true;
+        await page.locator('#manual-steering-start').click();
+        await page.waitForFunction(() => document.getElementById('manual-steering-status').textContent.includes('先结束同步记录'));
+        await page.waitForTimeout(300);
+        assert.ok((await page.locator('#manual-steering-status').innerText()).includes('先结束同步记录'));
+        rejectEntry = false;
+        delayEntry = 200;
+        await page.locator('#manual-steering-start').click();
+        await panel.locator('summary').click();  // Closing during HTTP entry must queue an exit.
+        await page.waitForFunction(() => document.getElementById('manual-steering-status').textContent.includes('等待 ESP32'));
+        await page.waitForTimeout(300);
+        assert.equal(commands.at(-1).action, 'stop');
+        ack();
+        await page.waitForFunction(() => !document.getElementById('throttle-slider').disabled);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await panel.locator('summary').click();
+        const overflow = await page.evaluate(() => ({ width: innerWidth, scroll: document.documentElement.scrollWidth,
+            elements: [...document.querySelectorAll('body *')].map(node => ({ tag: node.tagName, id: node.id,
+                cls: node.className, right: node.getBoundingClientRect().right, width: node.getBoundingClientRect().width }))
+                .filter(node => node.width > 0 && node.right > innerWidth + 1).slice(0, 15) }));
+        assert.ok(overflow.scroll <= overflow.width, JSON.stringify(overflow));
+        assert.deepEqual(throttle, []);  // Manual controls never command propulsion.
+        assert.deepEqual(errors, []);
+        console.log('Manual steering browser checks passed: fold, confirmation, steps, slider, bounds, neutral exit, errors, mobile.');
+    } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });

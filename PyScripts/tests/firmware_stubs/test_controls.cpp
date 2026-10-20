@@ -31,6 +31,7 @@ int main() {
     assert(pwmOutputs.count(12) == 0);  // No startup steering move.
     handleSteeringCommand('A');
     assert(pwmOutputs.count(12) == 0);
+    assert(!setSteeringDebugPulse(1505));
     servoAttachSucceeds = false;
     beginSteeringDebug();
     handleSteeringCommand('A');
@@ -47,6 +48,10 @@ int main() {
     assert(pwmOutputs[12] == 1450);
     handleSteeringCommand('K');
     assert(pwmOutputs[12] == 1550);
+    assert(setSteeringDebugPulse(1505) && pwmOutputs[12] == 1505);
+    assert(!setSteeringDebugPulse(1449) && !setSteeringDebugPulse(1551));
+    assert(steeringTargetUs() == 1505);
+    handleSteeringCommand('K');
     Serial.output.clear();
     setESCThrottle(2000);
     startESCBoost(1900);

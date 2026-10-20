@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from PyScripts.telemetry import CsvRecorder, EncoderStream
 from PyScripts.steering_requests import SteeringRequests
+from PyScripts.manual_steering import ManualSteering
 
 
 class DashboardTests(unittest.TestCase):
@@ -39,6 +40,7 @@ class DashboardTests(unittest.TestCase):
         self.app.sensor_state.update({'last_serial_line': '', 'last_serial_rx_mono': 0, 'serial_error': None})
         self.app.sensor_state.update(steering={}, last_steering_rx_mono=0)
         self.app.steering_requests = SteeringRequests()
+        self.app.manual_steering = ManualSteering()
         self.app.esp32_serial = Mock(is_open=True, port='/dev/ttyUSB0')
         self.app.sync_coordinator.state = {'active': False, 'phase': 'idle', 'events': []}
         self.app.record_workflow_active.clear()
@@ -168,7 +170,7 @@ class DashboardTests(unittest.TestCase):
     def test_combined_status_contains_all_ui_data(self):
         response = self.client.get('/dashboard/status')
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(set(response.get_json()), {'sensor', 'fps', 'record', 'speed_record', 'sync', 'conversion'})
+        self.assertEqual(set(response.get_json()), {'sensor', 'fps', 'record', 'speed_record', 'sync', 'conversion', 'replay'})
         self.assertEqual(response.get_json()['sensor']['throttle'], 1500)
 
     def test_servo_debug_explains_stale_encoder_and_normal_command_restores_data(self):
@@ -309,27 +311,91 @@ class DashboardTests(unittest.TestCase):
         self.assertTrue(path.exists())
         self.assertFalse(self.app.record_workflow_active.is_set())
 
+    def manual_start(self):
+        self.app.esp32_serial.write.side_effect = lambda packet: len(packet)
+        response = self.client.post('/steering/manual', json={'action': 'start'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        request_id = response.get_json()['request_id']
+        self.app.esp32_serial.write.assert_called_with(f'V\nS0000,{request_id}\n'.encode())
+        self.receive([f'[SERVO_ACK] id={request_id} ok=1 target=1500 low=1450 mid=1500 high=1550 manual=1 ready=1 reason=ok\n'.encode()])
+        return request_id
+
+    def test_manual_panel_is_folded_and_commands_have_firmware_confirmation(self):
+        html = self.client.get('/').get_data(as_text=True)
+        self.assertIn('<details id="manual-steering-panel" class="manual-steering-panel">', html)
+        self.manual_start()
+        state = self.client.get('/steering/manual/status').get_json()
+        self.assertTrue(state['active'] and state['fresh'] and state['precise'])
+        self.assertEqual(state['request']['status'], 'confirmed')
+        response = self.client.post('/steering/manual', json={'action': 'set', 'pulse_us': 1505})
+        self.assertEqual(response.status_code, 200)
+        move = response.get_json()['request_id']
+        self.app.esp32_serial.write.assert_called_with(f'S1505,{move}\n'.encode())
+        self.receive([f'[SERVO_ACK] id={move} ok=1 target=1505 low=1450 mid=1500 high=1550 manual=1 ready=1 reason=ok\n'.encode()])
+        self.assertEqual(self.client.get('/dashboard/status').get_json()['sensor']['manual_steering']['target_us'], 1505)
+        with self.app.sync_coordinator.operation_lock:
+            stop = self.client.post('/steering/manual', json={'action': 'stop'}).get_json()['request_id']
+        self.app.esp32_serial.write.assert_called_with(f'C\nR\nS0001,{stop}\n'.encode())
+        self.receive([f'[SERVO_ACK] id={stop} ok=1 target=1500 low=1450 mid=1500 high=1550 manual=0 ready=1 reason=ok\n[ENC],0,10,0\n'.encode()])
+        self.assertFalse(self.client.get('/steering/manual/status').get_json()['blocking'])
+        self.assertTrue(self.app.encoder_ready())
+
+    def test_manual_test_blocks_drive_autonomy_and_encoder_recordings(self):
+        self.manual_start()
+        self.assertEqual(self.client.post('/set_throttle?val=1600').status_code, 409)
+        self.assertEqual(self.client.post('/set_throttle?val=1500').status_code, 200)
+        self.assertEqual(self.client.post('/steering/line', json={'enabled': True}).status_code, 409)
+        self.assertEqual(self.client.post('/speed_record/start').status_code, 409)
+        self.assertEqual(self.client.get('/start_record').status_code, 409)
+        self.assertEqual(self.client.post('/imu/command', json={'action': 'start'}).status_code, 409)
+        self.app.esp32_serial.reset_input_buffer.assert_not_called()
+
+    def test_manual_entry_rejects_recording_throttle_rc_and_conflicting_operations(self):
+        self.app.sensor_state['throttle'] = 1600
+        self.assertEqual(self.client.post('/steering/manual', json={'action': 'start'}).status_code, 409)
+        self.app.sensor_state.update(throttle=1500, mode='RC')
+        self.assertEqual(self.client.post('/steering/manual', json={'action': 'start'}).status_code, 409)
+        self.app.sensor_state['mode'] = 'WEB'
+        self.app.sync_coordinator.state['active'] = True
+        self.assertEqual(self.client.post('/steering/manual', json={'action': 'start'}).status_code, 409)
+        self.app.sync_coordinator.state['active'] = False
+        with self.app.sync_coordinator.operation_lock:
+            self.assertEqual(self.client.post('/steering/manual', json={'action': 'start'}).status_code, 409)
+        self.assertEqual(self.client.post('/speed_record/start').status_code, 200)
+        self.assertEqual(self.client.post('/steering/manual', json={'action': 'start'}).status_code, 409)
+        self.app.esp32_serial.write.assert_not_called()
+
+    def test_manual_validation_short_writes_and_unavailable_serial(self):
+        for body in ([], {'action': 'bad'}, {'action': 'set', 'pulse_us': True},
+                     {'action': 'set', 'pulse_us': 2000}, {'action': 'set', 'pulse_us': 1505.5}):
+            self.assertEqual(self.client.post('/steering/manual', json=body).status_code, 400)
+        self.assertEqual(self.client.post('/steering/manual', json={'action': 'set', 'pulse_us': 1505}).status_code, 409)
+        self.app.esp32_serial.write.return_value = 1
+        self.assertEqual(self.client.post('/steering/manual', json={'action': 'start'}).status_code, 503)
+        self.assertEqual(self.client.get('/steering/manual/status').get_json()['request']['status'], 'error')
+        self.app.esp32_serial.is_open = False
+        self.assertEqual(self.client.post('/steering/manual', json={'action': 'stop'}).status_code, 409)
+
     def test_camera_uses_deadline_instead_of_required_frame_count(self):
         camera = self.app.cam_left
         camera.is_active = camera.available = camera.running = True
         camera.record_done.set()
         camera.cap = Mock()
         frame = Mock()
-        captured = []
 
         def read():
             camera.running = False
             return True, frame
 
         camera.cap.read.side_effect = read
-        with patch.object(camera, '_save_images_to_disk', side_effect=lambda frames, session: captured.extend(frames)):
+        recorder = Mock()
+        with patch.object(self.app, 'AsyncImageRecorder', return_value=recorder), patch.object(camera.replay, 'submit'):
             self.assertTrue(camera.start_record('deadline_test', duration_sec=3))
-            camera.record_frames.append((1, frame))
-            with patch.object(self.app.time, 'monotonic', return_value=camera.record_deadline + 0.01):
+            with patch.object(self.app.time, 'monotonic_ns', return_value=int((camera.record_deadline + 0.01) * 1e9)):
                 camera._update()
-            self.assertTrue(camera.record_done.wait(2))
         self.assertFalse(camera.is_recording)
-        self.assertEqual(len(captured), 1)  # Late frame excluded even far below 630 frames.
+        recorder.submit.assert_not_called()  # Late frames excluded regardless of frame count.
+        recorder.finish.assert_called_once()
         camera.available = False
 
 

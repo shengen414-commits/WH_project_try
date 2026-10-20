@@ -44,7 +44,9 @@
             onData(data) {
                 for (const [render, state] of [[global.renderFpsStats, data.fps], [global.renderSensorStats, data.sensor],
                     [global.renderRecordStatus, data.record], [global.updateSpeedRecordUI, data.speed_record],
-                    [global.renderSyncState, data.sync], [global.renderSyncConversion, data.conversion]]) {
+                    [global.renderSyncState, data.sync], [global.renderSyncConversion, data.conversion],
+                    [global.renderCameraReplay, data.replay],
+                    [global.renderManualSteering, data.sensor && data.sensor.manual_steering]]) {
                     try { if (typeof render === 'function') render(state); }
                     catch (error) { console.warn('Dashboard render:', render.name, error.message); }
                 }

@@ -47,6 +47,18 @@ class RecorderTests(unittest.TestCase):
     def sample(self, seq):
         return EncoderStream().decode(f'[ENC],{seq},10,1', time.time_ns())
 
+    def test_measured_saved_rate_uses_written_sample_timestamps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = CsvRecorder(Path(directory) / 'speed.csv')
+            base = time.monotonic_ns()
+            for i in range(11):
+                row = self.sample(i)
+                row['host_receive_monotonic_ns'] = base + i * 10_000_000
+                recorder.submit(row)
+            recorder.stop()
+            self.assertTrue(recorder.done.wait(3))
+            self.assertAlmostEqual(recorder.status()['saved_hz'], 100)
+
     def test_two_recordings_share_samples_without_duplicate_polling(self):
         with tempfile.TemporaryDirectory() as directory:
             recorders = [CsvRecorder(Path(directory) / name) for name in ('speed.csv', 'sensor.csv')]

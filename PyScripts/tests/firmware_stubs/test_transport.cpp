@@ -12,6 +12,17 @@ std::vector<std::pair<char, int>> commands;
 bool diagnosticsMuted = false;
 bool neutralHeld = false;
 bool steeringDebug = false;
+int steeringPulse = 1500;
+bool steeringOutputReady() { return steeringDebug; }
+int steeringTargetUs() { return steeringPulse; }
+int steeringLowUs() { return 1450; }
+int steeringCenterUs() { return 1500; }
+int steeringHighUs() { return 1550; }
+bool setSteeringDebugPulse(int value) {
+    if (!steeringDebug || value < 1450 || value > 1550) return false;
+    steeringPulse = value;
+    return true;
+}
 std::string steeringCommands;
 int autoStarts = 0, yawStarts = 0;
 std::string autoConfig;
@@ -30,8 +41,8 @@ void beginMPU6050Debug() { mpuDebug = true; }
 void endMPU6050Debug() { mpuDebug = false; }
 void handleMPU6050DebugCommand(char value) { mpuCommands += value; }
 void setESCDebugState(bool mute, bool neutral) { diagnosticsMuted = mute; neutralHeld = neutral; }
-void beginSteeringDebug() { steeringDebug = true; }
-void endSteeringDebug() { steeringDebug = false; }
+void beginSteeringDebug() { steeringDebug = true; steeringPulse = 1500; }
+void endSteeringDebug() { steeringDebug = false; steeringPulse = 1500; }
 void handleSteeringCommand(char value) { steeringCommands += value; }
 unsigned long millis() { return clockMs; }
 long readEncoderPosition() { return -42; }
@@ -153,6 +164,35 @@ int main() {
     feed("N1,4294967296\nN1,,12\nN1,\n");
     assert(autoStarts == beforeTaggedStart + 1); // Reject overflow and malformed ids.
     assert(Serial.output.empty());
+
+    Serial.output.clear();
+    feed("S1505,30\n");
+    assert(steeringPulse == 1500 && !steeringDebug);
+    assert(Serial.output.find("id=30 ok=0") != std::string::npos);
+    Serial.output.clear();
+    feed("V\nS0000,4294967295\n");
+    assert(steeringDebug && neutralHeld);
+    assert(Serial.output.find("id=4294967295 ok=1 target=1500") != std::string::npos);
+    feed("S15");
+    feed("05,31\n");
+    assert(steeringPulse == 1505);
+    feed("S2000,32\n");
+    assert(steeringPulse == 1505 && Serial.output.find("id=32 ok=0") != std::string::npos);
+    Serial.output.clear();
+    feed("S1500,4294967296\nS1500,0\nS1500,,3\n");
+    assert(Serial.output.empty() && steeringPulse == 1505);
+    Serial.capacity = 0;
+    feed("S1510,33\n");
+    assert(steeringPulse == 1510 && Serial.output.empty());
+    Serial.capacity = 128;
+    pollSerialCommands();
+    assert(Serial.output.find("id=33 ok=1 target=1510") != std::string::npos);
+    feed("S0000,34\n");
+    assert(steeringPulse == 1500);
+    feed("S0001,35\n");
+    assert(!steeringDebug && !neutralHeld && serialNormalMode());
+    feed("@S\n");
+    assert(autoConfig == "S");  // The manual packet prefix must not steal @S configuration.
 
     Serial.input = std::string(100, '?');
     pollSerialCommands();

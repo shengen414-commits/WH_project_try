@@ -31,6 +31,14 @@ void help() {
 }
 
 bool steeringDebugActive() { return debugEnabled; }
+bool steeringOutputReady() { return steering.attached(); }
+int steeringTargetUs() { return targetUs; }
+bool setSteeringDebugPulse(int pwm) {
+    if (!debugEnabled || !steering.attached() || pwm < travelLow || pwm > travelHigh) return false;
+    sweeping = false;
+    writeTarget(pwm);
+    return true;
+}
 int steeringCenterUs() { return travelCenter; }
 int steeringLowUs() { return travelLow; }
 int steeringHighUs() { return travelHigh; }
@@ -109,12 +117,12 @@ void updateSteering() {
     }
 }
 
-void publishSteeringDebug() {
+void publishSteeringDebug(bool preciseCommands) {
     if (!debugEnabled || millis() - lastStatusAt < STATUS_MS) return;
-    char line[96];
-    int length = snprintf(line, sizeof(line), "[SERVO] GPIO%d target=%d us PWM=%s sweep=%s\n",
+    char line[128];
+    int length = snprintf(line, sizeof(line), "[SERVO] GPIO%d target=%d us PWM=%s sweep=%s low=%d mid=%d high=%d proto=%d\n",
                           SteeringConfig::PIN, targetUs, steering.attached() ? "ready" : "error",
-                          sweeping ? "running" : "idle");
+                          sweeping ? "running" : "idle", travelLow, travelCenter, travelHigh, preciseCommands);
     if (length > 0 && length < (int)sizeof(line) && Serial.availableForWrite() >= length) {
         Serial.write((const uint8_t*)line, length);
         lastStatusAt = millis();

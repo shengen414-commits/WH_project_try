@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>双路高速感知终端</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='sync-columns-2') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='manual-servo-1') }}">
 </head>
 <body>
     <div class="top-bar">
@@ -92,6 +92,20 @@
         <div class="speed-record-status" id="speed-record-status">速度记录: 空闲 | 上限 10 min</div>
     </div>
 
+    <section class="replay-panel" aria-labelledby="replay-title">
+        <h2 id="replay-title">相机即时回放</h2>
+        <p>开启后持续缓存最近两分钟，保存时采集继续运行。未满两分钟时保存已有画面。</p>
+        <div class="replay-controls">
+            <label>回放录制帧率 <input id="replay-fps" type="number" value="60" min="1" max="240" step="1"> fps</label>
+            <button id="replay-toggle" onclick="toggleCameraReplay()">开启两分钟回放</button>
+            <button id="replay-save" onclick="saveCameraReplay()" disabled>保存最近两分钟</button>
+        </div>
+        <div id="replay-cameras" class="replay-status">回放未开启</div>
+        <div id="replay-job" class="replay-status" role="status" aria-live="polite"></div>
+        <div id="replay-files" class="replay-files"></div>
+        <small>默认 60fps，可按性能调整。每路缓存上限 1GiB，容量不足时历史会缩短。回放保存视频及逐帧时间索引；车速、扫描阀仍需提前开启各自记录。</small>
+    </section>
+
     <div class="operation-columns">
         {% include 'sync_panel.html' %}
     <div class="control-panel">
@@ -139,6 +153,32 @@
         <div id="line-steering-status" class="sync-hint" role="status">巡线转向：等待固件状态。先归中油门再开启；丢线或反馈超时会停止动力。</div>
         <div id="line-steering-message" class="sync-hint" role="status"></div>
         <div class="sync-hint">默认基础反向响应：CH1 在车左侧，CH4/CH5 为居中区；偏离后固定小幅转向。PWM 左右方向需静止测试确认。</div>
+        <details id="manual-steering-panel" class="manual-steering-panel">
+            <summary>手动舵机调试 <span id="manual-steering-badge">未进入</span></summary>
+            <div class="manual-steering-content">
+                <p class="sync-hint">静止测试使用。进入后关闭自动巡线、锁定动力中位并暂停编码器上报；收起面板时归中退出。</p>
+                <div class="sync-buttons">
+                    <button id="manual-steering-start" onclick="manualSteeringAction('start')">进入手动测试</button>
+                    <button id="manual-steering-stop" onclick="manualSteeringAction('stop')" disabled>归中并退出</button>
+                </div>
+                <div class="manual-steering-reading">固件输出 <strong id="manual-steering-current">—</strong> μs <span id="manual-steering-range">范围 1450～1550 μs</span></div>
+                <label class="manual-steering-slider-label" for="manual-steering-slider">目标脉宽</label>
+                <input id="manual-steering-slider" type="range" min="1450" max="1550" step="5" value="1500" data-manual-adjust disabled>
+                <div class="manual-steering-values"><span id="manual-steering-low">1450</span><span id="manual-steering-mid">中位 1500</span><span id="manual-steering-high">1550</span></div>
+                <div class="manual-steering-input-row">
+                    <label for="manual-steering-input">目标</label>
+                    <input id="manual-steering-input" type="number" min="1450" max="1550" step="1" value="1500" inputmode="numeric" data-manual-adjust disabled>
+                    <span>μs</span><button id="manual-steering-apply" onclick="applyManualSteering()" data-manual-adjust disabled>应用</button>
+                </div>
+                <div class="sync-buttons manual-steering-steps">
+                    <button id="manual-steering-minus" onclick="stepManualSteering(-5)" data-manual-adjust disabled>−5 μs</button>
+                    <button id="manual-steering-center" onclick="manualSteeringAction('center')" data-manual-adjust disabled>舵机回中</button>
+                    <button id="manual-steering-plus" onclick="stepManualSteering(5)" data-manual-adjust disabled>＋5 μs</button>
+                </div>
+                <div id="manual-steering-status" class="sync-hint" role="status" aria-live="polite">先归中油门，再进入手动测试。</div>
+                <small class="sync-hint">先用小步调整确认实际左右方向。显示值为固件脉宽指令，并非实测车轮角度。</small>
+            </div>
+        </details>
         <div class="sync-buttons"><a href="/imu">MPU6050 三维姿态测试 →</a></div>
 
         <div style="margin-top: 20px; gap: 20px; display: flex; justify-content: center;">
@@ -149,8 +189,10 @@
 
     </div>
 
-    <script src="{{ url_for('static', filename='js/main.js') }}?v=line-ack-3"></script>
-    <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-4"></script>
-    <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}?v=manual-servo-1"></script>
+    <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
+    <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=3"></script>
 </body>
 </html>
