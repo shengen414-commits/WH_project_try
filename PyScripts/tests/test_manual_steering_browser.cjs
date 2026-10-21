@@ -20,6 +20,8 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
             calibration_supported: true, center_min_us: 1300, center_max_us: 1700,
             target_us: null, low_us: 1200, center_us: 1500, high_us: 1800, serial_open: true, request: { status: 'idle' } };
         let next = 100, rejectEntry = false, delayEntry = 0;
+        const lineConfig={request:{status:'idle'},applied:null,probes:{fresh:true,valid:true,mask:1,center_channel:0,reason:'valid',side:'left'}};
+        const configs=[];
         function ack(target = manual.center_us) {
             const stopping = manual.request.action === 'stop';
             const calibrating = manual.request.action === 'calibrate';
@@ -39,10 +41,15 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
             if (url.pathname.startsWith('/camera/preview/')) return route.fulfill({ status: 204 });
             if (url.pathname === '/dashboard/status') return route.fulfill({ json: {
                 sensor: { position: 0, speed: '0', mode: 'WEB', throttle: 1500, encoder_fresh: !manual.blocking,
-                    steering: { mode: 'OFF', fresh: true, reason: 'disabled' }, manual_steering: manual },
+                    steering: { mode: 'OFF', fresh: true, reason: 'disabled' }, manual_steering: manual, line_response:lineConfig },
                 fps: { left: '210.0', right: '0.0' }, record: { active: false }, speed_record: { active: false },
                 sync: { phase: 'idle', active: false, pressure: {}, encoder: {}, encoder_fresh: !manual.blocking },
                 conversion: { phase: 'idle' }, replay: { enabled: false, cameras: {}, export: {} } } });
+            if(url.pathname==='/steering/line/config'){
+                const settings=route.request().postDataJSON();configs.push(settings);
+                lineConfig.request={id:++next,sent_at:next,status:'pending',settings,message:'等待固件参数确认'};
+                return route.fulfill({json:lineConfig});
+            }
             if (url.pathname === '/steering/manual') {
                 const body = route.request().postDataJSON(); commands.push(body);
                 if (body.action === 'start' && rejectEntry) return route.fulfill({ status: 409, json: { error: '请先结束同步记录' } });
@@ -148,6 +155,17 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         await page.waitForFunction(() => !document.getElementById('manual-steering-start').disabled);
         assert.deepEqual(throttle, []);  // Manual controls never command propulsion.
         assert.deepEqual(errors, []);
+        await page.locator('#line-response-form').evaluate(node=>node.closest('details').open=true);
+        assert.equal(await page.locator('#line-live-probes span').count(),8);
+        await page.locator('#line-response-form [name=direction]').selectOption('-1');
+        await page.locator('#line-response-form button').click();
+        await page.waitForFunction(()=>document.getElementById('line-response-status').textContent.includes('等待固件参数'));
+        assert.equal(lineConfig.applied,null);
+        assert.deepEqual(configs.at(-1),{left_us:180,right_us:180,deadband:.16,slew_us_s:600,direction:-1});
+        lineConfig.applied=configs.at(-1);lineConfig.request.status='confirmed';lineConfig.request.message='固件已确认比例参数';
+        await page.waitForFunction(()=>document.getElementById('line-response-status').textContent.includes('方向-1'));
+        const formOverflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth);
+        assert.equal(formOverflow,false);
         await page.close();
         for (let i=0;i<3;i++) {
             const reopened = await context.newPage();

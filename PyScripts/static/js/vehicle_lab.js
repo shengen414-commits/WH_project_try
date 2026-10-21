@@ -31,6 +31,7 @@
     }
     function render(data) {
         state=data;const s=data.state;
+        if(!initialized&&data.channels)for(const [key,value]of Object.entries(data.channels))$('sensor-channels').elements[key].checked=value;
         $('lab-start').disabled=busy||data.blocking;
         $('lab-zero').disabled=busy||!data.fresh;
         $('lab-stop').disabled=busy||!data.blocking;
@@ -39,7 +40,7 @@
         $('lab-health').textContent=`观察：${data.fresh?'在线':'未就绪'} ｜ 时钟误差界限：${number(data.clock.uncertainty_ms)}ms ｜ 丢包 ${data.sequence_gaps} ｜ 无效帧 ${data.invalid_frames}`;
         const line=data.raw.line||{};
         $('line-probes').replaceChildren(...Array.from({length:8},(_,i)=>{const node=document.createElement('span');node.textContent=`CH${i+1}`;node.className=line.mask>=0&&(line.mask&(1<<i))?'hit':'';return node;}));
-        const lineReasons={valid:'单条胶带',lost:'未检测到胶带',all_active:'全部命中',multiple_segments:'多个分离线段',stale:'数据过期'};
+        const lineReasons={valid:'单个或相邻两个探头命中',lost:'未检测到胶带',all_active:'全部命中',multiple_segments:'多个分离线段',too_wide:'命中超过两个探头',disabled:'巡线调试已关闭',stale:'数据过期'};
         $('line-position').textContent=`探头命中：${lineReasons[line.reason]||'等待数据'} ｜ 中心通道 ${Number.isFinite(line.center_channel)?(line.center_channel+1).toFixed(1):'—'}，目标4.5。探头间距未标定也可以先核对通道顺序。`;
         $('value-y').textContent=number(s.lateral_error_m,1000);
         $('value-heading').textContent=number(s.heading_error_rad,180/Math.PI);
@@ -62,6 +63,7 @@
     }
     async function perform(path,body){if(busy)return null;busy=true;errorUntil=0;for(const button of document.querySelectorAll('button'))button.disabled=true;message('正在发送…');try{const data=await api(path,body);if(data.state)render(data);message('已提交，等待状态确认');return data;}catch(e){errorUntil=Date.now()+5000;message(e.message);return null;}finally{busy=false;for(const button of document.querySelectorAll('button'))button.disabled=false;}}
     for(const button of document.querySelectorAll('[data-action]'))button.addEventListener('click',()=>perform('/vehicle-lab/command',{action:button.dataset.action}));
+    $('sensor-channels').addEventListener('submit',e=>{e.preventDefault();const form=e.target;perform('/vehicle-lab/channels',Object.fromEntries(['line','imu','camera'].map(key=>[key,form.elements[key].checked])));});
     $('geometry-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.target,g={};for(const key of Object.keys(state.profile.geometry)){const text=f.elements[key].value.trim();g[key]=text===''?null:key==='imu_axes'?text.split(',').map(Number):key.endsWith('_m')||key==='meters_per_count'?Number(text)/1000:Number(text);}await perform('/vehicle-lab/profile',{geometry:g});});
     $('actuator-form').addEventListener('submit',e=>{e.preventDefault();perform('/vehicle-lab/actuator/point',{angle_deg:Number($('wheel-angle').value)});});
     $('clear-points').addEventListener('click',()=>perform('/vehicle-lab/actuator/clear',{}));

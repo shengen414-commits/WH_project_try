@@ -1,7 +1,7 @@
 #pragma once
 #include "feedback_pid.h"
 
-enum class LineControlAlgorithm { Basic, PID };
+enum class LineControlAlgorithm { Basic, PID, Proportional };
 
 struct LineControlContext {
     float dtSeconds;
@@ -43,4 +43,12 @@ public:
                  float& correctionUs) override;
 private:
     FeedbackPID pid;
+};
+
+class ProportionalLineController : public LineController {
+public:
+    bool tune(float left, float right, float deadband, float slew);
+    void reset() override {}
+    bool compute(float error, const LineControlContext& context, float& output) override;
+    float leftUs = 180, rightUs = 180, deadband = .16f, slewUsPerSec = 600;
 };

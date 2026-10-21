@@ -37,6 +37,7 @@ void stopAutomaticSteering(bool) {}
 bool startLineFollowing() { ++autoStarts; return true; }
 bool startExternalYawControl() { ++yawStarts; return false; }
 bool handleAutomaticSteeringConfig(const char* value) { autoConfig = value; return true; }
+LineResponseConfig lineResponseConfig() { return {180,180,.16f,600,1}; }
 AutomaticSteeringState automaticSteeringState() {
     return {AutomaticSteeringMode::Off, 0, 1500, 24, false, "armed", LineControlAlgorithm::Basic, 1, 1500};
 }

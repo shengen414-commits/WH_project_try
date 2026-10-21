@@ -25,6 +25,9 @@ const fixture = JSON.parse(execFileSync(process.env.PYTHON || 'python',['-X','ut
             if(url.pathname==='/vehicle-lab/profile'){
                 Object.assign(state.profile,data);return route.fulfill({json:state});
             }
+            if(url.pathname==='/vehicle-lab/channels'){
+                state.channels=data;return route.fulfill({json:state});
+            }
             if(url.pathname==='/vehicle-lab/actuator/point')return route.fulfill({status:409,json:{error:'请先进入手动测试，等待固件确认'}});
             return route.fulfill({status:404});
         });
@@ -33,6 +36,12 @@ const fixture = JSON.parse(execFileSync(process.env.PYTHON || 'python',['-X','ut
         assert.equal(await page.locator('[name=imu_yaw_sign]').inputValue(),'-1');
         assert.equal(await page.locator('[name=line_pitch_m]').inputValue(),'');
         assert.equal(await page.locator('#value-y').innerText(),'—');
+        await page.locator('#sensor-channels [name=imu]').uncheck();
+        await page.locator('#sensor-channels [name=camera]').uncheck();
+        await page.locator('#sensor-channels button').click();
+        await page.waitForTimeout(200);
+        assert.deepEqual(commands.find(c=>c.path==='/vehicle-lab/channels').data,{line:true,imu:false,camera:false});
+        assert.equal(await page.locator('#sensor-channels [name=imu]').isChecked(),false);
         await page.locator('[name=line_pitch_m]').fill('8');
         await page.waitForTimeout(600);
         assert.equal(await page.locator('[name=line_pitch_m]').inputValue(),'8'); // Polls preserve edits.

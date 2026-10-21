@@ -29,6 +29,14 @@ def register_vehicle_lab(app, lab, operation, manual_status):
         jpeg = lab.jpeg
         return Response(jpeg, mimetype='image/jpeg', headers={'Cache-Control': 'no-store'}) if jpeg else ('', 204)
 
+    @app.post('/vehicle-lab/channels')
+    def lab_channels():
+        try:
+            lab.set_channels(body())
+            return jsonify(public_status())
+        except (ValueError,TypeError) as exc:
+            return jsonify(error=str(exc)),409
+
     @app.post('/vehicle-lab/command')
     def lab_command():
         try:

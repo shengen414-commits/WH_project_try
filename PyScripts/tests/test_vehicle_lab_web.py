@@ -53,6 +53,18 @@ class VehicleLabWebTests(unittest.TestCase):
         self.assertFalse(self.lab.blocking())
         self.assertEqual(self.writes[-1],b'R\n')
 
+    def test_sensor_switches_reset_estimator_and_do_not_send_actuator_commands(self):
+        settings={'line':True,'imu':False,'camera':False}
+        response=self.client.post('/vehicle-lab/channels',json=settings)
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json['channels'],settings)
+        self.assertEqual(self.writes,[])
+        self.assertIsNone(self.lab.jpeg)
+        self.lab.owned=True
+        self.lab.feed('[IMU],1000,0,0,-1,0,0,0,25,0,OK',10.)
+        self.assertNotIn('imu',self.lab.raw)
+        self.assertEqual(self.client.post('/vehicle-lab/channels',json={'line':1,'imu':True,'camera':True}).status_code,409)
+
     def test_profile_rejects_unconfirmed_actuator_points_and_changes_during_observation(self):
         self.assertEqual(self.client.post('/vehicle-lab/profile',json={'actuator':{}}).status_code,409)
         self.assertEqual(self.client.post('/vehicle-lab/actuator/point',json={'angle_deg':5}).status_code,409)

@@ -24,6 +24,10 @@ LinePosition estimateLinePosition(const LineSensorFrame& frame) {
         position.status = LinePositionStatus::MultipleSegments;
         return position;
     }
+    if (position.activeCount > 2) {
+        position.status = LinePositionStatus::TooWide;
+        return position;
+    }
     position.centerChannel = float(sum) / position.activeCount;
     position.normalizedError = (position.centerChannel - 3.5f) / 3.5f;
     position.status = LinePositionStatus::Valid;

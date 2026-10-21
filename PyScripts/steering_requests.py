@@ -7,6 +7,7 @@ import time
 
 REASONS = {
     "line_lost": "未检测到黑胶带",
+    "line_too_wide": "命中超过两个探头，只允许单个或相邻两个探头检测胶带",
     "line_ambiguous": "巡线读数为全通道命中或多段命中，请检查胶带位置与极性",
     "no_line_frame": "巡线模块尚未产生完整帧，请检查初始化与接线",
     "no_valid_line": "巡线反馈无效",

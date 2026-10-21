@@ -41,3 +41,19 @@ bool PIDLineController::compute(float error, const LineControlContext& context, 
                                context.highCorrectionUs, context.allowIntegral);
     return std::isfinite(correctionUs);
 }
+
+bool ProportionalLineController::tune(float left, float right, float dead, float slew) {
+    if (!std::isfinite(left) || !std::isfinite(right) || !std::isfinite(dead) || !std::isfinite(slew) ||
+        left < 0 || left > 300 || right < 0 || right > 300 || dead < 0 || dead > .3f || slew < 50 || slew > 1200) return false;
+    leftUs = left; rightUs = right; deadband = dead; slewUsPerSec = slew;
+    return true;
+}
+bool ProportionalLineController::compute(float error, const LineControlContext& context, float& output) {
+    output = 0;
+    if (!validInput(error, context)) return false;
+    const float magnitude = std::fabs(error);
+    if (magnitude <= deadband) return true;
+    const float scale = clamp((magnitude-deadband)/(1-deadband), 0, 1);
+    output = clamp((error > 0 ? leftUs : -rightUs)*scale, context.lowCorrectionUs, context.highCorrectionUs);
+    return true;
+}

@@ -35,6 +35,12 @@ int main() {
     assert(estimateLinePosition({0, 0, 0, 0}).status == LinePositionStatus::Lost);
     assert(estimateLinePosition({0, 0, 255, 255}).status == LinePositionStatus::AllActive);
     assert(estimateLinePosition({0, 0, 0x81, 0x81}).status == LinePositionStatus::MultipleSegments);
+    assert(estimateLinePosition({0, 0, 0x38, 0x38}).status == LinePositionStatus::TooWide);
+    for (int mask=0;mask<256;++mask) {
+        int count=0;for(int bit=0;bit<8;++bit)if(mask&(1<<bit))++count;
+        const bool expected=count==1 || (count==2 && (mask & (mask>>1))!=0);
+        assert(estimateLinePosition({0,0,(uint8_t)mask,(uint8_t)mask}).valid()==expected);
+    }
 
     BasicLineController basic;
     LineControlContext context = {.01f, -50, 50, false};
@@ -61,6 +67,15 @@ int main() {
     assert(basic.compute(-1, context, output) && output == -45);
     assert(!basic.compute(std::numeric_limits<float>::quiet_NaN(), context, output) && output == 0);
     assert(!basic.compute(1, {0, -50, 50, false}, output));
+    ProportionalLineController proportional;
+    assert(proportional.compute(1,{.01f,-300,300,false},output) && output==180);
+    assert(proportional.compute(-1,{.01f,-300,300,false},output) && output==-180);
+    assert(proportional.compute(.143f,context,output) && output==0);
+    assert(proportional.tune(200,100,.16f,600));
+    assert(proportional.compute(-1,{.01f,-300,300,false},output) && output==-100);
+    assert(proportional.compute(.5f,{.01f,-300,300,false},output) && output>75 && output<85);
+    assert(!proportional.tune(301,100,.16f,600));
+    assert(!proportional.tune(100,100,.4f,600));
 
     PIDLineController pid;
     assert(pid.tune(20, 0, 0));

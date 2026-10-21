@@ -152,6 +152,18 @@ void pollSerialCommands() {
             if (value == '\n') {
                 configPacket[configLength] = '\0';
                 const bool ok = serialNormalMode() && handleAutomaticSteeringConfig(configPacket);
+                if (configPacket[0] == 'K' || configPacket[0] == 'k') {
+                    const char* comma = strrchr(configPacket, ',');
+                    unsigned long id = 0; char extra;
+                    if (comma && sscanf(comma + 1, "%lu %c", &id, &extra) == 1 && id > 0 && id <= UINT32_MAX) {
+                        const auto settings = lineResponseConfig();
+                        pendingSteeringAckLength = snprintf(pendingSteeringAck, sizeof(pendingSteeringAck),
+                            "[LINE_CFG] id=%lu ok=%d left=%.0f right=%.0f dead=%.3f slew=%.0f dir=%d\n",
+                            id, ok, settings.leftUs, settings.rightUs, settings.deadband, settings.slewUsPerSec, settings.direction);
+                        if (pendingSteeringAckLength >= (int)sizeof(pendingSteeringAck)) pendingSteeringAckLength = 0;
+                        publishSteeringAck();
+                    }
+                }
                 if (serialNormalMode()) {
                     const char* result = ok ? "[FOLLOW] config accepted\n" : "[FOLLOW] config rejected\n";
                     int length = strlen(result);

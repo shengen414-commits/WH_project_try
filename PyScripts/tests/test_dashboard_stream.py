@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from PyScripts.telemetry import CsvRecorder, EncoderStream
 from PyScripts.steering_requests import SteeringRequests
 from PyScripts.manual_steering import ManualSteering
+from PyScripts.line_response import LineResponse
 
 
 class DashboardTests(unittest.TestCase):
@@ -41,6 +42,7 @@ class DashboardTests(unittest.TestCase):
         self.app.sensor_state.update(steering={}, last_steering_rx_mono=0)
         self.app.steering_requests = SteeringRequests()
         self.app.manual_steering = ManualSteering()
+        self.app.line_response = LineResponse()
         self.app.esp32_serial = Mock(is_open=True, port='/dev/ttyUSB0')
         self.app.sync_coordinator.state = {'active': False, 'phase': 'idle', 'events': []}
         self.app.record_workflow_active.clear()
@@ -480,6 +482,22 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn('src="/video_feed/', html)
         self.assertIn('/static/vendor/chartjs/chart.umd.js', html)
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
+
+    def test_line_response_configuration_is_separate_from_arming_and_confirmed_by_uart(self):
+        settings=dict(left_us=180,right_us=120,deadband=.16,slew_us_s=600,direction=-1)
+        self.app.esp32_serial.write.side_effect=lambda data:len(data)
+        response=self.client.post('/steering/line/config',json=settings)
+        self.assertEqual(response.status_code,200)
+        identifier=response.json['request']['id']
+        self.assertTrue(self.app.esp32_serial.write.call_args.args[0].startswith(b'@K'))
+        self.assertNotIn(b'N1',self.app.esp32_serial.write.call_args.args[0])
+        self.assertEqual(self.client.post('/steering/line',json={'enabled':True}).status_code,409)
+        self.receive([f'[LINE_CFG] id={identifier} ok=1 left=180 right=120 dead=0.160 slew=600 dir=-1\n[LINE],1,1000,24,24\n'.encode()])
+        result=self.client.get('/dashboard/status').json['sensor']['line_response']
+        self.assertEqual(result['applied'],settings)
+        self.assertTrue(result['probes']['valid'])
+        self.app.sensor_state['steering']={'mode':'LINE'}
+        self.assertEqual(self.client.post('/steering/line/config',json=settings).status_code,409)
 
 
 if __name__ == '__main__':

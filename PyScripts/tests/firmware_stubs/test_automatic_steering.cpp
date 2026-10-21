@@ -150,6 +150,29 @@ int main() {
     assert(automaticSteeringState().algorithm == LineControlAlgorithm::Basic);
     assert(!handleAutomaticSteeringConfig("C2"));
     assert(!handleAutomaticSteeringConfig("F-10,0.22,0.16"));
+    cycle(0x18,20000); // Finish the preceding rollover/old emergency-latch scenario.
+    feed("V\nS0002,499\nR\n"); // Explicit calibration restores center +/-300 travel.
+    feed("@K180,120,0.160,600,1,500\n");
+    assert(Serial.output.find("[LINE_CFG] id=500 ok=1") != std::string::npos);
+    assert(automaticSteeringState().algorithm == LineControlAlgorithm::Proportional);
+    assert(automaticSteeringState().mode == AutomaticSteeringMode::Off);
+    assert(!handleAutomaticSteeringConfig("K999,100,.16,600,1,501"));
+    cycle(0x18); feed("N1\n");
+    assert(automaticSteeringState().mode == AutomaticSteeringMode::Line);
+    assert(!handleAutomaticSteeringConfig("K100,100,.16,600,1,502"));
+    for(int i=0;i<40;++i)cycle(0x01);
+    assert(pwmOutputs[12]==steeringCenterUs()+180);
+    for(int i=0;i<60;++i)cycle(0xc0);
+    assert(pwmOutputs[12]<steeringCenterUs());
+    for(int i=0;i<40;++i)cycle(0x18);
+    assert(pwmOutputs[12]==steeringCenterUs());
+    cycle(0x38);
+    assert(automaticSteeringState().mode==AutomaticSteeringMode::Fault && pwmOutputs[12]==steeringCenterUs());
+    assert(std::string(automaticSteeringState().reason)=="line_too_wide");
+    feed("N0\n@K180,120,.160,600,-1,503\n"); cycle(0x18);feed("N1\n");
+    for(int i=0;i<40;++i)cycle(0x01);
+    assert(pwmOutputs[12]==steeringCenterUs()-180);
+    feed("N0\n");
     // Reproduce rejected arming while UART is full: Off status must be retried.
     Serial.output.clear(); Serial.capacity = 0;
     cycle(0); // No black tape, remains Off.

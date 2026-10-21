@@ -42,6 +42,7 @@ class VehicleLab:
         self.queue_delay_ms = self.max_queue_delay_ms = self.processing_ms = self.max_processing_ms = 0.
         self.vision_processing_ms = self.preview_encoding_ms = 0.
         self.processing_started = None
+        self.channels = {'line':True,'imu':True,'camera':True}
         self.input_gap = False
         self._status_cache = None
         self.status()
@@ -49,6 +50,20 @@ class VehicleLab:
     def blocking(self):
         # Safety ownership must remain readable while an estimator update runs.
         return self.owned
+
+    def set_channels(self, channels):
+        if not isinstance(channels,dict) or set(channels)!=set(self.channels) or any(type(v) is not bool for v in channels.values()):
+            raise ValueError('line、imu、camera 开关必须为布尔值')
+        with self.lock:
+            self.channels = dict(channels)
+            self.session += 1
+            self.estimator.reset(); self.counts.clear()
+            if not channels['camera']:
+                self.jpeg = None
+                self.vision = {'valid':False,'reason':'相机识别调试已关闭'}
+            if not channels['imu']: self.raw.pop('imu',None)
+            if not channels['line']: self.raw.pop('line',None)
+            if self.trace: self.trace.submit('channels',channels)
 
     def command(self, action):
         if action == 'stop':
@@ -139,7 +154,7 @@ class VehicleLab:
                 return False
 
     def queue_vision(self, observation):
-        if not isinstance(observation, VisionObservation) or not self.active or self.stop_event.is_set() or not self.timer.status(self.clock())['valid'] or not -.02 <= self.clock()-observation.time_s <= .5:
+        if not isinstance(observation, VisionObservation) or not self.channels['camera'] or not self.active or self.stop_event.is_set() or not self.timer.status(self.clock())['valid'] or not -.02 <= self.clock()-observation.time_s <= .5:
             raise ValueError('视觉观测过期、观察未启动或类型错误')
         # Validate the public contract before returning a queued HTTP acknowledgement.
         StateEstimator.validate_observation(observation)
@@ -185,10 +200,8 @@ class VehicleLab:
                 self.processing_started = None
 
     def _sync_work(self):
-        stop_event, session = self.stop_event, self.session
+        stop_event = self.stop_event
         while not stop_event.wait(1):
-            if session != self.session:
-                break
             try:
                 timer = self.timer
                 if self.probe is not None:
@@ -225,6 +238,8 @@ class VehicleLab:
                 self.lock.release()
 
     def _submit(self, observation):
+        if isinstance(observation,ImuObservation) and not self.channels['imu'] or isinstance(observation,LineObservation) and not self.channels['line'] or isinstance(observation,VisionObservation) and not self.channels['camera']:
+            return
         if self.estimator.submit(observation) and self.trace:
             self.trace.submit('observation', {'type': type(observation).__name__, **asdict(observation)})
 
@@ -284,6 +299,7 @@ class VehicleLab:
                         self.request.update(status='confirmed')
                     return True
                 if f[0] == '[IMU]':
+                    if not self.channels['imu']: return True
                     if len(f) != 11 or f[-1] not in ('NO', 'RUN', 'OK'):
                         raise ValueError('IMU字段错误')
                     ms = int(f[1]); values = list(map(float, f[2:10]))
@@ -329,8 +345,11 @@ class VehicleLab:
                 elif not bits: line_reason = 'lost'
                 elif len(bits) == 8: line_reason = 'all_active'
                 elif bits[-1]-bits[0]+1 != len(bits): line_reason = 'multiple_segments'
+                elif len(bits)>2: line_reason = 'too_wide'
                 channel = sum(bits)/len(bits) if bits and line_reason == 'valid' else None
                 self.raw['line'] = {'raw_mask': raw, 'mask': mask, 'center_channel': channel, 'reason': line_reason, 'device_ms': line_ms}
+                if not self.channels['line']:
+                    self.raw['line'] = {'mask':-1,'reason':'disabled','center_channel':None}
                 if stamp is not None:
                     if self.counts and (stamp <= self.counts[-1][0] or stamp-self.counts[-1][0] > .2):
                         self.counts.clear()
@@ -407,7 +426,7 @@ class VehicleLab:
                 vision_state['frame_age_ms'] = (now-vision_state['frame_read_time_s'])*1000
                 if vision_state['frame_age_ms'] > 250:
                     vision_state.update(valid=False, reason='相机帧已过期')
-            return {'active': self.active, 'blocking': self.owned, 'fresh': fresh,
+            return {'active': self.active, 'blocking': self.owned, 'fresh': fresh, 'channels':dict(self.channels),
                     'request': dict(self.request), 'clock': self.timer.status(now), 'state': state,
                     'raw': dict(self.raw), 'vision': vision_state, 'profile': profile,
                     'preview_available': self.jpeg is not None,
@@ -425,7 +444,8 @@ class VehicleLab:
         while not self.stop_event.wait(.03):
             now = self.clock()
             try:
-                if self.camera is not None:
+                if self.camera is not None and self.channels['camera']:
+                    generation = self.session
                     packet = self.camera()
                     if packet is not None:
                         sequence, read_at, frame = packet
@@ -444,6 +464,8 @@ class VehicleLab:
                             if now-read_at >= .25:
                                 self.vision = {'valid': False, 'reason': '相机处理完成时帧已过期',
                                                'frame_read_time_s': read_at}
+                                continue
+                            if generation != self.session or not self.channels['camera']:
                                 continue
                             # Publish immutable metadata without waiting for estimator replay.
                             self.vision = {'valid': False, 'reason': result['reason'], 'confidence': result['confidence'],

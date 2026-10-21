@@ -1,9 +1,11 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>车辆状态与标定</title><link rel="stylesheet" href="{{url_for('static',filename='css/vehicle_lab.css')}}?v=1"></head>
+<title>车辆状态与标定</title><link rel="stylesheet" href="{{url_for('static',filename='css/vehicle_lab.css')}}?v=2"></head>
 <body><main>
 <header><a href="/">← 主 Dashboard</a><h1>车辆状态与标定</h1><p>先测清楚，再闭环。这里仅观察状态，不执行自动纠偏或发出行驶油门。</p></header>
 <section><h2>联合观察</h2><p>启动会退出自动巡线，锁定动力中位。保持车辆静止校零，然后手推车辆、移动胶带观察变化。收起或关闭页面不会自动退出，请点击退出。</p>
+<form id="sensor-channels"><label><input type="checkbox" name="line" checked>巡线数据调试</label><label><input type="checkbox" name="imu" checked>MPU6050 数据调试</label><label><input type="checkbox" name="camera" checked>相机胶带识别调试</label><button type="submit">应用三路开关</button></form>
+<p>开关控制各路调试处理与估计输入，不切断传感器电源；切换会重建估计状态。相机开关只控制识别，不停止录像。要测试巡线驱动舵机，请先退出联合观察，再回主页面开启巡线转向。</p>
 <div class="buttons"><button id="lab-start" data-action="start">启动联合观察</button><button id="lab-zero" data-action="zero">静止校零（约2秒）</button><button id="lab-stop" data-action="stop">退出观察</button><a id="trace-download" href="/vehicle-lab/trace">下载本轮测试记录</a></div>
 <p id="lab-message" role="status" aria-live="polite">等待状态</p><p id="lab-health"></p>
 <div id="line-probes" class="probes" aria-label="巡线探头 CH1 在左 CH8 在右"></div><p id="line-position"></p>
@@ -38,4 +40,4 @@
 <img id="camera-preview" alt="共享相机的胶带识别结果" hidden style="max-width:100%;border-radius:8px">
 <details><summary>传感器安装建议</summary><ul><li>MPU6050：刚性固定在主车架、接近重心，远离电机和松动的面包板；倒装可以保留，向左转动整车时，换算后的角速度应为正。</li><li>巡线模块：横跨车身，CH1在左，CH8在右，CH4/CH5中点对准车身纵向中线；安装在前轴附近或略前方，避开车轮和连杆。离地高度按实物黑胶带/地面测试确定。</li><li>OV9281：车身中线附近的刚性支架上，朝前下方，画面同时覆盖近处胶带与前方预瞄区域。先以约20～35cm高度、向下约25～45°试装，再根据实际镜头视场调整；这些不是标定值。</li><li>相机的地面标定与安装位置绑定，移动支架、换镜头、改分辨率后重新标定。胶带预瞄距离需要覆盖车速×总延迟，再留出纠偏距离。</li></ul></details>
 </section>
-</main><script src="{{url_for('static',filename='js/vehicle_lab.js')}}?v=1"></script></body></html>
+</main><script src="{{url_for('static',filename='js/vehicle_lab.js')}}?v=2"></script></body></html>

@@ -1,7 +1,7 @@
 #pragma once
 #include "line_sensor.h"
 
-enum class LinePositionStatus { Valid, Lost, AllActive, MultipleSegments };
+enum class LinePositionStatus { Valid, Lost, AllActive, MultipleSegments, TooWide };
 
 // Sensor adapter: coordinates follow channel order, CH1=-1 and CH8=+1.
 // With CH1 mounted on the vehicle's left, positive means tape on the right.

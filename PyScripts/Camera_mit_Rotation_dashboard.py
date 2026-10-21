@@ -31,6 +31,7 @@ try:
     from .vehicle_state.service import VehicleLab
     from .vehicle_state.web import register_vehicle_lab
     from .diagnostic_output import DiagnosticOutput
+    from .line_response import LineResponse
 except ImportError:
     from telemetry import EncoderStream, CsvRecorder
     from sync_recording import SyncRecorder
@@ -46,6 +47,7 @@ except ImportError:
     from vehicle_state.service import VehicleLab
     from vehicle_state.web import register_vehicle_lab
     from diagnostic_output import DiagnosticOutput
+    from line_response import LineResponse
 
 # 确保录像保存根目录存在
 SAVE_DIR = str(Path(os.environ.get('CAR_RECORDS_DIR', str(Path(__file__).resolve().parent.parent / 'Car_Records'))).resolve())
@@ -110,6 +112,7 @@ encoder_stream = EncoderStream(PPR, KMH_PER_RPM)
 imu_visualization = ImuVisualization()
 steering_requests = SteeringRequests()
 manual_steering = ManualSteering()
+line_response = LineResponse()
 estop_ignore_until = 0.0
 serial_diagnostics = DiagnosticOutput()
 
@@ -420,6 +423,7 @@ def read_esp32_data():
                 sensor_state['last_steering_rx_mono'] = 0
                 imu_visualization.invalidate(message)
                 manual_steering.invalidate(message)
+                line_response.invalidate(message)
                 vehicle_lab.invalidate(message)
                 with serial_write_lock:
                     try:
@@ -449,9 +453,12 @@ def read_esp32_data():
                 imu_visualization.feed(line, now_mono_ns / 1e9)
                 steering_requests.feed(line)
                 manual_steering.feed(line)
+                line_response.feed(line, now_mono_ns / 1e9)
                 vehicle_lab.enqueue(line, now_mono_ns / 1e9)
                 sample = encoder_stream.decode(line, now_ns, sensor_state["throttle"], sensor_state["mode"], now_mono_ns)
                 if sample is not None:
+                    if sample['device_epoch'] != sensor_state.get('device_epoch',0):
+                        line_response.invalidate('设备计数已重置，请重新应用巡线参数')
                     manual_steering.normal_frame()
                     sensor_state.update({"position": sample["Position"], "speed_pps": sample["speed_pps"],
                                          "last_time_ms": sample["Time_ms"], "last_pos": sample["Position"],
@@ -911,6 +918,7 @@ def sensor_public_state():
         "serial_framing_errors": sensor_state.get("serial_framing_errors", 0),
         "serial_error": sensor_state.get("serial_error"),
         "manual_steering": manual_steering_public_state(),
+        "line_response": line_response.snapshot(),
         "steering": {**sensor_state.get('steering', {}),
                      'fresh': time.monotonic() - sensor_state.get('last_steering_rx_mono', 0) < 1.0,
                      'request': steering_requests.snapshot()}
@@ -1138,6 +1146,8 @@ def set_line_steering():
     if not isinstance(payload, dict) or not isinstance(payload.get('enabled'), bool):
         return jsonify(error='enabled 必须是布尔值'), 400
     enabled = payload['enabled']
+    if enabled and line_response.snapshot()['request']['status'] not in ('idle','confirmed'):
+        return jsonify(error='巡线参数尚未获固件确认，请先应用参数并等待确认'),409
     if enabled and vehicle_lab.blocking():
         return jsonify(error='请先退出状态估计联合观察'), 409
     if enabled and manual_steering.blocking():
@@ -1151,6 +1161,8 @@ def set_line_steering():
         with serial_write_lock:
             # Ownership is published before U acquires this UART lock. Read the
             # atomic flag here; acquiring the lab lock would invert lock order.
+            if enabled and line_response.snapshot()['request']['status'] not in ('idle','confirmed'):
+                return jsonify(error='巡线参数正在更新，等待固件确认后再开启'),409
             if enabled and vehicle_lab.owned:
                 return jsonify(error='请先退出状态估计联合观察'), 409
             if enabled and manual_steering.blocking():
@@ -1166,6 +1178,26 @@ def set_line_steering():
     # A successful write is only a request; firmware checks live sensor validity.
     return jsonify(status='requested', message='命令已发送，等待 ESP32 确认（最多3秒）',
                    enabled=enabled, request_id=request_id)
+
+
+@app.post('/steering/line/config')
+def configure_line_response():
+    identifier = None
+    try:
+        with vehicle_lab_operation('line_config'):
+            state = sensor_state.get('steering', {})
+            if state.get('mode') in ('LINE','YAW') or steering_requests.snapshot().get('status') == 'pending':
+                raise ValueError('先关闭巡线并等待确认，再修改参数')
+            if vehicle_lab.blocking() or manual_steering.blocking() or not encoder_ready():
+                raise ValueError('先退出联合观察、手动/IMU测试，恢复正常编码器上报')
+            with serial_write_lock:
+                identifier, packet = line_response.begin(request.get_json(silent=True))
+                if not esp32_serial or not esp32_serial.is_open or esp32_serial.write(packet) != len(packet):
+                    raise OSError('参数发送失败或串口未连接')
+        return jsonify(line_response.snapshot())
+    except (ValueError,OSError) as exc:
+        if identifier is not None: line_response.fail(identifier,str(exc))
+        return jsonify(error=str(exc)),409
 
 
 @app.route('/set_throttle', methods=['GET', 'POST'])

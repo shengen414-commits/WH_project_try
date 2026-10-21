@@ -22,6 +22,8 @@ void updateAutomaticSteering();
 void publishAutomaticSteering();
 bool handleAutomaticSteeringConfig(const char* packet);  // contents after @
 AutomaticSteeringState automaticSteeringState();
+struct LineResponseConfig { float leftUs, rightUs, deadband, slewUsPerSec; int direction; };
+LineResponseConfig lineResponseConfig();
 
 // Reserved adapters for an MPU6050 driver and camera/RC outer controller.
 // These do not initialize hardware or open a second serial connection.
