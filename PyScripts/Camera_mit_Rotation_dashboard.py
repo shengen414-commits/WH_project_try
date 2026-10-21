@@ -1200,6 +1200,11 @@ def configure_line_response():
         return jsonify(error=str(exc)),409
 
 
+@app.get('/steering/line/config')
+def line_response_status():
+    return jsonify(line_response.snapshot())
+
+
 @app.route('/set_throttle', methods=['GET', 'POST'])
 def set_throttle():
     global estop_ignore_until

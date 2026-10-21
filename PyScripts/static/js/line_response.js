@@ -1,9 +1,16 @@
 (function(global){
     const form=document.getElementById('line-response-form');if(!form)return;
-    let sentAt=-1, busy=false, pending=false, epoch=null, errorUntil=0;
+    let sentAt=-1, busy=false, pending=false, epoch=null, errorUntil=0, initialized=false, edited=false;
+    const keys=['left_us','right_us','deadband','slew_us_s','direction'];
+    form.addEventListener('input',()=>{edited=true;});
+    form.addEventListener('change',()=>{edited=true;});
     const status=document.getElementById('line-response-status');
     global.renderLineResponse=function(data){
         if(!data)return;
+        if(!initialized){
+            if(data.applied&&!edited)for(const key of keys)form.elements[key].value=data.applied[key];
+            initialized=true;
+        }
         if(data.epoch&&data.epoch!==epoch){epoch=data.epoch;sentAt=-1;}
         const p=data.probes||{}, box=document.getElementById('line-live-probes');
         box.replaceChildren(...Array.from({length:8},(_,i)=>{
@@ -25,15 +32,43 @@
         }
         form.querySelector('button').disabled=busy||pending;
     };
-    form.addEventListener('submit',async event=>{
-        event.preventDefault();if(busy||pending)return;busy=true;errorUntil=0;form.querySelector('button').disabled=true;
+    async function requestJson(method,body){
         const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),1800);
         try{
-            const settings=Object.fromEntries(['left_us','right_us','deadband','slew_us_s','direction'].map(key=>[key,Number(form.elements[key].value)]));
-            const response=await fetch('/steering/line/config',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify(settings)});
+            const response=await fetch('/steering/line/config',{method,cache:'no-store',headers:{'Content-Type':'application/json'},signal:controller.signal,...(body?{body:JSON.stringify(body)}:{})});
             const data=await response.json();if(!response.ok)throw new Error(data.error||`HTTP ${response.status}`);
-            global.renderLineResponse(data);
-        }catch(error){errorUntil=Date.now()+4000;status.textContent=error.name==='AbortError'?'参数请求超时，等待状态确认后重试':error.message;}
-        finally{clearTimeout(timer);busy=false;form.querySelector('button').disabled=pending;if(global.dashboardPolling)global.dashboardPolling.refresh();}
+            return data;
+        }finally{clearTimeout(timer);}
+    }
+    global.ensureLineResponseApplied=async function(){
+        if(busy)throw new Error('参数请求正在执行，请稍后再开启');
+        if(!form.checkValidity()){form.closest('details').open=true;form.reportValidity();throw new Error('请先填写有效的巡线参数');}
+        const settings=Object.fromEntries(keys.map(key=>[key,Number(form.elements[key].value)]));
+        const matches=data=>data.applied&&keys.every(key=>data.applied[key]===settings[key]);
+        busy=true;errorUntil=0;form.querySelector('button').disabled=true;
+        try{
+            let data=await requestJson('GET');
+            const waiting=data.request?.status==='pending';
+            // Reapply even identical saved values: this also selects PROP in firmware.
+            if(!waiting)data=await requestJson('POST',settings);
+            const id=data.request?.id, until=Date.now()+3500;
+            while(true){
+                global.renderLineResponse(data);
+                if(data.request?.id!==id)throw new Error('巡线参数被其他请求修改，请重新开启');
+                if(data.request.status==='confirmed'){
+                    if(!matches(data))throw new Error('已确认参数与当前输入不同，请重新应用');
+                    return;
+                }
+                if(data.request.status!=='pending'||Date.now()>=until)throw new Error(data.request.message||'参数未确认，未开启巡线');
+                await new Promise(resolve=>setTimeout(resolve,80));
+                data=await requestJson('GET');
+            }
+        }finally{busy=false;form.querySelector('button').disabled=pending;}
+    };
+    form.addEventListener('submit',async event=>{
+        event.preventDefault();if(busy||pending)return;
+        try{await global.ensureLineResponseApplied();}
+        catch(error){errorUntil=Date.now()+4000;status.textContent=error.name==='AbortError'?'参数请求超时，未开启巡线':error.message;}
+        finally{if(global.dashboardPolling)global.dashboardPolling.refresh();}
     });
 })(window);

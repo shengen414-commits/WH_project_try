@@ -206,6 +206,7 @@ function renderSensorStats(data) {
 }
 
 let lineSteeringPending = false;
+let linePreparing = false, lineStartGeneration = 0;
 let lastLineSteeringState = {};
 let lineSteeringExpectedRequest = null;
 let lineSteeringAwaitingConfirmation = false;
@@ -247,9 +248,14 @@ function renderLineSteering(state) {
         `巡线转向：${labels[state.mode] || state.mode}${algorithmLabel}${directionLabel} | 偏差 ${state.e ?? '—'} | 舵机 ${state.pwm || '—'} us | ${reasons[state.reason] || state.reason || ''}` :
         '巡线转向：暂无新鲜状态，请确认已烧录新版正常固件。';
     document.getElementById('line-steering-on').disabled = lineSteeringPending || lineSteeringAwaitingConfirmation || isRcMode || (state.fresh && ['LINE', 'YAW'].includes(state.mode));
-    document.getElementById('line-steering-off').disabled = lineSteeringPending;
+    document.getElementById('line-steering-off').disabled = lineSteeringPending && !linePreparing;
 }
 async function requestLineSteering(enabled) {
+    if(!enabled&&linePreparing){
+        lineStartGeneration++;
+        document.getElementById('line-steering-message').innerText='已取消开启；参数确认结束后保持关闭';
+        return;
+    }
     if (enabled && globalThis.manualSteeringBlocking && globalThis.manualSteeringBlocking()) {
         document.getElementById('line-steering-message').innerText = '请先归中退出手动舵机测试';
         return;
@@ -259,7 +265,16 @@ async function requestLineSteering(enabled) {
     document.getElementById('line-steering-on').disabled = true;
     document.getElementById('line-steering-off').disabled = true;
     const label = document.getElementById('line-steering-message');
+    const generation=++lineStartGeneration;
     try {
+        if(enabled&&typeof ensureLineResponseApplied==='function'){
+            linePreparing=true;
+            document.getElementById('line-steering-off').disabled=false;
+            label.innerText='正在应用当前比例参数，确认后再开启巡线…';
+            await ensureLineResponseApplied();
+            if(generation!==lineStartGeneration)throw new Error('已取消开启巡线');
+            linePreparing=false;
+        }
         const response = await fetchWithTimeout('/steering/line', {
             method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled})
         }, 1500);
@@ -281,7 +296,7 @@ async function requestLineSteering(enabled) {
         clearLineConfirmationTimer(); lineSteeringExpectedRequest = null;
         lineSteeringAwaitingConfirmation = false; label.innerText = error.message;
     }
-    finally { lineSteeringPending = false; renderLineSteering(lastLineSteeringState); }
+    finally { linePreparing=false; lineSteeringPending = false; renderLineSteering(lastLineSteeringState); }
 }
 
 // --- 录制功能 ---

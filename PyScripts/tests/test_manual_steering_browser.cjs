@@ -22,6 +22,8 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         let next = 100, rejectEntry = false, delayEntry = 0;
         const lineConfig={request:{status:'idle'},applied:null,probes:{fresh:true,valid:true,mask:1,center_channel:0,reason:'valid',side:'left'}};
         const configs=[];
+        const lineActions=[];
+        let steeringState={mode:'OFF',fresh:true,reason:'disabled'};
         function ack(target = manual.center_us) {
             const stopping = manual.request.action === 'stop';
             const calibrating = manual.request.action === 'calibrate';
@@ -41,14 +43,21 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
             if (url.pathname.startsWith('/camera/preview/')) return route.fulfill({ status: 204 });
             if (url.pathname === '/dashboard/status') return route.fulfill({ json: {
                 sensor: { position: 0, speed: '0', mode: 'WEB', throttle: 1500, encoder_fresh: !manual.blocking,
-                    steering: { mode: 'OFF', fresh: true, reason: 'disabled' }, manual_steering: manual, line_response:lineConfig },
+                    steering: steeringState, manual_steering: manual, line_response:lineConfig },
                 fps: { left: '210.0', right: '0.0' }, record: { active: false }, speed_record: { active: false },
                 sync: { phase: 'idle', active: false, pressure: {}, encoder: {}, encoder_fresh: !manual.blocking },
                 conversion: { phase: 'idle' }, replay: { enabled: false, cameras: {}, export: {} } } });
             if(url.pathname==='/steering/line/config'){
+                if(route.request().method()==='GET')return route.fulfill({json:lineConfig});
                 const settings=route.request().postDataJSON();configs.push(settings);
                 lineConfig.request={id:++next,sent_at:next,status:'pending',settings,message:'等待固件参数确认'};
                 return route.fulfill({json:lineConfig});
+            }
+            if(url.pathname==='/steering/line'){
+                const action=route.request().postDataJSON();lineActions.push(action);
+                const id=++next;
+                steeringState={mode:action.enabled?'LINE':'OFF',fresh:true,reason:action.enabled?'tracking':'disabled',algo:'PROP',dir:'-1',pwm:'1500',e:'0',request:{id,status:'confirmed',message:'固件已确认转向开关'}};
+                return route.fulfill({json:{request_id:id,message:'等待固件确认'}});
             }
             if (url.pathname === '/steering/manual') {
                 const body = route.request().postDataJSON(); commands.push(body);
@@ -168,6 +177,23 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         await page.waitForFunction(()=>document.getElementById('line-response-status').textContent.includes('方向-1'));
         const formOverflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth);
         assert.equal(formOverflow,false);
+        const beforeAuto=configs.length;
+        await page.locator('#line-steering-on').click();
+        await page.waitForFunction(n=>document.getElementById('line-response-status').textContent.includes('等待固件参数'),beforeAuto);
+        assert.equal(configs.length,beforeAuto+1);
+        assert.equal(lineActions.length,0); // Filling/applying a value cannot arm before ACK.
+        lineConfig.applied=configs.at(-1);lineConfig.request.status='confirmed';lineConfig.request.message='固件已确认比例参数';
+        await page.waitForFunction(()=>document.getElementById('line-steering-status').textContent.includes('可调比例反向响应'));
+        assert.deepEqual(lineActions,[{enabled:true}]);
+        await page.locator('#line-steering-off').click();
+        await page.waitForFunction(()=>!document.getElementById('line-steering-on').disabled);
+        const beforeCancel=lineActions.length;
+        await page.locator('#line-steering-on').click();
+        await page.waitForFunction(()=>document.getElementById('line-response-status').textContent.includes('等待固件参数'));
+        await page.locator('#line-steering-off').click();
+        lineConfig.applied=configs.at(-1);lineConfig.request.status='confirmed';
+        await page.waitForFunction(()=>document.getElementById('line-steering-message').textContent.includes('已取消开启'));
+        assert.equal(lineActions.length,beforeCancel); // Late config ACK cannot restart cancelled entry.
         await page.close();
         for (let i=0;i<3;i++) {
             const reopened = await context.newPage();

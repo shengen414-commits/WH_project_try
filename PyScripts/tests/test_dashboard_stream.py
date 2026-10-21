@@ -495,6 +495,7 @@ class DashboardTests(unittest.TestCase):
         self.receive([f'[LINE_CFG] id={identifier} ok=1 left=180 right=120 dead=0.160 slew=600 dir=-1\n[LINE],1,1000,24,24\n'.encode()])
         result=self.client.get('/dashboard/status').json['sensor']['line_response']
         self.assertEqual(result['applied'],settings)
+        self.assertEqual(self.client.get('/steering/line/config').json['applied'],settings)
         self.assertTrue(result['probes']['valid'])
         self.app.sensor_state['steering']={'mode':'LINE'}
         self.assertEqual(self.client.post('/steering/line/config',json=settings).status_code,409)
