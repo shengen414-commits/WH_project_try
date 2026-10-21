@@ -68,13 +68,16 @@ int main() {
     assert(!basic.compute(std::numeric_limits<float>::quiet_NaN(), context, output) && output == 0);
     assert(!basic.compute(1, {0, -50, 50, false}, output));
     ProportionalLineController proportional;
-    assert(proportional.compute(1,{.01f,-300,300,false},output) && output==180);
-    assert(proportional.compute(-1,{.01f,-300,300,false},output) && output==-180);
+    assert(proportional.compute(1,{.01f,-500,500,false},output) && output==400);
+    assert(proportional.compute(-1,{.01f,-500,500,false},output) && output==-400);
+    assert(proportional.compute(1,{.01f,-300,300,false},output) && output==300); // Preserve actuator limits.
+    assert(proportional.tune(500,500,.16f,600));
+    assert(proportional.compute(-1,{.01f,-500,500,false},output) && output==-500);
     assert(proportional.compute(.143f,context,output) && output==0);
     assert(proportional.tune(200,100,.16f,600));
     assert(proportional.compute(-1,{.01f,-300,300,false},output) && output==-100);
     assert(proportional.compute(.5f,{.01f,-300,300,false},output) && output>75 && output<85);
-    assert(!proportional.tune(301,100,.16f,600));
+    assert(!proportional.tune(501,100,.16f,600));
     assert(!proportional.tune(100,100,.4f,600));
 
     PIDLineController pid;

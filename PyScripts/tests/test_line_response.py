@@ -32,7 +32,11 @@ class LineResponseTests(unittest.TestCase):
         self.assertFalse(self.response.snapshot()['probes']['valid'])
 
     def test_invalid_parameters_and_pending_changes_are_rejected(self):
-        for key,value in [('left_us',301),('right_us',True),('deadband',float('nan')),('direction',0),('slew_us_s',0)]:
+        for key,value in [('left_us',501),('right_us',501),('right_us',True),('deadband',float('nan')),('direction',0),('slew_us_s',0)]:
             with self.assertRaises(ValueError):self.response.begin({**self.settings,key:value})
         self.response.begin(self.settings)
         with self.assertRaises(ValueError):self.response.begin(self.settings)
+
+    def test_500us_boundary_is_accepted(self):
+        _,packet=self.response.begin({**self.settings,'left_us':500,'right_us':500})
+        self.assertTrue(packet.startswith(b'@K500,500,'))

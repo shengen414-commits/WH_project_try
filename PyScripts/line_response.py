@@ -18,7 +18,7 @@ class LineResponse:
     def begin(self, data):
         if not isinstance(data, dict) or set(data) != {'left_us','right_us','deadband','slew_us_s','direction'}:
             raise ValueError('需要左右幅度、居中区、变化速度和方向五个参数')
-        for key, low, high in [('left_us',0,300),('right_us',0,300),('slew_us_s',50,1200)]:
+        for key, low, high in [('left_us',0,500),('right_us',0,500),('slew_us_s',50,1200)]:
             if type(data[key]) is not int or not low <= data[key] <= high:
                 raise ValueError(f'{key} 需为 {low}～{high} 的整数')
         if type(data['direction']) is not int or data['direction'] not in (-1,1):

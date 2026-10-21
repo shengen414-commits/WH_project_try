@@ -20,7 +20,7 @@
         pending=request.status==='pending';
         const applied=data.applied;
         if(Date.now()>errorUntil){
-            status.textContent=request.message||'建议最大±180μs；设置尚未确认。';
+            status.textContent=request.message||'默认左右各400μs，可设0～500μs；设置尚未确认。';
             if(applied)status.textContent+=`｜已确认：左${applied.left_us} / 右${applied.right_us}μs，方向${applied.direction}，变化速度${applied.slew_us_s}μs/s`;
         }
         form.querySelector('button').disabled=busy||pending;

@@ -156,13 +156,13 @@
             <p>先退出联合观察与手动测试，关闭巡线；应用参数并等待固件确认，再点“开启巡线转向”。只接受一个或相邻两个探头命中，CH4/CH5附近归中。CH1在左；左右方向需静止验证。</p>
             <div id="line-live-probes" style="display:flex;gap:6px;flex-wrap:wrap"></div><p id="line-live-quality" role="status">等待巡线数据</p>
             <form id="line-response-form">
-                <label>胶带偏左最大偏转（μs）<input name="left_us" type="number" min="0" max="300" step="1" value="180" required></label>
-                <label>胶带偏右最大偏转（μs）<input name="right_us" type="number" min="0" max="300" step="1" value="180" required></label>
+                <label>胶带偏左最大偏转（μs）<input name="left_us" type="number" min="0" max="500" step="1" value="400" required></label>
+                <label>胶带偏右最大偏转（μs）<input name="right_us" type="number" min="0" max="500" step="1" value="400" required></label>
                 <label>居中区（归一化）<input name="deadband" type="number" min="0" max="0.3" step="0.001" value="0.16" required></label>
                 <label>变化速度（μs/s）<input name="slew_us_s" type="number" min="50" max="1200" value="600" required></label>
                 <label>PWM方向<select name="direction"><option value="1">+1：胶带在左时增加PWM</option><option value="-1">−1：翻转左右响应</option></select></label>
                 <button type="submit">应用比例参数（不启动）</button>
-            </form><p id="line-response-status" role="status">建议最大±180μs，实际输出受标定行程限制；设置尚未确认。</p>
+            </form><p id="line-response-status" role="status">默认左右各400μs，可设0～500μs；实际输出受标定行程限制，设置尚未确认。</p>
             <a href="/vehicle-lab">三路传感器独立调试开关 →</a>
         </details>
         <div class="sync-hint">CH1在车左侧，CH4/CH5附近为居中区；展开比例参数可设置更明显的响应和左右方向。上电保持原基础模式，应用参数并确认后切换比例模式；MPU6050和视觉暂不参与转向。</div>
@@ -213,7 +213,7 @@
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
     <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=1"></script>
     <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=3"></script>
-    <script src="{{ url_for('static', filename='js/line_response.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/line_response.js') }}?v=2"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=5"></script>
 </body>
 </html>

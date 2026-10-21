@@ -50,5 +50,5 @@ public:
     bool tune(float left, float right, float deadband, float slew);
     void reset() override {}
     bool compute(float error, const LineControlContext& context, float& output) override;
-    float leftUs = 180, rightUs = 180, deadband = .16f, slewUsPerSec = 600;
+    float leftUs = 400, rightUs = 400, deadband = .16f, slewUsPerSec = 600;
 };
