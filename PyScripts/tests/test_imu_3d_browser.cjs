@@ -15,15 +15,17 @@ assert.ok(Math.abs(turned[0])<1e-12 && Math.abs(turned[1]-1)<1e-12);
         const page = await browser.newPage({viewport:{width:1280,height:960}});
         const errors = [], commands = [];
         page.on('pageerror',error=>errors.push(error.message));
-        let fresh = true, angle = 0, inflight = 0, maxInflight = 0, requests = 0;
+        let fresh = true, angle = 0, inflight = 0, maxInflight = 0, requests = 0, delay = 80, responseMode = 'valid';
         const html = fs.readFileSync(path.join(root,'templates/imu.html'),'utf8')
             .replace(/{{.*?}}/g,match=>match.includes('imu.css')?'/static/css/imu.css':'/static/js/imu_3d.js');
         await page.route('http://imu.test/**',async route=> {
             const url = new URL(route.request().url());
             if (url.pathname === '/imu/status') {
                 requests++; inflight++; maxInflight = Math.max(maxInflight,inflight);
-                await new Promise(resolve=>setTimeout(resolve,80));
+                await new Promise(resolve=>setTimeout(resolve,delay));
                 inflight--;
+                if(responseMode==='http')return route.fulfill({status:503,json:{error:'busy'}});
+                if(responseMode==='malformed')return route.fulfill({json:{fresh:true}});
                 return route.fulfill({json:{fresh,serial_open:true,serial_error:null,age_ms:fresh?12:800,
                     quaternion:[Math.cos(angle/2),0,0,Math.sin(angle/2)],angles:[0,0,angle*180/Math.PI],
                     message:fresh?'三维数据接收中':'数据已断流',
@@ -57,6 +59,23 @@ assert.ok(Math.abs(turned[0])<1e-12 && Math.abs(turned[1]-1)<1e-12);
         assert.ok((await page.locator('#message').innerText()).includes('请先结束记录'));
         assert.deepEqual(commands,['start']);
         if (process.argv[2]) await page.screenshot({path:process.argv[2],fullPage:true});
+        // Reproduce a real VS Code forwarded-port RTT above the old 1s deadline.
+        delay = 1300;
+        await page.waitForFunction(()=>document.getElementById('connection').textContent.includes('链路延迟较高'));
+        assert.ok(parseInt(await page.locator('#latency').innerText())>=1200);
+        assert.notEqual(await page.locator('#roll').innerText(),'—');
+        delay = 80; responseMode = 'http';
+        await page.waitForFunction(()=>document.getElementById('data-message').textContent.includes('HTTP 503'));
+        responseMode = 'malformed';
+        await page.waitForFunction(()=>document.getElementById('data-message').textContent.includes('页面显示失败'));
+        responseMode = 'valid';
+        await page.waitForFunction(()=>document.getElementById('connection').textContent==='实时姿态');
+        // Older cached HTML may lack optional diagnostic/latency elements.
+        await page.locator('.imu-diagnostics').evaluate(node=>node.remove());
+        await page.locator('#latency').evaluate(node=>node.remove());
+        await page.waitForTimeout(300);
+        assert.equal(await page.locator('#connection').innerText(),'实时姿态');
+        assert.ok((await page.locator('#age').innerText()).includes('请求往返'));
         fresh = false;
         await page.waitForFunction(()=>document.getElementById('roll').textContent==='—');
         assert.equal(await page.locator('#lamp').getAttribute('class'),'');
@@ -69,6 +88,6 @@ assert.ok(Math.abs(turned[0])<1e-12 && Math.abs(turned[1]-1)<1e-12);
         assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
         assert.ok(requests>4 && maxInflight===1);
         assert.deepEqual(errors,[]);
-        console.log('PASS: quaternion axes, live rotation, stale freeze, frame diagnostics, command errors, bounded polling, mobile layout');
+        console.log('PASS: quaternion axes, live rotation, stale freeze, frame diagnostics, command errors, slow SSH link, error recovery, cached HTML, bounded polling, mobile layout');
     } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

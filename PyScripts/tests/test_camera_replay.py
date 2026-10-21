@@ -44,9 +44,12 @@ class ReplayHttpTests(unittest.TestCase):
         self.assertEqual(self.client.post('/camera/replay/config', json={'enabled': True}).status_code, 409)
 
     def test_enable_export_download_and_keep_buffer_running(self):
-        response = self.client.post('/camera/replay/config', json={'enabled': True, 'fps': 60})
+        response = self.client.post('/camera/replay/config', json={'enabled': True})
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json['enabled'])
+        self.assertEqual(response.json['history_sec'], 60)
+        self.assertEqual(response.json['cameras']['Left']['target_fps'], 200)
+        self.assertEqual(response.json['cameras']['Left']['history_sec'], 60)
         self.buffer.submit(np.zeros((48, 64, 3), dtype=np.uint8), time.time_ns(), time.monotonic_ns(), 1)
         deadline = time.monotonic() + 3
         while not self.buffer.frames_saved and time.monotonic() < deadline:
@@ -61,7 +64,8 @@ class ReplayHttpTests(unittest.TestCase):
             self.assertTrue(response.headers['Content-Disposition'].startswith('attachment;'))
             response.close()
         manifest = json.loads(self.replay.download(job['files'][-1]).read_text())
-        self.assertEqual(manifest['requested_history_sec'], 120)
+        self.assertEqual(manifest['requested_history_sec'], 60)
+        self.assertEqual(manifest['cameras']['Left']['requested_window_sec'], 60)
         self.assertLessEqual(manifest['cameras']['Left']['last_monotonic_ns'], manifest['requested_end_monotonic_ns'])
         self.assertEqual(self.client.post('/camera/replay/config', json={'enabled': False}).status_code, 200)
         self.assertFalse(self.buffer.enabled)

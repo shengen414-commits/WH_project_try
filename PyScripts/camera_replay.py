@@ -8,9 +8,9 @@ import time
 from flask import jsonify, request, send_file
 
 try:
-    from .camera_recording import export_replay
+    from .camera_recording import DEFAULT_REPLAY_FPS, DEFAULT_REPLAY_HISTORY_SEC, export_replay
 except ImportError:
-    from camera_recording import export_replay
+    from camera_recording import DEFAULT_REPLAY_FPS, DEFAULT_REPLAY_HISTORY_SEC, export_replay
 
 
 class CameraReplay:
@@ -27,9 +27,9 @@ class CameraReplay:
                                  "camera_available": camera.available, "capture_fps": camera.real_fps}
                    for camera in self.cameras()}
         return {"cameras": cameras, "enabled": any(item['enabled'] for item in cameras.values()),
-                "history_sec": 120, "export": job}
+                "history_sec": DEFAULT_REPLAY_HISTORY_SEC, "export": job}
 
-    def configure(self, enabled, fps=60):
+    def configure(self, enabled, fps=DEFAULT_REPLAY_FPS):
         selected = [camera for camera in self.cameras() if camera.is_active and camera.available]
         if enabled and not selected:
             raise ValueError("请先开启至少一路相机并确认画面正常")
@@ -43,16 +43,16 @@ class CameraReplay:
                 raise ValueError("上一段回放还在保存，请等待完成")
             selected = [camera for camera in self.cameras() if camera.replay.status().get('cached_frames', 0)]
             if not selected:
-                raise ValueError("最近两分钟没有缓存，请先开启回放并等待相机帧")
+                raise ValueError("最近一分钟没有缓存，请先开启回放并等待相机帧")
             session = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
             end_ns = time.monotonic_ns()
             self.export = {"phase": "saving", "active": True, "session_id": session,
-                           "message": "正在保存最近两分钟；回放采集继续运行"}
+                           "message": "正在保存最近一分钟；回放采集继续运行"}
             job = dict(self.export)
 
         def run():
             folder = self.root / 'Replays' / session
-            manifest = {"requested_end_monotonic_ns": end_ns, "requested_history_sec": 120,
+            manifest = {"requested_end_monotonic_ns": end_ns, "requested_history_sec": DEFAULT_REPLAY_HISTORY_SEC,
                         "cameras": {}, "errors": {}, "timestamp_source": "host read completion; not exposure time"}
             files = []
             try:
@@ -109,7 +109,7 @@ def register_camera_replay_routes(app, replay):
         if not isinstance(payload, dict) or not isinstance(payload.get('enabled'), bool):
             return jsonify(error='enabled 必须是布尔值'), 400
         try:
-            fps = payload.get('fps', 60)
+            fps = payload.get('fps', DEFAULT_REPLAY_FPS)
             if isinstance(fps, bool):
                 raise ValueError('帧率必须是数字')
             return jsonify(replay.configure(payload['enabled'], float(fps)))

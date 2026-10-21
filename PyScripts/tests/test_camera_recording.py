@@ -135,7 +135,7 @@ class RecordingTests(unittest.TestCase):
         result = export_replay(buffer, buffer.snapshot(now + 100_000_000), self.root / 'saved', 'Left')
         self.assertEqual(result['frames'], 2)
         self.assertAlmostEqual(result['coverage_sec'], .1)
-        self.assertEqual(result['requested_window_sec'], 120)
+        self.assertEqual(result['requested_window_sec'], 60)
 
     def test_byte_budget_and_old_segments_are_pruned(self):
         buffer = self.buffer(history_sec=120, segment_sec=.1, max_bytes=2500)
@@ -206,24 +206,24 @@ class RecordingTests(unittest.TestCase):
             self.feed(buffer, base + i * 1_000_000_000, i)
         # Advance the capture clock by ten minutes; do not wait ten wall-clock minutes.
         snapshot = buffer.snapshot(base + 600_000_000_000)
-        self.assertLessEqual(len(buffer.segments), 62)
-        self.assertLessEqual(len(list(buffer.cache_dir.glob('*.avi'))), 62)
+        self.assertLessEqual(len(buffer.segments), 32)
+        self.assertLessEqual(len(list(buffer.cache_dir.glob('*.avi'))), 32)
         result = export_replay(buffer, snapshot, self.root / 'saved', 'Left')
-        self.assertEqual(result['frames'], 121)  # Inclusive endpoints: t=480..600.
-        self.assertEqual(result['coverage_sec'], 120)
+        self.assertEqual(result['frames'], 61)  # Inclusive endpoints: t=540..600.
+        self.assertEqual(result['coverage_sec'], 60)
         buffer.close()
         self.assertFalse(buffer.cache_dir.exists())
         self.assertTrue((self.root / 'saved' / result['video']).exists())
 
-    def test_rate_sampling_keeps_sixty_of_210_capture_frames(self):
+    def test_default_rate_sampling_keeps_200_of_210_capture_frames(self):
         buffer = self.buffer(queue_size=256)
         with patch('threading.Thread.start'):
-            buffer.enable(True, fps=60)
+            buffer.enable(True)
         base = time.monotonic_ns()
         for i in range(210):
             buffer.submit(self.frame, i, base + round(i * 1e9 / 210), i)
-        self.assertEqual(buffer.queue.qsize(), 60)
-        self.assertEqual(buffer.rate_skips, 150)
+        self.assertEqual(buffer.queue.qsize(), 200)
+        self.assertEqual(buffer.rate_skips, 10)
         self.assertEqual(buffer.queue_drops, 0)
         buffer.thread = None  # Intentionally unstarted worker.
 

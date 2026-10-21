@@ -17,8 +17,8 @@ const root = path.resolve(__dirname, '..');
         const html = `<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
             <link rel="stylesheet" href="/static/css/style.css"></head><body>${panel}
             <script src="/static/js/camera_replay.js"></script><script src="/static/js/dashboard_polling.js"></script></body></html>`;
-        const cam = { enabled: false, buffered_sec: 0, cached_frames: 0, target_fps: 60, cache_bytes: 0, queue_drops: 0 };
-        const state = { enabled: false, cameras: { Left: cam }, export: { phase: 'idle', active: false } };
+        const cam = { enabled: false, buffered_sec: 0, cached_frames: 0, target_fps: 200, history_sec: 60, cache_bytes: 0, queue_drops: 0 };
+        const state = { enabled: false, history_sec: 60, cameras: { Left: cam }, export: { phase: 'idle', active: false } };
         let failSave = false, polls = 0, inflight = 0, maxInflight = 0;
         await page.route('http://replay.test/**', async route => {
             const url = new URL(route.request().url());
@@ -41,7 +41,7 @@ const root = path.resolve(__dirname, '..');
             if (url.pathname === '/camera/replay/save') {
                 commands.push('save');
                 if (failSave) return route.fulfill({ status: 409, json: { error: '磁盘空间不足' } });
-                state.export = { phase: 'saving', active: true, message: '正在保存最近两分钟；回放采集继续运行' };
+                state.export = { phase: 'saving', active: true, message: '正在保存最近一分钟；回放采集继续运行' };
                 return route.fulfill({ status: 202, json: state.export });
             }
             return route.fulfill({ status: 404 });
@@ -49,21 +49,23 @@ const root = path.resolve(__dirname, '..');
         await page.goto('http://replay.test/');
         const save = page.locator('#replay-save'), toggle = page.locator('#replay-toggle');
         assert.ok(await save.isDisabled());
-        await page.locator('#replay-fps').fill('120');
+        assert.equal(await page.locator('#replay-fps').inputValue(), '200');
+        assert.ok((await save.innerText()).includes('最近一分钟'));
         await toggle.click();
         await page.waitForFunction(() => document.getElementById('replay-toggle').textContent.includes('停止'));
-        assert.deepEqual(commands[0], { enabled: true, fps: 120 });
-        cam.cached_frames = 10800; cam.buffered_sec = 90; cam.cache_bytes = 230 * 1048576;
+        assert.deepEqual(commands[0], { enabled: true, fps: 200 });
+        cam.cached_frames = 12000; cam.buffered_sec = 60; cam.cache_bytes = 230 * 1048576;
         await page.waitForFunction(() => !document.getElementById('replay-save').disabled);
+        assert.ok((await page.locator('#replay-cameras').innerText()).includes('/ 60 秒'));
         await save.click();
         await page.waitForFunction(() => document.getElementById('replay-job').textContent.includes('采集继续'));
         assert.ok(await save.isDisabled());
         assert.equal(cam.enabled, true);
         state.export = { phase: 'saved', active: false, message: '回放已保存',
             files: ['session/Left.avi', 'session/Left.index.csv', 'session/manifest.json'],
-            cameras: { Left: { coverage_sec: 90, frames: 10800 } } };
+            cameras: { Left: { coverage_sec: 60, frames: 12000 } } };
         await page.waitForFunction(() => document.querySelectorAll('#replay-files a').length === 3);
-        assert.ok((await page.locator('#replay-job').innerText()).includes('90.0秒'));
+        assert.ok((await page.locator('#replay-job').innerText()).includes('60.0秒'));
         assert.equal(await page.locator('#replay-files a').first().getAttribute('href'), '/camera/replay/download/session/Left.avi');
         if (process.argv[2]) await page.locator('.replay-panel').screenshot({ path: process.argv[2] });
         await toggle.click();

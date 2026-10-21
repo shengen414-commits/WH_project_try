@@ -1,4 +1,4 @@
-"""Bounded camera recording and a disk-backed last-two-minutes replay.
+"""Bounded camera recording and a disk-backed last-minute replay.
 
 Capture timestamps are host read times, not exposure times. AVI is MJPEG with
 an average playback rate; the accompanying CSV is the authoritative timeline.
@@ -16,6 +16,10 @@ import time
 import uuid
 
 import cv2
+
+
+DEFAULT_REPLAY_FPS = 200
+DEFAULT_REPLAY_HISTORY_SEC = 60
 
 
 INDEX_FIELDS = ["frame_id", "host_receive_monotonic_ns", "host_receive_unix_ns",
@@ -198,7 +202,7 @@ class ReplaySnapshot:
 
 
 class DiskReplayBuffer:
-    def __init__(self, cache_root, history_sec=120, segment_sec=2, max_bytes=1024**3,
+    def __init__(self, cache_root, history_sec=DEFAULT_REPLAY_HISTORY_SEC, segment_sec=2, max_bytes=1024**3,
                  queue_size=16, quality=80, min_free_bytes=128*1024**2):
         self.cache_root = Path(cache_root)
         self.cache_dir = None
@@ -210,7 +214,7 @@ class DiskReplayBuffer:
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.enabled = False
-        self.fps = 60.0
+        self.fps = float(DEFAULT_REPLAY_FPS)
         self.next_due_ns = None
         self.input_frames = self.rate_skips = self.queue_drops = self.frames_saved = 0
         self.error = None
@@ -224,7 +228,7 @@ class DiskReplayBuffer:
                             "cache_bytes": 0, "queue_drops": 0, "busy_drops": 0,
                             "rate_skips": 0, "queue_depth": 0, "error": None}
 
-    def enable(self, enabled, fps=60):
+    def enable(self, enabled, fps=DEFAULT_REPLAY_FPS):
         if not math.isfinite(fps) or not 1 <= fps <= 240:
             raise ValueError("回放录制帧率需为1～240")
         if not self.lock.acquire(timeout=.05):
@@ -427,7 +431,7 @@ class DiskReplayBuffer:
                             if item.cancelled:
                                 self._release_locked(item)
                         if not item.segments:
-                            item.error = "最近两分钟没有相机帧；请先开启回放并等待画面"
+                            item.error = "回放窗口内没有相机帧；请先开启回放并等待画面"
                     except Exception as error:
                         item.error = str(error)
                         raise

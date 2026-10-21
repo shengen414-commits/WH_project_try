@@ -94,16 +94,16 @@
 
     <section class="replay-panel" aria-labelledby="replay-title">
         <h2 id="replay-title">相机即时回放</h2>
-        <p>开启后持续缓存最近两分钟，保存时采集继续运行。未满两分钟时保存已有画面。</p>
+        <p>开启后持续缓存最近一分钟，保存时采集继续运行。未满一分钟时保存已有画面。</p>
         <div class="replay-controls">
-            <label>回放录制帧率 <input id="replay-fps" type="number" value="60" min="1" max="240" step="1"> fps</label>
-            <button id="replay-toggle" onclick="toggleCameraReplay()">开启两分钟回放</button>
-            <button id="replay-save" onclick="saveCameraReplay()" disabled>保存最近两分钟</button>
+            <label>回放录制帧率 <input id="replay-fps" type="number" value="200" min="1" max="240" step="1"> fps</label>
+            <button id="replay-toggle" onclick="toggleCameraReplay()">开启一分钟回放</button>
+            <button id="replay-save" onclick="saveCameraReplay()" disabled>保存最近一分钟</button>
         </div>
         <div id="replay-cameras" class="replay-status">回放未开启</div>
         <div id="replay-job" class="replay-status" role="status" aria-live="polite"></div>
         <div id="replay-files" class="replay-files"></div>
-        <small>默认 60fps，可按性能调整。每路缓存上限 1GiB，容量不足时历史会缩短。回放保存视频及逐帧时间索引；车速、扫描阀仍需提前开启各自记录。</small>
+        <small>默认目标 200fps，可按性能调整，实际保存帧率取决于相机、编码和磁盘速度。每路缓存上限 1GiB，容量不足时历史会缩短。回放保存视频及逐帧时间索引；车速、扫描阀仍需提前开启各自记录。</small>
     </section>
 
     <div class="operation-columns">
@@ -211,7 +211,7 @@
     <script src="{{ url_for('static', filename='js/camera_preview.js') }}?v=1"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}?v=line-prop-3"></script>
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
-    <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=2"></script>
     <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=3"></script>
     <script src="{{ url_for('static', filename='js/line_response.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=5"></script>

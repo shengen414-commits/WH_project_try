@@ -66,11 +66,17 @@
     });
     for (const event of ['pointerup','pointercancel','lostpointercapture']) canvas.addEventListener(event,()=>dragging=null);
     new ResizeObserver(draw).observe(canvas);
-    function render(state) {
+    function render(state, roundTripMs) {
+        const vector = (v,n) => Array.isArray(v) && v.length===n && v.every(Number.isFinite);
+        if (!state || typeof state !== 'object' || (state.fresh && (
+            !vector(state.quaternion,4) || !vector(state.angles,3) ||
+            !vector(state.sample?.acceleration,3) || !vector(state.sample?.gyro,3) ||
+            !Number.isFinite(state.sample?.corrected_z) || !Number.isFinite(state.sample?.temperature))))
+            throw new Error('后台姿态数据字段不完整，请核对程序版本');
         fresh = state.fresh === true;
         if (fresh && Array.isArray(state.quaternion) && state.quaternion.length===4) q = state.quaternion;
         $('lamp').classList.toggle('live',fresh);
-        $('connection').textContent = fresh?'实时姿态':!state.serial_open?'串口未连接':'无新鲜三维数据';
+        $('connection').textContent = fresh?(roundTripMs>500?'姿态数据（链路延迟较高）':'实时姿态'):!state.serial_open?'串口未连接':'无新鲜三维数据';
         $('connection').title = state.serial_error || state.message;
         for (const [i,id] of ['roll','pitch','yaw'].entries()) $(id).textContent = fresh?state.angles[i].toFixed(1):'—';
         const sample = state.sample;
@@ -80,28 +86,43 @@
         $('corrected-z').textContent = fresh?sample.corrected_z.toFixed(2):'—';
         $('temperature').textContent = fresh?sample.temperature.toFixed(1):'—';
         $('calibration').textContent = fresh?({NO:'未标定',RUN:'静止标定中…',OK:'Z 零偏已标定'}[sample.calibration]):'—';
-        $('age').textContent = state.age_ms===null?'—':`${state.age_ms} ms`;
+        const latency = `${Math.round(roundTripMs)} ms`;
+        $('age').textContent = state.age_ms==null?'—':`服务端 ${state.age_ms} ms${$('latency')?'':` · 请求往返 ${latency}`}`;
+        if ($('latency')) $('latency').textContent = latency;
         $('data-message').textContent = state.serial_error || state.message;
         const diagnostics = state.diagnostics || {}, last = diagnostics.last_invalid;
-        $('invalid-count').textContent = diagnostics.invalid_frames || 0;
+        if ($('invalid-count')) $('invalid-count').textContent = diagnostics.invalid_frames || 0;
         const ago = diagnostics.last_invalid_age_ms == null ? '' : `（${(diagnostics.last_invalid_age_ms/1000).toFixed(1)} 秒前）`;
-        $('invalid-reason').textContent = last ? `最近原因${ago}：${last.reason}；连续无效 ${diagnostics.consecutive_invalid || 0} 帧；累计有效 ${state.count || 0} 帧` : '尚未检测到无效帧';
-        $('invalid-raw').textContent = last ? last.raw : '';
+        if ($('invalid-reason')) $('invalid-reason').textContent = last ? `最近原因${ago}：${last.reason}；连续无效 ${diagnostics.consecutive_invalid || 0} 帧；累计有效 ${state.count || 0} 帧` : '尚未检测到无效帧';
+        if ($('invalid-raw')) $('invalid-raw').textContent = last ? last.raw : '';
         draw();
     }
     let timer = null, polling = false, commandBusy = false;
     async function poll() {
         if (polling || document.hidden) return;
         polling = true;
-        const controller = new AbortController(), timeout = setTimeout(()=>controller.abort(),1000);
+        const started = performance.now();
+        let phase = 'network';
+        // SSH/VS Code port forwarding can exceed one second. Keep one request in
+        // flight and a bounded deadline without mistaking link delay for IMU loss.
+        const controller = new AbortController(), timeout = setTimeout(()=>controller.abort(),5000);
         try {
             const response = await fetch('/imu/status',{cache:'no-store',signal:controller.signal});
-            if (!response.ok) throw new Error('状态请求失败');
-            render(await response.json());
+            if (!response.ok) throw new Error(`状态接口返回 HTTP ${response.status}`);
+            phase = 'json';
+            const state = await response.json();
+            phase = 'render';
+            render(state, performance.now()-started);
         } catch(e) {
             fresh = false; $('lamp').classList.remove('live'); $('connection').textContent = '连接中断';
             for (const id of ['roll','pitch','yaw','acceleration','gyro','corrected-z','temperature','calibration']) $(id).textContent='—';
-            $('data-message').textContent = '无法读取后台状态，请检查 Dashboard 连接'; draw();
+            if ($('latency')) $('latency').textContent = '—';
+            $('data-message').textContent = e.name==='AbortError'
+                ? '状态请求超过5秒，正在重试；请检查端口转发和网络延迟'
+                : phase==='render' ? `后台已连接，页面显示失败：${e.message}`
+                : phase==='json' ? '后台响应不是有效的状态数据，请检查访问地址与程序版本'
+                : `无法读取后台状态：${e.message}；正在重试`;
+            console.warn('IMU status update failed:',phase,e); draw();
         } finally {
             clearTimeout(timeout); polling = false;
             if (!document.hidden) timer = setTimeout(poll,60); // One request in flight, no queue.
