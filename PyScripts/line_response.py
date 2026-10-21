@@ -73,14 +73,14 @@ class LineResponse:
             except ValueError:
                 return False
             hits = [i for i in range(8) if mask & (1<<i)]
-            valid = len(hits) in (1,2) and hits[-1]-hits[0]+1 == len(hits)
+            valid = len(hits) in (1,2,3) and hits[-1]-hits[0]+1 == len(hits)
             center = sum(hits)/len(hits) if valid else None
             contiguous = bool(hits) and hits[-1]-hits[0]+1 == len(hits)
-            reason = 'valid' if valid else 'lost' if not hits else 'all_active' if len(hits)==8 else 'multiple_segments' if not contiguous else 'too_wide'
+            reason = 'valid' if valid else 'waiting' if not hits else 'all_active' if len(hits)==8 else 'multiple_segments' if not contiguous else 'too_wide'
             with self.lock:
-                self.probes = {'mask':mask,'raw_mask':raw,'center_channel':center,'valid':valid,'reason':reason,
+                self.probes = {'mask':mask,'raw_mask':raw,'center_channel':center,'valid':valid,'compliant':valid or not hits,'reason':reason,
                                'sequence':sequence,'device_ms':ms,
-                               'side':'center' if valid and abs(center-3.5)/3.5<=(self.applied or {}).get('deadband',.16) else 'left' if valid and center<3.5 else 'right' if valid else None}
+                               'side':'center' if valid and mask == 0x18 else 'left' if valid and center<3.5 else 'right' if valid else None}
                 self.received = now
             return True
         return False
@@ -91,4 +91,5 @@ class LineResponse:
                 self.request.update(status='timeout',message='未收到参数确认，请烧录支持比例模式的新版esp32dev；参数未确认')
             fresh = self.received is not None and 0 <= self.clock()-self.received < .3
             return {'epoch':self.epoch,'request':dict(self.request), 'applied':self.applied,
-                    'probes':{**self.probes,'fresh':fresh,'valid':fresh and self.probes.get('valid',False)}}
+                    'probes':{**self.probes,'fresh':fresh,'valid':fresh and self.probes.get('valid',False),
+                              'compliant':fresh and self.probes.get('compliant',False)}}

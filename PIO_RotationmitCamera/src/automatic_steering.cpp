@@ -29,6 +29,7 @@ int direction = 1;
 uint8_t lastMask = 0;
 const char* reason = "disabled";
 bool statusPending = false;
+bool waitingForLine = false;
 
 void prepare() {
     if (prepared) return;
@@ -71,6 +72,7 @@ const char* lineFailure(const LineSensorFrame& frame) {
     return position.status == LinePositionStatus::Lost ? "line_lost" : position.status == LinePositionStatus::TooWide ? "line_too_wide" : "line_ambiguous";
 }
 void fault(const char* why) {
+    waitingForLine = false;
     mode = AutomaticSteeringMode::Fault; reason = why;
     resetControllers();
     outputUs = steeringCenterUs(); centerSteeringOutput();
@@ -87,12 +89,22 @@ bool canArm() {
     return true;
 }
 void armed(AutomaticSteeringMode next) {
+    waitingForLine = false;
     mode = next; reason = "armed";
     resetControllers(); haveFrame = false;
     outputUs = steeringCenterUs(); centerSteeringOutput();
     lastRequestedUs = outputUs;
     lastControlAt = millis(); lastPublishAt = millis() - 200;
     setESCSteeringInhibit(false); // Clear old throttle; new T/RC inputs are required.
+}
+void waitForLine(const LineSensorFrame& frame) {
+    const bool first = !waitingForLine;
+    waitingForLine = true;
+    resetControllers();
+    outputUs = lastRequestedUs = steeringCenterUs(); centerSteeringOutput();
+    lastControlAt = frame.timeMs; haveFrame = true; lastFrameSequence = frame.sequence;
+    reason = "line_waiting";
+    if (first) { setESCSteeringInhibit(true); message(reason); }
 }
 float clamp(float value, float low, float high) { return value < low ? low : value > high ? high : value; }
 }
@@ -121,7 +133,7 @@ bool startLineFollowing() {
     if (!readLineSensorFrame(frame)) { reason = "no_line_frame"; message(reason); return false; }
     lastMask = frame.lineMask;
     if (!fresh(millis(), frame.timeMs, FEEDBACK_TIMEOUT_MS)) { reason = "line_stale"; message(reason); return false; }
-    if (!linePosition(frame, lineError)) {
+    if (frame.lineMask != 0 && !linePosition(frame, lineError)) {
         reason = lineFailure(frame);
         message(reason); return false;
     }
@@ -129,6 +141,7 @@ bool startLineFollowing() {
     if (!canArm()) return false;
     lastMask = frame.lineMask; armed(AutomaticSteeringMode::Line);
     lastControlAt = frame.timeMs - 10; // First cached frame may precede the arm command.
+    if (frame.lineMask == 0) waitForLine(frame);
     message(reason);
     return true;
 }
@@ -139,6 +152,7 @@ bool startExternalYawControl() {
     gyroEnabled = true; armed(AutomaticSteeringMode::ExternalYaw); message(reason); return true;
 }
 void stopAutomaticSteering(bool resetDrive) {
+    waitingForLine = false;
     if (mode == AutomaticSteeringMode::Off) { reason = "disabled"; message(reason); return; }
     mode = AutomaticSteeringMode::Off; reason = "disabled";
     resetControllers(); outputUs = steeringCenterUs(); centerSteeringOutput();
@@ -160,7 +174,13 @@ void updateAutomaticSteering() {
     if (mode == AutomaticSteeringMode::Line) {
         if (!readLineSensorFrame(frame) || !fresh(now, frame.timeMs, FEEDBACK_TIMEOUT_MS)) { fault("line_stale"); return; }
         lastMask = frame.lineMask;
+        if (frame.lineMask == 0) { waitForLine(frame); return; }
         if (!linePosition(frame, lineError)) { fault(lineFailure(frame)); return; }
+        if (waitingForLine) {
+            waitingForLine = false; resetControllers();
+            setESCSteeringInhibit(false); // Discard old throttle; fresh commands are required.
+            haveFrame = false; lastControlAt = frame.timeMs - 10;
+        }
         if (haveFrame && frame.sequence == lastFrameSequence) return;
     } else if (uint32_t(now - lastControlAt) < 10) return;
     const uint32_t sampleAt = mode == AutomaticSteeringMode::Line ? frame.timeMs : now;

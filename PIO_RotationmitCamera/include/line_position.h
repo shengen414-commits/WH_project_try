@@ -14,6 +14,7 @@ struct LinePosition {
     uint32_t sequence;
     uint32_t sampleTimeMs;
     bool valid() const { return status == LinePositionStatus::Valid; }
+    bool compliant() const { return valid() || status == LinePositionStatus::Lost; }
 };
 
 LinePosition estimateLinePosition(const LineSensorFrame& frame);

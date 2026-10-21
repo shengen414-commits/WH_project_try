@@ -24,7 +24,7 @@ LinePosition estimateLinePosition(const LineSensorFrame& frame) {
         position.status = LinePositionStatus::MultipleSegments;
         return position;
     }
-    if (position.activeCount > 2) {
+    if (position.activeCount > 3) {
         position.status = LinePositionStatus::TooWide;
         return position;
     }

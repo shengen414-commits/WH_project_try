@@ -7,7 +7,7 @@ import time
 
 REASONS = {
     "line_lost": "未检测到黑胶带",
-    "line_too_wide": "命中超过两个探头，只允许单个或相邻两个探头检测胶带",
+    "line_too_wide": "命中超过三个探头，只允许0～3个连续探头命中",
     "line_ambiguous": "巡线读数为全通道命中或多段命中，请检查胶带位置与极性",
     "no_line_frame": "巡线模块尚未产生完整帧，请检查初始化与接线",
     "no_valid_line": "巡线反馈无效",
@@ -59,6 +59,8 @@ class SteeringRequests:
                 return False
             if ok:
                 message = "ESP32 已确认：巡线转向已开启" if action else "ESP32 已确认：巡线转向已关闭并归中"
+                if action and reason == "line_waiting":
+                    message = "ESP32 已确认：巡线已开启，0路命中，归中等待胶带，动力保持中位"
             else:
                 message = "ESP32 拒绝开启：" + REASONS.get(reason, reason)
             if raw >= 0 and mask >= 0:

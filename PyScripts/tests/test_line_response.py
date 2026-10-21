@@ -20,14 +20,19 @@ class LineResponseTests(unittest.TestCase):
         self.response.invalidate('reboot')
         self.assertIsNone(self.response.snapshot()['applied'])
 
-    def test_all_masks_accept_only_one_or_two_adjacent_probes(self):
+    def test_all_masks_accept_up_to_three_contiguous_probes(self):
         for mask in range(256):
             self.response.feed(f'[LINE],{mask},1000,{mask},{mask}')
             hits=[i for i in range(8) if mask&(1<<i)]
-            valid=len(hits)==1 or len(hits)==2 and hits[1]-hits[0]==1
+            valid=bool(hits) and len(hits)<=3 and hits[-1]-hits[0]+1==len(hits)
             self.assertEqual(self.response.snapshot()['probes']['valid'],valid)
+            self.assertEqual(self.response.snapshot()['probes']['compliant'],valid or mask==0)
         self.response.feed('[LINE],1,1000,24,24')
         self.assertEqual(self.response.snapshot()['probes']['side'],'center')
+        for mask,side in [(8,'left'),(16,'right'),(56,'right'),(0,None)]:
+            self.response.feed(f'[LINE],1,1000,{mask},{mask}')
+            self.assertEqual(self.response.snapshot()['probes']['side'],side)
+        self.assertEqual(self.response.snapshot()['probes']['reason'],'waiting')
         self.now[0]+=.4
         self.assertFalse(self.response.snapshot()['probes']['valid'])
 

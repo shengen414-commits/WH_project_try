@@ -170,7 +170,7 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         await page.locator('#line-response-form button').click();
         await page.waitForFunction(()=>document.getElementById('line-response-status').textContent.includes('等待固件参数'));
         assert.equal(lineConfig.applied,null);
-        assert.deepEqual(configs.at(-1),{left_us:400,right_us:400,deadband:.16,slew_us_s:600,direction:-1});
+        assert.deepEqual(configs.at(-1),{left_us:400,right_us:400,deadband:.10,slew_us_s:600,direction:-1});
         assert.equal(await page.locator('#line-response-form [name=left_us]').getAttribute('max'),'500');
         assert.equal(await page.locator('#line-response-form [name=right_us]').getAttribute('max'),'500');
         lineConfig.applied=configs.at(-1);lineConfig.request.status='confirmed';lineConfig.request.message='固件已确认比例参数';

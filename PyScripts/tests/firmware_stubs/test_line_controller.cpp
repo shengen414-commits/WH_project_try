@@ -35,10 +35,12 @@ int main() {
     assert(estimateLinePosition({0, 0, 0, 0}).status == LinePositionStatus::Lost);
     assert(estimateLinePosition({0, 0, 255, 255}).status == LinePositionStatus::AllActive);
     assert(estimateLinePosition({0, 0, 0x81, 0x81}).status == LinePositionStatus::MultipleSegments);
-    assert(estimateLinePosition({0, 0, 0x38, 0x38}).status == LinePositionStatus::TooWide);
+    assert(estimateLinePosition({0, 0, 0x78, 0x78}).status == LinePositionStatus::TooWide);
     for (int mask=0;mask<256;++mask) {
         int count=0;for(int bit=0;bit<8;++bit)if(mask&(1<<bit))++count;
-        const bool expected=count==1 || (count==2 && (mask & (mask>>1))!=0);
+        int stripped=mask; while(stripped && !(stripped&1)) stripped>>=1;
+        const bool expected=count>=1 && count<=3 && (stripped&(stripped+1))==0;
+        assert(estimateLinePosition({0,0,(uint8_t)mask,(uint8_t)mask}).compliant()==(expected || mask==0));
         assert(estimateLinePosition({0,0,(uint8_t)mask,(uint8_t)mask}).valid()==expected);
     }
 
@@ -71,6 +73,9 @@ int main() {
     assert(proportional.compute(1,{.01f,-500,500,false},output) && output==400);
     assert(proportional.compute(-1,{.01f,-500,500,false},output) && output==-400);
     assert(proportional.compute(1,{.01f,-300,300,false},output) && output==300); // Preserve actuator limits.
+    assert(proportional.compute(0,context,output) && output==0);
+    assert(proportional.compute(1.f/7,context,output) && output>0);
+    assert(proportional.compute(-1.f/7,context,output) && output<0);
     assert(proportional.tune(500,500,.16f,600));
     assert(proportional.compute(-1,{.01f,-500,500,false},output) && output==-500);
     assert(proportional.compute(.143f,context,output) && output==0);

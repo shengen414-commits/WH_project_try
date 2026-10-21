@@ -153,19 +153,19 @@
         <div id="line-steering-status" class="sync-hint" role="status">巡线转向：等待固件状态。先归中油门再开启；丢线或反馈超时会停止动力。</div>
         <div id="line-steering-message" class="sync-hint" role="status"></div>
         <details class="manual-steering-panel"><summary>巡线比例响应参数与八路探头</summary>
-            <p>先退出联合观察与手动测试。点击“开启巡线转向”会先应用当前表单参数，固件确认后才开启比例模式；也可单独应用参数。只接受一个或相邻两个探头命中，CH4/CH5附近归中。</p>
+            <p>先退出联合观察与手动测试。点击“开启巡线转向”会先应用当前表单参数，固件确认后才开启比例模式；也可单独应用参数。允许0～3个连续探头命中；0个时归中等待，CH4和CH5同时亮起为正中，单独CH4偏左、CH5偏右。</p>
             <div id="line-live-probes" style="display:flex;gap:6px;flex-wrap:wrap"></div><p id="line-live-quality" role="status">等待巡线数据</p>
             <form id="line-response-form">
                 <label>胶带偏左最大偏转（μs）<input name="left_us" type="number" min="0" max="500" step="1" value="400" required></label>
                 <label>胶带偏右最大偏转（μs）<input name="right_us" type="number" min="0" max="500" step="1" value="400" required></label>
-                <label>居中区（归一化）<input name="deadband" type="number" min="0" max="0.3" step="0.001" value="0.16" required></label>
+                <label>居中区（归一化）<input name="deadband" type="number" min="0" max="0.3" step="0.001" value="0.10" required></label>
                 <label>变化速度（μs/s）<input name="slew_us_s" type="number" min="50" max="1200" value="600" required></label>
                 <label>PWM方向<select name="direction"><option value="1">+1：胶带在左时增加PWM</option><option value="-1">−1：翻转左右响应</option></select></label>
                 <button type="submit">应用比例参数（不启动）</button>
             </form><p id="line-response-status" role="status">默认左右各400μs，可设0～500μs；实际输出受标定行程限制，设置尚未确认。</p>
             <a href="/vehicle-lab">三路传感器独立调试开关 →</a>
         </details>
-        <div class="sync-hint">CH1在车左侧，CH4/CH5附近为居中区；展开比例参数可设置更明显的响应和左右方向。上电保持原基础模式，应用参数并确认后切换比例模式；MPU6050和视觉暂不参与转向。</div>
+        <div class="sync-hint">CH1在车左侧，CH4和CH5同时亮起为正中；展开比例参数可设置更明显的响应和左右方向。上电保持原基础模式，应用参数并确认后切换比例模式；MPU6050和视觉暂不参与转向。</div>
         <details id="manual-steering-panel" class="manual-steering-panel">
             <summary>手动舵机调试 <span id="manual-steering-badge">未进入</span></summary>
             <div class="manual-steering-content">
@@ -209,11 +209,11 @@
     </div>
 
     <script src="{{ url_for('static', filename='js/camera_preview.js') }}?v=1"></script>
-    <script src="{{ url_for('static', filename='js/main.js') }}?v=line-prop-2"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}?v=line-prop-3"></script>
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
     <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=1"></script>
     <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=3"></script>
-    <script src="{{ url_for('static', filename='js/line_response.js') }}?v=3"></script>
+    <script src="{{ url_for('static', filename='js/line_response.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=5"></script>
 </body>
 </html>

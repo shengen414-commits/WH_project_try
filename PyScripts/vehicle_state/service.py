@@ -342,10 +342,10 @@ class VehicleLab:
                 line_reason = 'valid'
                 bits = [i for i in range(8) if mask >= 0 and mask & (1 << i)]
                 if mask < 0: line_reason = 'stale'
-                elif not bits: line_reason = 'lost'
+                elif not bits: line_reason = 'waiting'
                 elif len(bits) == 8: line_reason = 'all_active'
                 elif bits[-1]-bits[0]+1 != len(bits): line_reason = 'multiple_segments'
-                elif len(bits)>2: line_reason = 'too_wide'
+                elif len(bits)>3: line_reason = 'too_wide'
                 channel = sum(bits)/len(bits) if bits and line_reason == 'valid' else None
                 self.raw['line'] = {'raw_mask': raw, 'mask': mask, 'center_channel': channel, 'reason': line_reason, 'device_ms': line_ms}
                 if not self.channels['line']:

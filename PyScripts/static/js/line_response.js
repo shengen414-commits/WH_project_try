@@ -18,7 +18,7 @@
             node.style.cssText=`padding:6px;border-radius:4px;background:${p.fresh&&p.mask!==null&&(p.mask&(1<<i))?'#176b56':'#263541'};color:white`;
             return node;
         }));
-        const reasons={valid:'有效：单个或相邻两个探头命中',lost:'丢线',all_active:'八路全命中，无效',too_wide:'超过两个探头命中，无效',multiple_segments:'分离命中，无效'};
+        const reasons={valid:'有效：1～3个连续探头命中',waiting:'合规：0个命中，归中等待胶带',lost:'丢线',all_active:'八路全命中，无效',too_wide:'超过三个探头命中，无效',multiple_segments:'分离命中，无效'};
         document.getElementById('line-live-quality').textContent=p.fresh?
             `${reasons[p.reason]||p.reason}｜中心 ${Number.isFinite(p.center_channel)?(p.center_channel+1).toFixed(1):'—'}｜${{left:'胶带偏左',right:'胶带偏右',center:'居中'}[p.side]||'不输出有效位置'}`:'等待新鲜巡线数据；退出联合观察和手动测试后查看';
         const request=data.request||{};

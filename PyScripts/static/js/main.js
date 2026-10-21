@@ -231,7 +231,7 @@ function renderLineSteering(state) {
     const labels = { LINE: '巡线已开启', YAW: '外部横摆控制已开启', FAULT: '故障，动力已锁定中位', OFF: '已关闭' };
     const reasons = {tracking:'正在响应偏差', centered:'已居中', centering:'正在回中',
         controller_invalid:'控制算法输出无效，已停止', armed:'已开启转向，动力保持中位', disabled:'已关闭',
-        line_lost:'未检测到线，请重新对准后开启', line_ambiguous:'多条线或全通道命中，请检查赛道及极性',line_too_wide:'命中超过两个探头，已归中；只允许单个或相邻两个探头命中',
+        line_lost:'未检测到线，请重新对准后开启',line_waiting:'0个探头命中：归中等待胶带，动力保持中位', line_ambiguous:'多条线或全通道命中，请检查赛道及极性',line_too_wide:'命中超过三个探头，已归中；只允许0～3个连续探头命中',
         line_stale:'巡线数据超时', no_line_frame:'巡线尚无完整数据帧，请检查初始化与接线',
         no_valid_line:'没有有效巡线数据，未开启', gyro_stale:'陀螺仪反馈超时',
         no_valid_gyro:'没有有效陀螺仪数据', no_valid_yaw_source:'外部目标或陀螺仪尚未接入',
@@ -245,7 +245,7 @@ function renderLineSteering(state) {
     const algorithmLabel = state.algo ? ` | 算法 ${algorithms[state.algo] || state.algo}` : '';
     const directionLabel = state.dir ? ` | 方向 ${state.dir}` : '';
     target.innerText = state.mode && state.fresh ?
-        `巡线转向：${labels[state.mode] || state.mode}${algorithmLabel}${directionLabel} | 偏差 ${state.e ?? '—'} | 舵机 ${state.pwm || '—'} us | ${reasons[state.reason] || state.reason || ''}` :
+        `巡线转向：${labels[state.mode] || state.mode}${algorithmLabel}${directionLabel} | 偏差 ${state.reason==='line_waiting'?'—':state.e ?? '—'} | 舵机 ${state.pwm || '—'} us | ${reasons[state.reason] || state.reason || ''}` :
         '巡线转向：暂无新鲜状态，请确认已烧录新版正常固件。';
     document.getElementById('line-steering-on').disabled = lineSteeringPending || lineSteeringAwaitingConfirmation || isRcMode || (state.fresh && ['LINE', 'YAW'].includes(state.mode));
     document.getElementById('line-steering-off').disabled = lineSteeringPending && !linePreparing;
