@@ -744,7 +744,7 @@ register_camera_replay_routes(app, camera_replay)
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return Response(render_template('index.html'), headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/imu')
@@ -818,6 +818,22 @@ def gen_stream(camera):
             yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n\r\n')
         # 休眠时减慢轮询速率节省 CPU
         time.sleep(0.04 if camera.is_active else 0.5)
+
+
+@app.get('/camera/preview/<name>')
+def camera_preview(name):
+    camera = {'left': cam_left, 'right': cam_right}.get(name)
+    if camera is None:
+        return '', 404
+    # Preview uses a copy of the latest captured image, without opening the device again.
+    frame = camera.get_latest_frame()
+    if frame is None:
+        return '', 204, {'Cache-Control': 'no-store'}
+    small_frame = cv2.resize(frame, (320, 240))
+    ok, jpeg = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+    if not ok:
+        return '', 503, {'Cache-Control': 'no-store'}
+    return Response(jpeg.tobytes(), mimetype='image/jpeg', headers={'Cache-Control': 'no-store'})
 
 
 @app.route('/video_feed/left')

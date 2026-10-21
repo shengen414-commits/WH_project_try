@@ -454,6 +454,33 @@ class DashboardTests(unittest.TestCase):
         recorder.finish.assert_called_once()
         camera.available = False
 
+    def test_preview_returns_finite_response_without_changing_camera_or_recording(self):
+        with patch.object(self.app.cam_left, 'get_latest_frame', return_value=None), \
+             patch.object(self.app.cam_left, 'set_active') as switch:
+            for _ in range(3):
+                response = self.client.get('/camera/preview/left', buffered=True)
+                self.assertEqual(response.status_code, 204)
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+                self.assertFalse(response.is_streamed)
+            switch.assert_not_called()
+        jpeg = Mock(); jpeg.tobytes.return_value = b'jpeg-fixture'
+        with patch.object(self.app.cam_left, 'get_latest_frame', return_value=object()), \
+             patch.object(self.app.cv2, 'resize', return_value=object()), \
+             patch.object(self.app.cv2, 'imencode', return_value=(True,jpeg)):
+            response = self.client.get('/camera/preview/left')
+            self.assertEqual(response.data, b'jpeg-fixture')
+            self.assertEqual(response.mimetype, 'image/jpeg')
+            self.assertFalse(response.is_streamed)
+        self.assertEqual(self.client.get('/camera/preview/unknown').status_code, 404)
+
+    def test_dashboard_html_is_local_and_does_not_open_infinite_streams(self):
+        response = self.client.get('/')
+        html = response.get_data(as_text=True)
+        self.assertNotIn('https://cdn.', html)
+        self.assertNotIn('src="/video_feed/', html)
+        self.assertIn('/static/vendor/chartjs/chart.umd.js', html)
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+
 
 if __name__ == '__main__':
     unittest.main()

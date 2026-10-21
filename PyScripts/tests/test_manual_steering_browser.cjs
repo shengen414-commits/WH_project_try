@@ -12,7 +12,8 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
 (async () => {
     const browser = await chromium.launch({ channel: 'msedge', headless: true });
     try {
-        const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+        const browserContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+        const page = await browserContext.newPage();
         const errors = [], commands = [], throttle = [];
         page.on('pageerror', error => errors.push(error.message));
         const manual = { active: false, blocking: false, fresh: false, ready: false, precise: false,
@@ -27,13 +28,15 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
                 ready: true, precise: true, target_us: target });
             manual.request = { ...manual.request, status: 'confirmed', message: stopping ? '已归中并退出手动测试' : calibrating ? `已保存直行中位 ${target}μs，掉电保留` : `ESP32 已确认输出 ${target}μs` };
         }
-        await page.route('https://cdn.jsdelivr.net/**', route => route.fulfill({ contentType: 'text/javascript',
-            body: 'window.Chart=class { constructor(ctx,config){this.data=config.data;this.options=config.options||{};ctx.canvas.style.maxWidth="100%";} update(){} resize(){} destroy(){} };' }));
-        await page.route('http://manual.test/**', async route => {
+        const context = page.context(), external = [];
+        context.on('request', request => {if(request.url().startsWith('https://'))external.push(request.url());});
+        await context.route('https://**', route => route.abort()); // Dashboard must work offline.
+        await context.route('http://manual.test/**', async route => {
             const url = new URL(route.request().url());
             if (url.pathname === '/') return route.fulfill({ contentType: 'text/html', body: html });
             if (url.pathname.startsWith('/static/')) return route.fulfill({ contentType: url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript', body: fs.readFileSync(path.join(root, url.pathname.slice(1)), 'utf8') });
             if (url.pathname.startsWith('/video_feed/')) return route.fulfill({ status: 204 });
+            if (url.pathname.startsWith('/camera/preview/')) return route.fulfill({ status: 204 });
             if (url.pathname === '/dashboard/status') return route.fulfill({ json: {
                 sensor: { position: 0, speed: '0', mode: 'WEB', throttle: 1500, encoder_fresh: !manual.blocking,
                     steering: { mode: 'OFF', fresh: true, reason: 'disabled' }, manual_steering: manual },
@@ -135,8 +138,26 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
                 cls: node.className, right: node.getBoundingClientRect().right, width: node.getBoundingClientRect().width }))
                 .filter(node => node.width > 0 && node.right > innerWidth + 1).slice(0, 15) }));
         assert.ok(overflow.scroll <= overflow.width, JSON.stringify(overflow));
+        await page.locator('#manual-steering-start').click();
+        await page.waitForFunction(() => document.getElementById('manual-steering-status').textContent.includes('未收到固件确认'), {timeout:6000});
+        ack();
+        await page.waitForFunction(() => !document.getElementById('manual-steering-status').textContent.includes('未收到固件确认'));
+        await page.locator('#manual-steering-stop').click();
+        await page.waitForFunction(() => document.getElementById('manual-steering-status').textContent.includes('等待 ESP32'));
+        ack();
+        await page.waitForFunction(() => !document.getElementById('manual-steering-start').disabled);
         assert.deepEqual(throttle, []);  // Manual controls never command propulsion.
         assert.deepEqual(errors, []);
-        console.log('Manual steering browser checks passed: fold, confirmation, steps, slider, bounds, neutral exit, errors, mobile.');
+        await page.close();
+        for (let i=0;i<3;i++) {
+            const reopened = await context.newPage();
+            reopened.on('pageerror', e => errors.push(e.message));
+            await reopened.goto('http://manual.test/', {waitUntil:'load', timeout:5000});
+            await reopened.waitForFunction(() => !document.getElementById('manual-steering-start').disabled);
+            assert.equal(await reopened.evaluate(() => Chart.version), '4.4.8');
+            await reopened.close();
+        }
+        assert.deepEqual(external, []);assert.deepEqual(errors, []);
+        console.log('Manual steering browser checks passed: controls, late ACK recovery, mobile, offline local charts and three tab close/reopen cycles.');
     } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

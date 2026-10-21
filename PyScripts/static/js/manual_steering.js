@@ -6,6 +6,7 @@
     let state = { active: false, blocking: false, serial_open: false, request: {},
         low_us: 1200, center_us: 1500, high_us: 1800 };
     let busy = false, actionInFlight = '', error = '', exitQueued = false, confirmationTimer = null;
+    let confirmationErrorId = null;
     const blocking = () => !!state.blocking || (busy && actionInFlight === 'start');
 
     function preview(value) {
@@ -17,6 +18,9 @@
         const incoming = data.request || {}, previous = state.request || {};
         if ((incoming.sent_at || 0) < (previous.sent_at || 0)) return;
         if (incoming.id && incoming.id === previous.id && previous.status !== 'pending' && incoming.status === 'pending') return;
+        if (confirmationErrorId === incoming.id && ['confirmed', 'rejected'].includes(incoming.status)) {
+            error = ''; confirmationErrorId = null;
+        }
         state = data;
         const pending = incoming.status === 'pending';
         if (!pending && confirmationTimer !== null) { clearTimeout(confirmationTimer); confirmationTimer = null; }
@@ -70,6 +74,7 @@
         busy = true;
         actionInFlight = action;
         error = '';
+        confirmationErrorId = null;
         if (action === 'start' && typeof global.parkThrottleForManualSteering === 'function') {
             try { global.parkThrottleForManualSteering(); }
             catch (failure) { console.warn('Throttle UI:', failure.message); }
@@ -91,6 +96,7 @@
                 confirmationTimer = setTimeout(() => {
                     if (state.request?.id === requestId && state.request.status === 'pending') {
                         error = '未收到固件确认，请检查串口和新版固件；可点击归中退出。';
+                        confirmationErrorId = requestId;
                         renderManualSteering(state);
                     }
                 }, 3500);

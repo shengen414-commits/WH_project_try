@@ -18,16 +18,16 @@ function syncCameraLayout() {
     leftBox.style.display = leftOn ? 'block' : 'none';
     rightBox.style.display = rightOn ? 'block' : 'none';
 
-    if (leftOn && !leftImg.getAttribute('src')) {
-        leftImg.src = `/video_feed/left?${Date.now()}`;
-    } else if (!leftOn) {
+    if (window.cameraPreview) {
+        window.cameraPreview.setEnabled('left', leftOn);
+        window.cameraPreview.setEnabled('right', rightOn);
+    }
+    if (!leftOn) {
         leftImg.removeAttribute('src');
         document.getElementById('fps-left').innerText = "STANDBY";
     }
 
-    if (rightOn && !rightImg.getAttribute('src')) {
-        rightImg.src = `/video_feed/right?${Date.now()}`;
-    } else if (!rightOn) {
+    if (!rightOn) {
         rightImg.removeAttribute('src');
         document.getElementById('fps-right').innerText = "STANDBY";
     }
@@ -42,13 +42,10 @@ function toggleCamera(camera) {
     const isChecked = checkbox.checked;
     const img = document.getElementById(isLeft ? 'img-left' : 'img-right');
     const fps = document.getElementById(isLeft ? 'fps-left' : 'fps-right');
-    const feedPath = isLeft ? '/video_feed/left' : '/video_feed/right';
 
     fetch(`/toggle_cam?camera=${camera}&state=${isChecked ? 'on' : 'off'}`);
 
-    if (isChecked) {
-        img.src = `${feedPath}?${Date.now()}`;
-    } else {
+    if (!isChecked) {
         img.removeAttribute('src');
         fps.innerText = "STANDBY";
     }

@@ -54,5 +54,7 @@
             onError: error => console.warn('Dashboard status:', error.message),
         });
         global.dashboardPolling.start();
+        global.addEventListener('pagehide', () => global.dashboardPolling.stop());
+        global.addEventListener('pageshow', () => global.dashboardPolling.start());
     }
 })(typeof window !== 'undefined' ? window : globalThis);

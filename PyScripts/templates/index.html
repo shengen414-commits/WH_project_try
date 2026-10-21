@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>双路高速感知终端</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="{{ url_for('static', filename='vendor/chartjs/chart.umd.js') }}?v=4.4.8"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='manual-servo-2') }}">
 </head>
 <body>
@@ -73,12 +73,12 @@
     <div class="container" id="video-container">
         <div class="camera-box single-mode" id="box-left">
             <h3>LEFT CAMERA</h3>
-            <img src="/video_feed/left" id="img-left">
+            <img id="img-left" alt="左相机预览">
             <div class="stats" id="fps-left">FPS: 0.0</div>
         </div>
         <div class="camera-box" id="box-right" style="display: none;">
             <h3>RIGHT CAMERA</h3>
-            <img src="/video_feed/right" id="img-right">
+            <img id="img-right" alt="右相机预览">
             <div class="stats" id="fps-right">STANDBY</div>
         </div>
     </div>
@@ -195,10 +195,11 @@
 
     </div>
 
-    <script src="{{ url_for('static', filename='js/main.js') }}?v=manual-servo-1"></script>
+    <script src="{{ url_for('static', filename='js/camera_preview.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}?v=reopen-1"></script>
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
     <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=1"></script>
-    <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=2"></script>
-    <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=3"></script>
+    <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=3"></script>
+    <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=4"></script>
 </body>
 </html>

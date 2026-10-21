@@ -37,6 +37,11 @@ python3 PyScripts/Camera_mit_Rotation_dashboard.py
 最多保留一条状态请求；超时会取消，避免车速、帧率、记录状态等请求积压而拖慢设备命令。
 发送扫描阀命令时取消当前状态查询，车速原始采集和压力 UDP 保存仍在后台独立运行。
 曲线显示约每 200 ms 更新，原始车速上报频率仍约 100 Hz。
+主 Dashboard 相机预览使用有限的 `/camera/preview/left`、`/camera/preview/right` JPEG请求，
+每路最多一条请求，完成后间隔80ms再取下一帧，超时取消。隐藏/关闭页面时暂停预览，重新打开或恢复显示时重连；
+此过程不切换相机硬件状态、不停止后台录像或采集。旧 `/video_feed/*` 仅保留兼容，主页面不再启动无限视频响应。
+图表库已随后台保存到 `PyScripts/static/vendor/chartjs/`，加载 Dashboard 无需连接外网CDN。
+页面和修改过的脚本带有新的缓存版本；更新时请完整同步 `templates` 与 `static`，重启一次后台并强制刷新浏览器。
 命令窗口显示网页总耗时、后台耗时、浏览器发出前的时间、协调/设备/TCP 锁等待、
 设备首字节和完整回复耗时。日志保存到
 `Car_Records/Sync_Records/diagnostics/command_timing.jsonl`。
