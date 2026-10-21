@@ -20,6 +20,7 @@ void setup() {
     }
     Serial.println("[READY] Encoder stream v1; storage on Orange Pi");
     Serial.println("[HELP] L: line debug; G: line capture; V: servo debug; M: MPU6050 debug; O: IMU 3D; R: normal; E: emergency stop");
+    Serial.println("[LAB_HELP] U: combined observation (drive neutral); Z: gyro zero; !id: clock probe; R: exit");
     Serial.println("[FOLLOW_HELP] N1: line steering ON; N0: OFF; @C0 basic/@C1 PID; @F offset,enter,exit; @D +/-1; @S status");
 }
 

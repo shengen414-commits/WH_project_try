@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>车辆状态与标定</title><link rel="stylesheet" href="{{url_for('static',filename='css/vehicle_lab.css')}}?v=1"></head>
+<body><main>
+<header><a href="/">← 主 Dashboard</a><h1>车辆状态与标定</h1><p>先测清楚，再闭环。这里仅观察状态，不执行自动纠偏或发出行驶油门。</p></header>
+<section><h2>联合观察</h2><p>启动会退出自动巡线，锁定动力中位。保持车辆静止校零，然后手推车辆、移动胶带观察变化。收起或关闭页面不会自动退出，请点击退出。</p>
+<div class="buttons"><button id="lab-start" data-action="start">启动联合观察</button><button id="lab-zero" data-action="zero">静止校零（约2秒）</button><button id="lab-stop" data-action="stop">退出观察</button><a id="trace-download" href="/vehicle-lab/trace">下载本轮测试记录</a></div>
+<p id="lab-message" role="status" aria-live="polite">等待状态</p><p id="lab-health"></p>
+<div id="line-probes" class="probes" aria-label="巡线探头 CH1 在左 CH8 在右"></div><p id="line-position"></p>
+<div class="readings"><div>横向偏差<strong id="value-y">—</strong><small>mm，车辆在线左侧为正</small></div><div>方向偏差<strong id="value-heading">—</strong><small>°，车头向胶带左侧为正</small></div><div>横摆角速度<strong id="value-yaw">—</strong><small>°/s，向左转为正</small></div><div>车速<strong id="value-speed">—</strong><small>m/s，前进为正</small></div></div>
+<canvas id="state-chart" width="1000" height="230" aria-label="最近20秒横向偏差，单位毫米"></canvas>
+<p id="state-quality"></p><p id="missing-calibration"></p>
+<details><summary>原始数据、时钟与异常诊断</summary><pre id="raw-state"></pre></details>
+</section>
+<div class="grid">
+<section><h2>安装尺寸与方向</h2><p>坐标原点：后轮轴中点；X朝前、Y朝左、Z朝上。未知留空。当前 MPU6050 的 Z 朝下，已预设横摆反号；X/Y仍未确认。</p>
+<form id="geometry-form">
+<label>相邻探头间距（mm）<input name="line_pitch_m" type="number" step="any" placeholder="待测量"></label>
+<label>巡线模块中心在后轴前方（mm）<input name="line_x_m" type="number" step="any" placeholder="待测量"></label>
+<label>巡线模块中心向左的安装偏移（mm）<input name="line_y_m" type="number" step="any" placeholder="居中安装实测后填0"></label>
+<label>每计数前进距离（mm）<input name="meters_per_count" type="number" step="any" placeholder="实测距离÷计数变化绝对值"></label>
+<label>前后轴距（mm）<input name="wheelbase_m" type="number" step="any" placeholder="待测量"></label>
+<label>向前手推时编码器计数<select name="encoder_sign"><option value="">待确认</option><option value="1">增加（+1）</option><option value="-1">减少（−1）</option></select></label>
+<label>MPU6050 Z 轴方向<select name="imu_yaw_sign"><option value="-1">朝下（−1）</option><option value="1">朝上（+1）</option></select></label>
+<label>完整安装轴映射（可留空）<input name="imu_axes" placeholder="例如 1,-2,-3；需先确认X/Y"></label>
+<button type="submit">保存安装参数</button></form>
+</section>
+<section><h2>前轮转角标定</h2><ol><li>先退出联合观察。在主 Dashboard 进入手动舵机测试。</li><li>小步调整脉宽，等待车轮停稳，用量角工具测前轮实际转角，左正右负。</li><li>在这里记录该角度；脉宽取自固件确认，不从输入框猜测。</li><li>直行点应为0°，两侧各至少一点，建议总共5～7点。记录每个点时从同一方向靠近，另外检查回差。</li></ol>
+<p>普通三线舵机无法回传实际轴角，以下是人工测量标定表，不是实时角度反馈。</p>
+<form id="actuator-form"><label>当前实测前轮角度（°）<input id="wheel-angle" type="number" min="-45" max="45" step="0.1" required></label><button type="submit">记录当前确认脉宽与实测角度</button></form>
+<p id="actuator-ready"></p><table><thead><tr><th>确认脉宽 μs</th><th>实测前轮转角 °</th></tr></thead><tbody id="actuator-points"></tbody></table>
+<button id="clear-points">清空转角标定点</button>
+<form id="preview-form"><label>验证转角插值（°）<input id="preview-angle" type="number" step="0.1" required></label><button type="submit">仅计算脉宽，不发送</button></form><p id="preview-result"></p>
+</section>
+</div>
+<section><h2>相机地面标定与识别</h2><p>复用主 Dashboard 的左相机，不重复打开设备。未完成内参、地面点和延迟标定时，仅显示像素结果，不参与米/弧度融合。</p>
+<label>导入地面标定工具生成的 JSON <input id="camera-file" type="file" accept="application/json,.json"></label><p id="camera-status"></p>
+<img id="camera-preview" alt="共享相机的胶带识别结果" hidden style="max-width:100%;border-radius:8px">
+<details><summary>传感器安装建议</summary><ul><li>MPU6050：刚性固定在主车架、接近重心，远离电机和松动的面包板；倒装可以保留，向左转动整车时，换算后的角速度应为正。</li><li>巡线模块：横跨车身，CH1在左，CH8在右，CH4/CH5中点对准车身纵向中线；安装在前轴附近或略前方，避开车轮和连杆。离地高度按实物黑胶带/地面测试确定。</li><li>OV9281：车身中线附近的刚性支架上，朝前下方，画面同时覆盖近处胶带与前方预瞄区域。先以约20～35cm高度、向下约25～45°试装，再根据实际镜头视场调整；这些不是标定值。</li><li>相机的地面标定与安装位置绑定，移动支架、换镜头、改分辨率后重新标定。胶带预瞄距离需要覆盖车速×总延迟，再留出纠偏距离。</li></ul></details>
+</section>
+</main><script src="{{url_for('static',filename='js/vehicle_lab.js')}}?v=1"></script></body></html>

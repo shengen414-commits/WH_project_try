@@ -92,7 +92,6 @@ class AsyncImageRecorder:
     """Incremental JPEG saving for ordinary multi-source sessions; bounded RAM."""
     def __init__(self, directory, done=None, on_done=None, queue_size=16, quality=90):
         self.directory = Path(directory)
-        self.directory.mkdir(parents=True, exist_ok=True)
         self.queue = queue.Queue(queue_size)
         self.quality = quality
         self.done = done if done is not None else threading.Event()
@@ -128,6 +127,8 @@ class AsyncImageRecorder:
 
     def _run(self):
         try:
+            # Capture/start-record holds only in-memory locks; mkdir may be slow.
+            self.directory.mkdir(parents=True, exist_ok=True)
             with (self.directory / "frames.index.csv").open("x", newline="", encoding="utf-8") as file:
                 writer = csv.writer(file)
                 writer.writerow(["frame_id", "host_receive_monotonic_ns", "host_receive_unix_ns", "image_path"])
@@ -193,6 +194,7 @@ class ReplaySnapshot:
         self.segments = []
         self.error = None
         self.cancelled = False
+        self.released = False
 
 
 class DiskReplayBuffer:
@@ -204,6 +206,7 @@ class DiskReplayBuffer:
         self.segment_ns = int(segment_sec * 1e9)
         self.max_bytes, self.quality, self.min_free_bytes = max_bytes, quality, min_free_bytes
         self.queue = queue.Queue(queue_size)
+        self.pending_releases = queue.SimpleQueue()
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.enabled = False
@@ -224,21 +227,23 @@ class DiskReplayBuffer:
     def enable(self, enabled, fps=60):
         if not math.isfinite(fps) or not 1 <= fps <= 240:
             raise ValueError("回放录制帧率需为1～240")
-        with self.lock:
+        if not self.lock.acquire(timeout=.05):
+            raise RuntimeError("回放磁盘正忙，请稍后重试")
+        try:
             if enabled and self.stop_event.is_set():
                 raise RuntimeError("相机回放已关闭，请重启后台")
             if enabled and self.error:
                 raise RuntimeError(f"回放存储已失败，请重启后台：{self.error}")
             if enabled and self.thread is None:
-                self.cache_root.mkdir(parents=True, exist_ok=True)
                 self.cache_dir = self.cache_root / uuid.uuid4().hex
-                self.cache_dir.mkdir()
                 self.thread = threading.Thread(target=self._run, name="camera-replay", daemon=True)
                 self.thread.start()
             if not self.enabled or fps != self.fps:
                 self.next_due_ns = None
             self.fps = fps
             self.enabled = enabled
+        finally:
+            self.lock.release()
 
     def submit(self, frame, wall_ns, mono_ns, frame_id):
         # A slow disk operation must not hold the camera's capture thread.
@@ -293,31 +298,51 @@ class DiskReplayBuffer:
 
     def snapshot(self, end_ns):
         request = ReplaySnapshot(end_ns - self.history_ns, end_ns)
-        with self.lock:
+        if not self.lock.acquire(timeout=.05):
+            raise RuntimeError("回放磁盘正忙，请稍后再次保存")
+        try:
             if self.thread is None or self.error or self.stop_event.is_set():
                 raise RuntimeError(self.error or "尚未开启相机回放缓冲")
             try:
                 self.queue.put_nowait(("snapshot", request))
             except queue.Full:
                 raise RuntimeError("回放写盘队列繁忙，请稍后再次保存") from None
+        finally:
+            self.lock.release()
         if not request.ready.wait(15):
-            with self.lock:
-                request.cancelled = True
-                for part in request.segments:
-                    part.pins -= 1
-                request.segments = []
+            request.cancelled = True
+            # The worker may be stuck in a disk syscall while holding its lock.
+            # Let it release any pins when it resumes, without blocking this timeout.
+            self.pending_releases.put(request)
             raise RuntimeError("等待回放片段完成超时")
         if request.error:
             raise RuntimeError(request.error)
         return request
 
     def release(self, snapshot):
-        with self.lock:
-            for part in snapshot.segments:
-                part.pins -= 1
+        if not self.lock.acquire(blocking=False):
+            self.pending_releases.put(snapshot)
+            return
+        try:
+            self._release_locked(snapshot)
             self._prune(time.monotonic_ns())
             if self.stop_event.is_set() and self.writer is None:
                 self._discard_closed()
+        finally:
+            self.lock.release()
+
+    def _release_locked(self, snapshot):
+        if not snapshot.released:
+            for part in snapshot.segments:
+                part.pins -= 1
+            snapshot.released = True
+
+    def _drain_releases(self):
+        while True:
+            try:
+                self._release_locked(self.pending_releases.get_nowait())
+            except queue.Empty:
+                return
 
     def _delete_segment(self, part):
         # Each buffer owns one UUID directory; never touch saved exports or other runs.
@@ -376,7 +401,11 @@ class DiskReplayBuffer:
 
     def _run(self):
         try:
+            self.cache_root.mkdir(parents=True, exist_ok=True)
+            self.cache_dir.mkdir()
             while not self.stop_event.is_set() or not self.queue.empty():
+                with self.lock:
+                    self._drain_releases()
                 try:
                     kind, item = self.queue.get(timeout=0.1)
                 except queue.Empty:
@@ -395,6 +424,8 @@ class DiskReplayBuffer:
                                              if part.last_ns >= item.start_ns and part.first_ns <= item.end_ns]
                             for part in item.segments:
                                 part.pins += 1
+                            if item.cancelled:
+                                self._release_locked(item)
                         if not item.segments:
                             item.error = "最近两分钟没有相机帧；请先开启回放并等待画面"
                     except Exception as error:
@@ -433,6 +464,7 @@ class DiskReplayBuffer:
         finally:
             with self.lock:
                 try:
+                    self._drain_releases()
                     self._close_segment()
                     if self.stop_event.is_set():
                         self._discard_closed()
@@ -440,14 +472,19 @@ class DiskReplayBuffer:
                     self.error = str(error)
 
     def close(self):
-        with self.lock:
-            self.enabled = False
-            self.stop_event.set()
+        # Never wait on a lock held by a hung filesystem operation before join's timeout.
+        self.enabled = False
+        self.stop_event.set()
         if self.thread:
             self.thread.join(timeout=3)
             if not self.thread.is_alive():
-                with self.lock:
-                    self._discard_closed()
+                def cleanup():
+                    with self.lock:
+                        self._drain_releases()
+                        self._discard_closed()
+                worker = threading.Thread(target=cleanup, name='replay-cleanup', daemon=True)
+                worker.start()
+                worker.join(timeout=3)
 
 
 def export_replay(buffer, snapshot, directory, name):

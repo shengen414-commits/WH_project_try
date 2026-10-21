@@ -231,9 +231,9 @@ class ControllerTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertEqual(service.status()["frames_received"], 3)
                 self.assertEqual(service.status()["bytes_received"], 3 * 348)
-                self.assertEqual(service.status()["bytes_saved"], 3 * 348)
                 service.stop()
                 service.close_file()
+                self.assertEqual(service.status()["bytes_saved"], 3 * 348)  # Disk worker has drained.
                 result = service.convert_file("trial.dat")
                 self.assertEqual(result["frames"], 3)
                 self.assertEqual((Path(directory) / "trial.dat").stat().st_size, 3 * 348)

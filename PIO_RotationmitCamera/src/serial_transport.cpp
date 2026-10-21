@@ -12,9 +12,11 @@ namespace {
 constexpr unsigned long SAMPLE_INTERVAL_MS = 10;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 100;
 constexpr unsigned long LINE_DEBUG_INTERVAL_MS = 200;
-enum class DebugMode { Normal, Line, Capture, Steering, MPU };
+enum class DebugMode { Normal, Line, Capture, Steering, MPU, Observe };
 DebugMode debugMode = DebugMode::Normal;
 unsigned long lastLineDebugAt = 0;
+uint32_t observeFrameAt = 0, observeImuAt = 0, observeStatusAt = 0, observeEventAt = 0;
+bool observePreferImu = false;
 char command = 0;
 char digits[16]; // Four pulse digits plus comma and uint32 request id.
 unsigned int digitCount = 0;
@@ -66,11 +68,19 @@ void selectMode(DebugMode mode) {
     stopAutomaticSteering();
     if (debugMode == DebugMode::Steering) endSteeringDebug();
     if (debugMode == DebugMode::MPU) endMPU6050Debug();
+    if (debugMode == DebugMode::Observe) endMPU6050Sensor();
     debugMode = mode;
-    setESCDebugState(mode != DebugMode::Normal, mode == DebugMode::Steering || mode == DebugMode::MPU);
+    setESCDebugState(mode != DebugMode::Normal, mode == DebugMode::Steering || mode == DebugMode::MPU || mode == DebugMode::Observe);
     if (mode == DebugMode::Line) lastLineDebugAt = millis() - LINE_DEBUG_INTERVAL_MS;
     if (mode == DebugMode::Steering) beginSteeringDebug();
     if (mode == DebugMode::MPU) beginMPU6050Debug();
+    if (mode == DebugMode::Observe) {
+        beginMPU6050Sensor();
+        const uint32_t now = millis();
+        observeFrameAt = now - 20; observeImuAt = now - 10;
+        observeStatusAt = now - 200; observeEventAt = now - 50;
+        observePreferImu = false;
+    }
 }
 void manualSteeringRequest(int pulse, uint32_t id) {
     bool ok = false;
@@ -110,6 +120,7 @@ void pollSerialCommands() {
             stopAutomaticSteering();
             if (debugMode == DebugMode::Steering) handleSteeringCommand('E');
             if (debugMode == DebugMode::MPU) handleMPU6050DebugCommand('E');
+            if (debugMode == DebugMode::Observe) handleMPU6050SensorCommand('E');
             handleESCCommand('E', 1500);
             return;
         }
@@ -117,6 +128,8 @@ void pollSerialCommands() {
             resetCommand(); configPending = true; commandStartedAt = millis(); continue;
         }
         // Mode commands also discard any incomplete throttle packet.
+        if (value == 'U' || value == 'u') { selectMode(DebugMode::Observe); continue; }
+        if (value == '!') { resetCommand(); command = '!'; commandStartedAt = millis(); continue; }
         if (value == 'L' || value == 'l') { selectMode(DebugMode::Line); continue; }
         if (value == 'G' || value == 'g') { selectMode(DebugMode::Capture); continue; }
         if (value == 'V' || value == 'v') { selectMode(DebugMode::Steering); continue; }
@@ -154,16 +167,23 @@ void pollSerialCommands() {
         if (!command) {
             if (debugMode == DebugMode::Steering) handleSteeringCommand(value);
             if (debugMode == DebugMode::MPU) handleMPU6050DebugCommand(value);
+            if (debugMode == DebugMode::Observe) handleMPU6050SensorCommand(value);
             continue;
         }
         if ((command == 'N' && digitCount == 1 && value == ',') ||
             (command == 'S' && digitCount == 4 && value == ',')) {
             digits[digitCount++] = value;
-        } else if (value >= '0' && value <= '9' && digitCount < (command == 'S' ? 15U : command == 'N' ? 12U : 4U)) {
+        } else if (value >= '0' && value <= '9' && digitCount < (command == 'S' ? 15U : command == 'N' ? 12U : command == '!' ? 10U : 4U)) {
             digits[digitCount++] = value;
         } else if (value == '\n') {
             uint32_t requestId = 0;
-            if (command == 'S') {
+            if (command == '!') {
+                if (parseRequestId(0, requestId)) {
+                    char reply[48];
+                    int n = snprintf(reply, sizeof(reply), "[SYNC],%lu,%lu\n", (unsigned long)requestId, (unsigned long)millis());
+                    if (Serial.availableForWrite() >= n) Serial.write((const uint8_t*)reply, n);
+                }
+            } else if (command == 'S') {
                 if (digitCount >= 6 && digits[4] == ',' && parseRequestId(5, requestId)) {
                     digits[4] = '\0';
                     manualSteeringRequest(atoi(digits), requestId);
@@ -183,7 +203,7 @@ void pollSerialCommands() {
             } else if (command != 'N' && digitCount == 4) {
                 digits[4] = '\0';
                 int pwm = atoi(digits);
-                if (pwm >= 1000 && pwm <= 2000 && debugMode != DebugMode::Steering && debugMode != DebugMode::MPU)
+                if (pwm >= 1000 && pwm <= 2000 && debugMode != DebugMode::Steering && debugMode != DebugMode::MPU && debugMode != DebugMode::Observe)
                     handleESCCommand(command, pwm);
             }
             resetCommand();
@@ -208,6 +228,61 @@ void publishEncoder() {
 }
 
 void publishLineSensor() {
+    if (debugMode == DebugMode::Observe) {
+        static uint32_t observationSequence = 0, lastEvent = 0;
+        const uint32_t now = millis();
+        char packet[128]; int n = 0;
+        bool frameDue = uint32_t(now - observeFrameAt) >= 20;
+        bool imuDue = uint32_t(now - observeImuAt) >= 20;
+        if (frameDue && imuDue) {
+            // Under sustained slow loops, alternate priority so neither stream starves.
+            if (observePreferImu) { frameDue = false; observeFrameAt = now - 10; }
+            else { imuDue = false; observeImuAt = now - 10; }
+            observePreferImu = !observePreferImu;
+        }
+        if (frameDue) {
+            // Skip a full-TX slot instead of retrying formatting every control loop.
+            observeFrameAt = now;
+            LineSensorFrame frame;
+            const bool valid = readLineSensorFrame(frame) && uint32_t(now - frame.timeMs) <= 100;
+            n = snprintf(packet, sizeof(packet), "[OBS],%lu,%lu,%ld,%d,%d,%lu,%d,%d,%d,%d\n",
+                         (unsigned long)observationSequence++, (unsigned long)now, readEncoderPosition(),
+                         valid ? frame.rawMask : -1, valid ? frame.lineMask : -1,
+                         (unsigned long)(valid ? frame.timeMs : now), steeringTargetUs(), steeringCenterUs(), steeringLowUs(), steeringHighUs());
+            if (n > 0 && n < (int)sizeof(packet) && Serial.availableForWrite() >= n) {
+                Serial.write((const uint8_t*)packet, n);
+            }
+        }
+        MPU6050Sample sample;
+        if (imuDue) {
+            observeImuAt = now;
+            if (readMPU6050Sample(sample)) {
+                // Same units/schema as O mode; only observed data, no steering feedback submission.
+                n = snprintf(packet, sizeof(packet), "[IMU],%lu,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.2f,%.3f,%s\n",
+                             (unsigned long)sample.timeMs, sample.axG, sample.ayG, sample.azG,
+                             sample.gxDps, sample.gyDps, sample.gzDps, sample.temperatureC, sample.correctedGzDps,
+                             mpu6050SensorStatus().calibrating ? "RUN" : sample.calibrated ? "OK" : "NO");
+                if (n > 0 && n < (int)sizeof(packet) && Serial.availableForWrite() >= n) {
+                    Serial.write((const uint8_t*)packet, n);
+                }
+            }
+        }
+        if (uint32_t(now - observeStatusAt) >= 200) {
+            observeStatusAt = now;
+            const auto status = mpu6050SensorStatus();
+            n = snprintf(packet, sizeof(packet), "[LAB],%lu,%d,%d\n", (unsigned long)now, status.ready, status.calibrating);
+            if (Serial.availableForWrite() >= n) Serial.write((const uint8_t*)packet, n);
+        }
+        const auto status = mpu6050SensorStatus();
+        if (status.event != lastEvent && uint32_t(now - observeEventAt) >= 50) {
+            observeEventAt = now;
+            n = snprintf(packet, sizeof(packet), "[LAB_MSG] %s\n", status.message);
+            if (n > 0 && n < (int)sizeof(packet) && Serial.availableForWrite() >= n) {
+                Serial.write((const uint8_t*)packet, n); lastEvent = status.event;
+            }
+        }
+        return;
+    }
     if (debugMode == DebugMode::Steering || debugMode == DebugMode::MPU) return;
     static bool hasSent = false;
     static uint32_t lastSentSequence = 0;

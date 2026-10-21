@@ -1,6 +1,6 @@
 #include "line_sensor.h"
 #include "steering_control.h"
-#include "mpu6050_debug.h"
+#include "imu_sensor.h"
 #include <driver/gpio.h>
 
 namespace {

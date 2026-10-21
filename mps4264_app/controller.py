@@ -20,6 +20,7 @@ from typing import BinaryIO
 from .protocol import FAST_TYPE, PressureFrame, convert_binary_to_csv, decode_datagram
 from .transport import MPSControlConnection
 from .diagnostics import TimedRLock
+from .recording import PressureWriter
 
 
 class MPSControllerError(RuntimeError):
@@ -50,6 +51,8 @@ class MPS4264Controller:
         self._raw_file: BinaryIO | None = None
         self._index_file = None
         self._index_writer: csv.writer | None = None
+        self._storage: PressureWriter | None = None
+        self._closing = False
         self._file_stem: str | None = None
         self._scanning = False
         self._scan_started_monotonic_ns: int | None = None
@@ -94,7 +97,7 @@ class MPS4264Controller:
         if not 1 <= control_port <= 65535:
             raise ValueError("TCP 端口范围应为 1–65535")
         with self._lock:
-            if self._raw_file is not None:
+            if self._raw_file is not None or self._closing:
                 raise MPSControllerError("请先关闭采集文件再切换连接")
             if self._client is not None:
                 self._client.close()
@@ -281,7 +284,7 @@ class MPS4264Controller:
         if not 1 <= port <= 65535:
             raise ValueError("UDP 端口范围应为 1–65535")
         with self._lock:
-            if self._raw_file is not None:
+            if self._raw_file is not None or self._closing:
                 raise MPSControllerError("已有文件打开；请先关闭")
             self.data_dir.mkdir(parents=True, exist_ok=True)
             raw_path = self.data_dir / f"{name}.dat"
@@ -325,11 +328,18 @@ class MPS4264Controller:
             self._first_receive_unix_ns = None
             self._last_error = None
             self._capture_stop.clear()
+            self._storage = PressureWriter(raw, index, self._index_writer, self._storage_error)
             self._capture_thread = threading.Thread(target=self._receive_loop,
                                                     name="mps4264-udp", daemon=True)
             self._capture_thread.start()
             self._log(f"已新建 {name}.dat，并监听 UDP {port}；等待 SCAN")
             return self.status()
+
+    def _storage_error(self, error):
+        with self._lock:
+            self._last_error = f"写入采集文件失败：{error}"
+            self._capture_stop.set()
+            self._log(self._last_error)
 
     def _receive_loop(self) -> None:
         assert self._udp_socket is not None
@@ -363,11 +373,6 @@ class MPS4264Controller:
                     continue
                 try:
                     for raw, frame in decoded:
-                        self._raw_file.write(raw)
-                        self._bytes_saved += len(raw)
-                        self._index_writer.writerow((frame.frame_number, monotonic_ns,
-                                                     unix_ns, frame.frame_sec, frame.frame_ns,
-                                                     frame.packet_type, frame.units_index))
                         if (self._last_frame_number is not None and
                                 frame.frame_number > self._last_frame_number + 1):
                             self._frame_gaps += frame.frame_number - self._last_frame_number - 1
@@ -378,6 +383,10 @@ class MPS4264Controller:
                         self._last_frame_number = frame.frame_number
                         self._last_frame = frame
                         self._last_receive_unix_ns = unix_ns
+                    if not self._storage.submit(decoded, monotonic_ns, unix_ns):
+                        self._storage_error(self._storage.error or "压力写盘队列已满，停止本次采集；请检查存储性能")
+                        write_failed = True
+                        break
                 except (OSError, ValueError) as exc:
                     self._last_error = f"写入采集文件失败：{exc}"
                     self._scanning = False
@@ -385,9 +394,11 @@ class MPS4264Controller:
                     self._log(self._last_error)
                     write_failed = True
                     break
-        if write_failed and self._client is not None:
+        if (write_failed or self._storage and self._storage.error) and self._client is not None:
             try:
                 self._client.stop_scan()
+                with self._lock:
+                    self._scanning = False
             except (OSError, TimeoutError, ConnectionError):
                 pass
         # Do not close files here: close_file owns the final flush and metadata.
@@ -399,6 +410,8 @@ class MPS4264Controller:
                 raise MPSControllerError("UDP 目标已改变；请重启设备并使用“已重启，重新连接”")
             if self._raw_file is None:
                 raise MPSControllerError("请先新建采集文件并监听 UDP")
+            if self._closing or self._storage is None or self._storage.stop.is_set():
+                raise MPSControllerError("压力文件正在收尾；请先关闭后新建文件")
             if self._capture_thread is None or not self._capture_thread.is_alive():
                 raise MPSControllerError("UDP 接收线程未运行；请关闭当前文件并重新新建文件")
             if self._scanning:
@@ -449,53 +462,65 @@ class MPS4264Controller:
     def close_file(self) -> dict:
         self.stop()
         with self._lock:
+            if self._closing:
+                raise MPSControllerError("压力文件正在收尾，请稍后重试")
             if self._raw_file is None:
                 return self.status()
+            self._closing = True
             self._capture_stop.set()
             thread = self._capture_thread
             udp = self._udp_socket
-        if udp is not None:
-            udp.close()
-        if thread is not None:
-            thread.join(timeout=2)
-            if thread.is_alive():
-                raise MPSControllerError("UDP 接收线程尚未退出，未关闭文件；请重试")
-        with self._lock:
-            self._raw_file.flush()
-            self._raw_file.close()
-            self._index_file.flush()
-            self._index_file.close()
-            stem = self._file_stem
-            metadata = {
-                "device_ip": self._device_ip,
-                "udp_target_ip": self._udp_target_ip,
-                "udp_target_port": self._udp_port,
-                "listen_port": self._listen_port,
-                "rate_hz": self._rate,
-                "fps": self._fps,
-                "fast_group": self._fast_group,
-                "frames_received": self._frames,
-                "bytes_received": self._bytes_received,
-                "bytes_saved": self._bytes_saved,
-                "frame_gaps": self._frame_gaps,
-                "bad_datagrams": self._bad_datagrams,
-                "foreign_datagrams": self._foreign_datagrams,
-                "last_error": self._last_error,
-                "note": "device frame time is not necessarily synchronized to host UTC",
-            }
-            self._raw_file = self._index_file = self._index_writer = None
-            self._udp_socket = self._capture_thread = None
-            self._listen_port = None
-            self._file_stem = None
+            storage, stem, directory = self._storage, self._file_stem, self.data_dir
+        try:
+            if udp is not None:
+                udp.close()
+            if thread is not None:
+                thread.join(timeout=2)
+                if thread.is_alive():
+                    raise MPSControllerError("UDP 接收线程尚未退出，未关闭文件；请重试")
+            storage.finish()
+            if not storage.done.wait(2):
+                raise MPSControllerError("压力存储仍在保存，文件保持打开；请稍后重试关闭")
+            saved = storage.status()
+            with self._lock:
+                self._bytes_saved = saved['bytes_saved']
+                metadata = {
+                    "device_ip": self._device_ip,
+                    "udp_target_ip": self._udp_target_ip,
+                    "udp_target_port": self._udp_port,
+                    "listen_port": self._listen_port,
+                    "rate_hz": self._rate,
+                    "fps": self._fps,
+                    "fast_group": self._fast_group,
+                    "frames_received": self._frames,
+                    "bytes_received": self._bytes_received,
+                    "bytes_saved": self._bytes_saved,
+                    "frame_gaps": self._frame_gaps,
+                    "bad_datagrams": self._bad_datagrams,
+                    "foreign_datagrams": self._foreign_datagrams,
+                    "last_error": self._last_error,
+                    "storage": saved,
+                    "note": "device frame time is not necessarily synchronized to host UTC",
+                }
+                self._raw_file = self._index_file = self._index_writer = None
+                self._udp_socket = self._capture_thread = None
+                self._listen_port = None
+                self._file_stem = None
             try:
-                (self.data_dir / f"{stem}.meta.json").write_text(
+                (directory / f"{stem}.meta.json").write_text(
                     json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
             except OSError as exc:
-                self._last_error = f"原始文件已关闭，但元数据写入失败：{exc}"
-                self._log(self._last_error)
+                with self._lock:
+                    self._last_error = f"原始文件已关闭，但元数据写入失败：{exc}"
+                    self._log(self._last_error)
                 raise
-            self._log(f"已关闭 {stem}.dat：{self._frames} 帧，估计缺口 {self._frame_gaps} 帧")
+            with self._lock:
+                self._log(f"已关闭 {stem}.dat：收到 {self._frames} 帧，保存 {saved['frames_saved']} 帧，估计缺口 {self._frame_gaps} 帧")
+                self._closing = False
             return self.status()
+        finally:
+            with self._lock:
+                self._closing = False
 
     def list_files(self) -> list[dict]:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -508,7 +533,7 @@ class MPS4264Controller:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.dat", filename):
             raise ValueError("只能转换本模块 recordings 目录中的 .dat 文件")
         with self._lock:
-            if self._scanning or self._file_stem == filename[:-4]:
+            if self._scanning or self._closing or self._file_stem == filename[:-4]:
                 raise MPSControllerError("请先 STOP 并关闭该采集文件再转换")
         source = self.data_dir / filename
         if not source.is_file():
@@ -541,6 +566,7 @@ class MPS4264Controller:
 
     def status(self) -> dict:
         with self._lock:
+            storage = self._storage.status() if self._storage else None
             self._status_revision += 1
             frame = self._last_frame
             no_udp_warning = bool(self._scanning and self._frames == 0 and
@@ -565,7 +591,9 @@ class MPS4264Controller:
                 "fast_group": self._fast_group,
                 "frames_received": self._frames,
                 "bytes_received": self._bytes_received,
-                "bytes_saved": self._bytes_saved,
+                "bytes_saved": storage['bytes_saved'] if storage else self._bytes_saved,
+                "storage": storage,
+                "file_closing": self._closing,
                 "frame_gaps": self._frame_gaps,
                 "bad_datagrams": self._bad_datagrams,
                 "foreign_datagrams": self._foreign_datagrams,

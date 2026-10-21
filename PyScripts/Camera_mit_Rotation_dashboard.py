@@ -11,7 +11,7 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 import sys
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 # Direct script execution must also resolve the sibling mps4264_app package.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -27,6 +27,10 @@ try:
     from .camera_recording import AsyncImageRecorder, DiskReplayBuffer
     from .camera_replay import CameraReplay, register_camera_replay_routes
     from .manual_steering import ManualSteering
+    from .vehicle_state.profile import ProfileStore
+    from .vehicle_state.service import VehicleLab
+    from .vehicle_state.web import register_vehicle_lab
+    from .diagnostic_output import DiagnosticOutput
 except ImportError:
     from telemetry import EncoderStream, CsvRecorder
     from sync_recording import SyncRecorder
@@ -38,6 +42,10 @@ except ImportError:
     from camera_recording import AsyncImageRecorder, DiskReplayBuffer
     from camera_replay import CameraReplay, register_camera_replay_routes
     from manual_steering import ManualSteering
+    from vehicle_state.profile import ProfileStore
+    from vehicle_state.service import VehicleLab
+    from vehicle_state.web import register_vehicle_lab
+    from diagnostic_output import DiagnosticOutput
 
 # 确保录像保存根目录存在
 SAVE_DIR = str(Path(os.environ.get('CAR_RECORDS_DIR', str(Path(__file__).resolve().parent.parent / 'Car_Records'))).resolve())
@@ -49,7 +57,7 @@ KMH_PER_RPM = 0.007173
 SPEED_RECORD_DIR = os.path.join(SAVE_DIR, "Speed_Records")
 os.makedirs(SPEED_RECORD_DIR, exist_ok=True)
 SPEED_RECORD_MAX_DURATION_SEC = 10 * 60
-SERIAL_DEBUG_PRINT = True
+SERIAL_DEBUG_PRINT = False
 SERIAL_DEBUG_MIN_INTERVAL_SEC = 0.5
 ENCODER_FRESH_SEC = 1.0
 BRAKE_REVERSE_DURATION_SEC = 2.00
@@ -103,6 +111,30 @@ imu_visualization = ImuVisualization()
 steering_requests = SteeringRequests()
 manual_steering = ManualSteering()
 estop_ignore_until = 0.0
+serial_diagnostics = DiagnosticOutput()
+
+
+def write_vehicle_lab_packet(packet):
+    with serial_write_lock:
+        if not esp32_serial or not esp32_serial.is_open:
+            raise OSError('ESP32 串口未连接')
+        if esp32_serial.write(packet) != len(packet):
+            raise OSError('串口命令未完整发送')
+
+
+def probe_vehicle_lab_clock(timer):
+    # Timestamp after acquiring the UART lock, not before waiting for another writer.
+    with serial_write_lock:
+        if not esp32_serial or not esp32_serial.is_open:
+            raise OSError('ESP32 串口未连接')
+        packet = timer.probe(time.monotonic())
+        if esp32_serial.write(packet) != len(packet):
+            raise OSError('串口命令未完整发送')
+
+
+vehicle_lab = VehicleLab(ProfileStore(Path(SAVE_DIR) / 'Vehicle_Calibration' / 'profile.json'),
+                         Path(SAVE_DIR) / 'State_Records', write_vehicle_lab_packet,
+                         camera=lambda: cam_left.get_observation_frame(), probe=probe_vehicle_lab_clock)
 
 
 def clamp_throttle_value(value, fallback=1500):
@@ -137,7 +169,7 @@ def write_esp32_boost(pwm):
 
 def encoder_ready():
     return bool(esp32_serial and esp32_serial.is_open and
-                not manual_steering.blocking() and
+                not manual_steering.blocking() and not vehicle_lab.blocking() and
                 time.monotonic() - sensor_state.get("last_encoder_rx_mono", 0) < ENCODER_FRESH_SEC)
 
 
@@ -192,11 +224,14 @@ def start_speed_recording():
             else:
                 error = None
                 session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                try:
-                    speed_recorder = CsvRecorder(os.path.join(SPEED_RECORD_DIR, f"speed_record_{session_id}.csv"),
-                                                 SPEED_RECORD_MAX_DURATION_SEC)
-                except OSError as exc:
-                    error = f"无法创建速度文件: {exc}"
+        if error is None:
+            try:
+                recorder = CsvRecorder(os.path.join(SPEED_RECORD_DIR, f"speed_record_{session_id}.csv"),
+                                       SPEED_RECORD_MAX_DURATION_SEC)
+                with speed_record_lock:
+                    speed_recorder = recorder
+            except OSError as exc:
+                error = f"无法创建速度文件: {exc}"
     state = speed_record_public_state()
     if error:
         state["message"] = error
@@ -385,15 +420,18 @@ def read_esp32_data():
                 sensor_state['last_steering_rx_mono'] = 0
                 imu_visualization.invalidate(message)
                 manual_steering.invalidate(message)
+                vehicle_lab.invalidate(message)
                 with serial_write_lock:
                     try:
                         esp32_serial.close()
                     except Exception:
                         pass
-                print(message)
+                serial_diagnostics.submit(message)
                 return
             if not chunk:
                 continue
+            received_wall_ns = time.time_ns()
+            received_mono_ns = time.monotonic_ns()
             pending.extend(chunk)
             while b'\n' in pending:
                 raw_line, _, remainder = pending.partition(b'\n')
@@ -401,8 +439,8 @@ def read_esp32_data():
                 # Preserve corrupt bytes as replacement characters for diagnostics;
                 # silently deleting them can turn damaged numeric fields into numbers.
                 line = raw_line.decode('utf-8', errors='replace').strip()
-                now_ns = time.time_ns()
-                now_mono_ns = time.monotonic_ns()
+                now_ns = received_wall_ns
+                now_mono_ns = received_mono_ns
                 sensor_state["serial_error"] = None
                 sensor_state["last_serial_line"] = line
                 sensor_state["last_serial_rx_wall"] = now_ns / 1e9
@@ -411,13 +449,14 @@ def read_esp32_data():
                 imu_visualization.feed(line, now_mono_ns / 1e9)
                 steering_requests.feed(line)
                 manual_steering.feed(line)
+                vehicle_lab.enqueue(line, now_mono_ns / 1e9)
                 sample = encoder_stream.decode(line, now_ns, sensor_state["throttle"], sensor_state["mode"], now_mono_ns)
                 if sample is not None:
                     manual_steering.normal_frame()
                     sensor_state.update({"position": sample["Position"], "speed_pps": sample["speed_pps"],
                                          "last_time_ms": sample["Time_ms"], "last_pos": sample["Position"],
                                          "sequence_gaps": sample["sequence_gaps"],
-                                         "device_epoch": sample["device_epoch"], "last_encoder_rx_mono": time.monotonic()})
+                                         "device_epoch": sample["device_epoch"], "last_encoder_rx_mono": now_mono_ns / 1e9})
                     with speed_record_lock:
                         for recorder in (speed_recorder, session_recorder):
                             if recorder is not None:
@@ -438,7 +477,7 @@ def read_esp32_data():
                         sensor_state["invalid_encoder_lines"] = sensor_state.get("invalid_encoder_lines", 0) + 1
                 now = time.monotonic()
                 if SERIAL_DEBUG_PRINT and now - last_debug >= SERIAL_DEBUG_MIN_INTERVAL_SEC:
-                    print(f"ESP32 RX >> {line}")
+                    serial_diagnostics.submit(f"ESP32 RX >> {line}")
                     last_debug = now
             if len(pending) > 4096:
                 pending.clear()
@@ -477,6 +516,7 @@ class HighSpeedCamera:
         # 保留 2 帧即可，避免常驻 420 张 640x480 BGR 图像（约 369 MiB）。
         self.buffer = deque(maxlen=2)
         self.latest_frame_ns = 0
+        self.observation_frame = None
         self.running = True
         self.real_fps = 0.0
 
@@ -541,6 +581,7 @@ class HighSpeedCamera:
             self.cap = None
         self.buffer.clear()
         self.latest_frame_ns = 0
+        self.observation_frame = None
         self.real_fps = 0.0
         print(f"💤 [{self.name}] 摄像头已释放硬件，进入休眠。")
 
@@ -600,6 +641,8 @@ class HighSpeedCamera:
                 self.frame_id += 1
                 self.buffer.append(frame)
                 self.latest_frame_ns = curr_ns
+                # One immutable publication keeps ID, timestamp and frame together.
+                self.observation_frame = (self.frame_id, mono_ns / 1e9, frame)
 
                 with self.record_lock:
                     if self.is_recording:
@@ -620,6 +663,9 @@ class HighSpeedCamera:
                     stat_frame_count = 0
             else:
                 time.sleep(0.01)
+
+    def get_observation_frame(self):
+        return self.observation_frame if self.is_active and self.available else None
 
     def get_latest_frame(self):
         if not self.is_active:
@@ -657,6 +703,37 @@ class HighSpeedCamera:
 # Flask 逻辑
 # =================================================================
 app = Flask(__name__)
+
+
+@contextmanager
+def vehicle_lab_operation(action):
+    if not sync_coordinator.operation_lock.acquire(blocking=False):
+        raise ValueError('设备正在执行其他操作')
+    try:
+        if not record_command_lock.acquire(blocking=False):
+            raise ValueError('记录操作正在执行，请稍后重试')
+        try:
+            if action != 'stop':
+                with sync_coordinator.lock:
+                    syncing = sync_coordinator.state['active']
+                with speed_record_lock:
+                    recording = any(r is not None and not r.done.is_set() for r in (speed_recorder, session_recorder))
+                if syncing or recording or record_workflow_active.is_set() or brake_sequence_active.is_set():
+                    raise ValueError('请先结束记录或制动，再进行状态/执行器标定')
+                if sensor_state.get('throttle', 1500) != 1500 or sensor_state.get('mode') == 'RC' or time.monotonic() < estop_ignore_until:
+                    raise ValueError('请先归中油门并退出遥控接管/制动')
+                if action == 'start' and (manual_steering.blocking() or not encoder_ready()):
+                    raise ValueError('请先退出手动/IMU调试并等待正常编码器数据')
+                if action == 'point' and vehicle_lab.blocking():
+                    raise ValueError('请先退出联合观察，再进入手动舵机测试')
+            yield
+        finally:
+            record_command_lock.release()
+    finally:
+        sync_coordinator.operation_lock.release()
+
+
+register_vehicle_lab(app, vehicle_lab, vehicle_lab_operation, lambda: manual_steering.snapshot())
 register_sync_routes(app, sync_coordinator)
 
 cam_left = HighSpeedCamera(src=0, name="Left", fps=210)
@@ -707,6 +784,8 @@ def imu_command():
                 return jsonify(error='请先结束记录或制动，再切换 MPU 测试模式'), 409
             if manual_steering.blocking():
                 return jsonify(error='请先归中退出手动舵机测试'), 409
+            if vehicle_lab.blocking():
+                return jsonify(error='请先退出状态估计联合观察'), 409
             if not esp32_serial or not esp32_serial.is_open:
                 return jsonify(error='ESP32 串口未连接'), 409
             if action == 'calibrate' and not imu_visualization.status()['fresh']:
@@ -950,9 +1029,9 @@ def start_record():
             return jsonify({"status": "unavailable", "message": "请开启相机并等待其就绪或保存完成"}), 409
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         try:
+            recorder = CsvRecorder(os.path.join(SAVE_DIR, session_id, "sensor_data.csv"), 3.0)
             with speed_record_lock:
-                session_recorder = CsvRecorder(os.path.join(SAVE_DIR, session_id, "sensor_data.csv"), 3.0)
-                recorder = session_recorder
+                session_recorder = recorder
                 session_status = {"active": True, "status": "recording", "session_id": session_id}
             record_workflow_active.set()
             for camera in cameras:
@@ -1006,6 +1085,8 @@ def manual_steering_command():
     try:
         with (record_command_lock if action != 'stop' else nullcontext()):
             if action != 'stop':
+                if vehicle_lab.blocking():
+                    return jsonify(error='请先退出状态估计联合观察'), 409
                 with sync_coordinator.lock:
                     sync_active = sync_coordinator.state['active']
                 with speed_record_lock:
@@ -1041,6 +1122,8 @@ def set_line_steering():
     if not isinstance(payload, dict) or not isinstance(payload.get('enabled'), bool):
         return jsonify(error='enabled 必须是布尔值'), 400
     enabled = payload['enabled']
+    if enabled and vehicle_lab.blocking():
+        return jsonify(error='请先退出状态估计联合观察'), 409
     if enabled and manual_steering.blocking():
         return jsonify(error='请先归中退出手动舵机测试，再开启巡线'), 409
     if not esp32_serial or not esp32_serial.is_open:
@@ -1050,6 +1133,10 @@ def set_line_steering():
         return jsonify(error='请先归中油门并退出遥控接管/制动，再开启巡线'), 409
     try:
         with serial_write_lock:
+            # Ownership is published before U acquires this UART lock. Read the
+            # atomic flag here; acquiring the lab lock would invert lock order.
+            if enabled and vehicle_lab.owned:
+                return jsonify(error='请先退出状态估计联合观察'), 409
             if enabled and manual_steering.blocking():
                 return jsonify(error='请先归中退出手动舵机测试，再开启巡线'), 409
             request_id = steering_requests.begin(enabled)
@@ -1075,6 +1162,9 @@ def set_throttle():
         val = int(val_str)
         # 安全断言保护
         if 1000 <= val <= 2000:
+            if val != 1500 and vehicle_lab.blocking():
+                return jsonify(status='ignored', message='联合观察期间动力锁定中位，请先退出观察',
+                               reason='vehicle_lab_active', throttle=1500), 409
             if val != 1500 and manual_steering.blocking():
                 return jsonify(status='ignored', message='手动舵机测试期间动力锁定中位，请先归中退出',
                                reason='manual_steering_active', throttle=1500), 409
@@ -1172,6 +1262,7 @@ if __name__ == '__main__':
     try:
         run_dashboard(app, sync_coordinator)
     finally:
+        vehicle_lab.shutdown()
         for camera in (cam_left, cam_right):
             camera.running = False
             camera.finish_record()

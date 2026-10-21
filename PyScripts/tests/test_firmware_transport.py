@@ -51,7 +51,7 @@ class FirmwareTransportTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         stubs = Path(__file__).resolve().parent / 'firmware_stubs'
         sources = ['esc_control.cpp', 'steering_control.cpp', 'automatic_steering.cpp',
-                   'line_position.cpp', 'line_controller.cpp', 'serial_transport.cpp', 'mpu6050_debug.cpp']
+                   'line_position.cpp', 'line_controller.cpp', 'serial_transport.cpp', 'mpu6050_debug.cpp', 'imu_sensor.cpp']
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / 'mpu_test.exe'
             result = subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',

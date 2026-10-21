@@ -101,6 +101,10 @@ class CsvRecorder:
         except Exception:
             self.file.close()
             raise
+        # File creation may be slow. The requested capture duration starts once ready.
+        self.started_ns = time.time_ns()
+        self.started_mono_ns = time.monotonic_ns()
+        self.started_mono = self.started_mono_ns / 1e9
         self.thread = threading.Thread(target=self._write, name="CSV-recorder", daemon=True)
         self.thread.start()
 

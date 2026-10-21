@@ -3,6 +3,7 @@
 #include <vector>
 #include "Arduino.h"
 #include "serial_transport.h"
+#include "imu_sensor.h"
 #include "line_sensor.h"
 #include "automatic_steering.h"
 
@@ -59,6 +60,11 @@ void handleESCCommand(char cmd, int pwm) {
     if (cmd == 'E') Serial.input.clear();  // Existing ESC emergency handler clears queued commands.
 }
 
+void beginMPU6050Sensor() {}
+void endMPU6050Sensor() {}
+void handleMPU6050SensorCommand(char) {}
+bool readMPU6050Sample(MPU6050Sample&) { return false; }
+MPU6050SensorStatus mpu6050SensorStatus() { return {false, false, false, 0, "test"}; }
 void feed(const std::string& input) {
     Serial.input += input;
     pollSerialCommands();

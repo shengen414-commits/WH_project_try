@@ -6,6 +6,7 @@
 #include "feedback_pid.h"
 #include "automatic_steering.h"
 #include "serial_transport.h"
+#include "imu_sensor.h"
 #include "line_sensor.h"
 #include "esc_control.h"
 #include "steering_control.h"
@@ -25,6 +26,11 @@ extern void rcInterrupt();
 void beginMPU6050Debug() {}
 void endMPU6050Debug() {}
 void handleMPU6050DebugCommand(char) {}
+void beginMPU6050Sensor() {}
+void endMPU6050Sensor() {}
+void handleMPU6050SensorCommand(char) {}
+bool readMPU6050Sample(MPU6050Sample&) { return false; }
+MPU6050SensorStatus mpu6050SensorStatus() { return {false, false, false, 0, "test"}; }
 void feed(const char* value) { Serial.input += value; pollSerialCommands(); }
 void cycle(uint8_t mask, unsigned long dt = 10) {
     clockMs += dt; clockUs += dt * 1000;

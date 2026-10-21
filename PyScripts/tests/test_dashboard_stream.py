@@ -82,6 +82,48 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual([int(row['Position']) for row in rows], [0, 2, 6])
         self.assertEqual(rows[-1]['mode'], 'RC')
 
+    def test_slow_speed_file_creation_does_not_hold_reader_record_lock(self):
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        original = self.app.CsvRecorder
+        errors = []
+        def slow(*args, **kwargs):
+            entered.set(); release.wait(3)
+            return original(*args, **kwargs)
+        def start():
+            try:
+                self.app.start_speed_recording()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+        with patch.object(self.app, 'CsvRecorder', slow):
+            worker = threading.Thread(target=start); worker.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                acquired = self.app.speed_record_lock.acquire(timeout=.2)
+                self.assertTrue(acquired)
+                if acquired:
+                    self.app.speed_record_lock.release()
+                self.receive([b'[ENC],0,1000,42\n'])
+                self.assertEqual(self.app.sensor_state['position'], 42)
+                self.assertEqual(self.client.post('/set_throttle?val=1500').status_code, 200)
+            finally:
+                release.set(); self.assertTrue(finished.wait(2)); worker.join()
+        self.assertFalse(errors)
+
+    def test_vehicle_observation_blocks_other_control_entries(self):
+        lab=self.app.vehicle_lab
+        lab.owned=True
+        try:
+            self.assertEqual(self.client.get('/vehicle-lab').status_code,200)
+            self.assertEqual(self.client.post('/set_throttle?val=1700').status_code,409)
+            self.assertEqual(self.client.post('/steering/line',json={'enabled':True}).status_code,409)
+            self.assertEqual(self.client.post('/steering/manual',json={'action':'start'}).status_code,409)
+            self.assertEqual(self.client.post('/imu/command',json={'action':'start'}).status_code,409)
+            self.app.esp32_serial.write.assert_not_called()
+        finally:
+            lab.owned=False
+
     def test_stale_encoder_is_not_recorded_as_a_success(self):
         self.app.sensor_state['last_encoder_rx_mono'] = 0
         self.assertEqual(self.client.post('/speed_record/start').status_code, 409)

@@ -126,4 +126,41 @@ int main() {
     assert(Serial.output.find("[MPU] a=") != std::string::npos);
     assert(Serial.output.find("[IMU],") == std::string::npos);
     feed("R\n"); assert(serialNormalMode() && !Wire.open);
+
+    // The reusable sensor driver runs without diagnostic UART or servo ownership.
+    Serial.output.clear(); beginMPU6050Sensor();
+    for (int i = 0; i < 45; ++i) { clockMs += 10; updateMPU6050Sensor(); }
+    assert(readMPU6050Sample(sample));
+    assert(Serial.output.empty() && pwmOutputs.count(12) == 0);
+    endMPU6050Sensor();
+
+    // U combines encoder, line and IMU while neutral remains locked at firmware level.
+    device(); feed("U\n"); tick(45); Serial.output.clear();
+    publishEncoder(); publishLineSensor();
+    assert(Serial.output.find("[OBS],") != std::string::npos);
+    tick(); publishLineSensor(); // IMU and OBS have separate 10 ms transmission slots.
+    assert(Serial.output.find("[IMU],") != std::string::npos);
+    assert(Serial.output.find("[ENC],") == std::string::npos);
+    assert(pwmOutputs.count(12) == 0 && pwmOutputs[14] == 1500);
+    feed("T1800\nB1900\n"); tick(); assert(pwmOutputs[14] == 1500);
+    Serial.output.clear(); feed("!4294967295\n");
+    assert(Serial.output.find("[SYNC],4294967295,") != std::string::npos);
+    Serial.capacity = 0; Serial.output.clear();
+    tick(); publishLineSensor(); // Dropped IMU slot after the skipped publication above.
+    for (int i = 0; i < 1000; ++i) publishLineSensor();
+    assert(Serial.output.empty()); Serial.capacity = 128;
+    publishLineSensor();
+    assert(Serial.output.empty()); // No immediate retry of the dropped slot.
+    tick(); publishLineSensor();
+    assert(Serial.output.find("[OBS],") != std::string::npos);
+    assert(Serial.output.find("[IMU],") == std::string::npos);
+    Serial.output.clear(); tick(); publishLineSensor();
+    assert(Serial.output.find("[IMU],") != std::string::npos);
+    Serial.output.clear();
+    for (int i = 0; i < 8; ++i) { tick(2); publishLineSensor(); }
+    assert(Serial.output.find("[OBS],") != std::string::npos);
+    assert(Serial.output.find("[IMU],") != std::string::npos); // Slow loops cannot starve IMU.
+    Wire.shortRead = true; tick(); publishLineSensor();
+    assert(!readMPU6050Sample(sample));
+    feed("R\n"); assert(serialNormalMode() && !Wire.open);
 }
