@@ -1,0 +1,271 @@
+"""Standalone source controllers sharing the UART, camera and output gateway."""
+import copy
+import json
+import math
+import os
+from pathlib import Path
+import re
+import secrets
+import threading
+import time
+try:
+    from .steering_control_pipeline import (SteeringObservation, camera_observation,
+        standalone_proposal, arbitrate, serialize, IMU_MOUNT_AXES)
+    from .vehicle_state.clock import DeviceClock
+except ImportError:
+    from steering_control_pipeline import (SteeringObservation, camera_observation,
+        standalone_proposal, arbitrate, serialize, IMU_MOUNT_AXES)
+    from vehicle_state.clock import DeviceClock
+
+
+DEFAULTS={
+    'imu':{'kp':4.,'kd':.5,'deadband':1.,'max_us':80,'slew_us_s':400,'direction':1},
+    'camera':{'kp':200.,'kd':.5,'deadband':.03,'max_us':80,'slew_us_s':400,'direction':1,
+              'confidence_min':.65,'target_x':.5,'roi_top':.35,'lookahead':.4,'threshold_mode':'otsu','threshold':80},
+    # Reserved deliberately separate from individual test gains. No fusion mode
+    # can be armed until a joint policy and its validation are implemented.
+    'fusion':{'enabled':False,'policy':None}}
+
+
+def validate_settings(source,data):
+    if source not in ('imu','camera') or not isinstance(data,dict) or set(data)!=set(DEFAULTS[source]):
+        raise ValueError('参数字段不完整或控制源不支持')
+    for key,lo,hi in [('kp',0,50 if source=='imu' else 1000),('kd',0,10),('deadband',0,10 if source=='imu' else .3)]:
+        value=data[key]
+        if type(value) not in (int,float) or not math.isfinite(value) or not lo<=value<=hi:
+            raise ValueError(f'{key} 需为 {lo}～{hi} 的有限数')
+    for key,lo,hi in [('max_us',10,300),('slew_us_s',50,1200)]:
+        if type(data[key]) is not int or not lo<=data[key]<=hi:raise ValueError(f'{key} 需为 {lo}～{hi} 的整数')
+    if type(data['direction']) is not int or data['direction'] not in (-1,1):raise ValueError('PWM方向应为±1')
+    if source=='camera':
+        for key,lo,hi in [('confidence_min',.5,.99),('target_x',.1,.9),('roi_top',.1,.6),('lookahead',.1,.8)]:
+            if type(data[key]) not in (int,float) or not math.isfinite(data[key]) or not lo<=data[key]<=hi:
+                raise ValueError(f'{key} 超出 {lo}～{hi}')
+        if data['threshold_mode'] not in ('otsu','fixed','adaptive') or type(data['threshold']) is not int or not 0<=data['threshold']<=255:
+            raise ValueError('相机阈值设置无效')
+    return copy.deepcopy(data)
+
+
+class IndependentSteering:
+    def __init__(self,path,write,camera,clock=time.monotonic,probe=None,autostart=True):
+        self.path=Path(path);self.write=write;self.camera=camera;self.clock=clock;self.probe=probe;self.autostart=autostart
+        self.lock=threading.RLock();self.settings=copy.deepcopy(DEFAULTS)
+        self.owned=False;self.source=None;self.phase='off';self.message='独立转向未开启'
+        self.identifier=0;self.sequence=0;self.started=0.;self.received=None
+        self.observation=self.proposal=None;self.firmware={};self.error=None;self.jpeg=None;self.jpeg_sequence=0
+        self.stop_event=threading.Event();self.worker=None;self.timer=DeviceClock();self.last_probe=-100.;self.last_imu_ms=None
+        self.last_frame=None;self.detector=None;self.last_preview=-100.;self.request={'status':'idle'}
+        if self.path.exists():
+            try:
+                saved=json.loads(self.path.read_text(encoding='utf-8'))
+                if saved.get('schema')!=1:raise ValueError('配置版本不支持')
+                for source in ('imu','camera'):self.settings[source]=validate_settings(source,saved['profiles'][source])
+            except (ValueError,TypeError,KeyError,OSError) as exc:
+                self.error=f'独立转向参数未载入：{exc}；请检查并保存参数后再开启'
+
+    def blocking(self):return self.owned
+
+    def can_drive(self):
+        with self.lock:
+            return self.owned and self.phase=='running' and self.firmware.get('ready')=='1' and self.proposal is not None and self.proposal.valid and 0<=self.clock()-self.proposal.observed_at<=.15
+
+    def configure(self,source,data):
+        candidate=validate_settings(source,data)
+        with self.lock:
+            if self.owned:raise ValueError('先关闭独立转向，再修改参数')
+            profiles=copy.deepcopy(self.settings);profiles[source]=candidate
+            self.path.parent.mkdir(parents=True,exist_ok=True)
+            temporary=self.path.with_suffix('.tmp')
+            try:
+                with temporary.open('w',encoding='utf-8') as f:
+                    json.dump({'schema':1,'profiles':profiles},f,ensure_ascii=False,allow_nan=False,indent=2)
+                    f.flush();os.fsync(f.fileno())
+                os.replace(temporary,self.path)
+            finally:
+                if temporary.exists():temporary.unlink()
+            self.settings=profiles;self.error=None
+
+    def start(self,source):
+        with self.lock:
+            if source not in ('imu','camera'):raise ValueError('只允许 IMU 或相机独立模式；联合决策尚未启用')
+            if self.owned or self.worker is not None and self.worker.is_alive():raise ValueError('先关闭上一种独立模式')
+            if self.error:raise ValueError(self.error)
+            if source=='camera':
+                frame=self.camera()
+                if frame is None or not 0<=self.clock()-frame[1]<=.15:raise ValueError('左相机没有新鲜图像，请先开启并等待出图')
+            self.identifier=secrets.randbelow(0x7fffffff)+1
+            self.source=source;self.started=self.clock();self.received=None;self.owned=True;self.phase='arming'
+            self.observation=self.proposal=None;self.firmware={};self.sequence=0;self.last_imu_ms=None
+            self.timer=DeviceClock();self.last_probe=-100.;self.last_frame=None;self.jpeg=None;self.detector=None
+            self.stop_event=threading.Event();self.request={'action':'start','status':'pending','id':self.identifier}
+            p=self.settings[source];number=1 if source=='imu' else 2
+            self.message='等待固件确认；IMU需保持车身静止完成零偏标定' if source=='imu' else '等待固件确认相机独立模式'
+            try:self.write(f"@A1,{number},{self.identifier},{p['max_us']},{p['slew_us_s']},{p['direction']}\n".encode('ascii'))
+            except Exception as exc:
+                self.phase='fault';self.message=str(exc);self.request['status']='error';raise
+            if self.autostart:
+                self.worker=threading.Thread(target=self._work,name='independent-steering',daemon=True);self.worker.start()
+
+    def stop(self):
+        with self.lock:
+            if not self.owned:return
+            self.phase='stopping';self.stop_event.set();self.message='已请求归中停动力，等待固件退出确认'
+            self.stop_at=self.clock()
+            self.request={'action':'stop','status':'pending','id':self.identifier}
+            # Tagged gateway stop plus old firmware's tagged global OFF fallback.
+            self.write(f'@A0,{self.identifier}\nN0,{self.identifier}\n'.encode('ascii'))
+
+    def invalidate(self,message):
+        with self.lock:
+            if self.owned:
+                self.phase='fault';self.message=message;self.stop_event.set();self.request['status']='error'
+
+    def _fail(self,message):
+        with self.lock:
+            if not self.owned or self.phase in ('stopping','fault'):return
+            self.phase='fault';self.message=message;self.stop_event.set();self.request['status']='error'
+            try:self.write(f'@A3,{self.identifier}\n'.encode('ascii'))
+            except OSError:pass # Firmware's 250 ms target watchdog remains the final guard.
+
+    def feed(self,line,received=None):
+        now=self.clock() if received is None else received
+        if not self.owned:return False
+        with self.lock:
+            try:
+                if line.startswith('[SYNC],'):
+                    _,identifier,ms=line.split(',');self.timer.reply(int(identifier),int(ms),now);return True
+                if line.startswith('[ASSIST_IMU],'):
+                    _,identifier,ms,heading,rate=line.split(',');identifier,ms=int(identifier),int(ms)
+                    heading,rate=float(heading),float(rate)
+                    if identifier!=self.identifier or self.source!='imu' or self.phase not in ('calibrating','running'):return False
+                    if not 0<=ms<=0xffffffff or not all(math.isfinite(v) for v in (heading,rate)) or abs(heading)>180.01 or abs(rate)>501:
+                        raise ValueError('IMU反馈范围错误')
+                    if self.last_imu_ms is not None:
+                        delta=(ms-self.last_imu_ms)&0xffffffff
+                        if delta==0:return False
+                        if delta>200:raise ValueError('IMU设备时间倒退、重启或采样中断')
+                    self.last_imu_ms=ms
+                    stamp=self.timer.stamp(ms,now)
+                    if stamp is None:return False
+                    stamp-=self.timer.status(now)['uncertainty_ms']/1000
+                    self.observation=SteeringObservation('imu',ms,stamp,True,1.,'ok',relative_heading_deg=heading,yaw_rate_deg_s=rate,device_time_ms=ms)
+                    if self.phase=='calibrating':self.phase='running';self.message='IMU相对航向保持已确认'
+                    return True
+                if line.startswith(('[ASSIST_ACK] ','[ASSIST] ','[FOLLOW_ACK] ')):
+                    f=dict(re.findall(r'(\w+)=([^\s]+)',line))
+                    if int(f['id'])!=self.identifier:return False
+                    if line.startswith('[FOLLOW_ACK] '):
+                        if self.phase=='stopping' and f.get('action')=='0' and f.get('ok')=='1':self._stopped()
+                        return True
+                    if line.startswith('[ASSIST_ACK] '):
+                        action,ok=int(f['action']),int(f['ok'])
+                        if self.phase=='stopping' and action==0 and ok==1:self._stopped();return True
+                        if self.phase!='arming' or action!=1:return False
+                        p=self.settings[self.source]
+                        if ok!=1 or int(f['source'])!=(1 if self.source=='imu' else 2) or (int(f['lim']),int(f['slew']),int(f['dir']))!=(p['max_us'],p['slew_us_s'],p['direction']):
+                            self.phase='fault';self.message='固件拒绝开启或参数确认不一致';self.request['status']='rejected';self.stop_event.set();return True
+                        self.phase='calibrating' if self.source=='imu' else 'running';self.request['status']='confirmed'
+                        self.message='IMU静止标定中，请保持车身不动' if self.source=='imu' else '相机独立转向已确认'
+                        self.received=now;return True
+                    if self.phase in ('arming','stopping'):return False
+                    self.received=now;self.firmware=f
+                    if f.get('active')=='0':self._stopped();return True
+                    if f.get('fault')=='1':self.phase='fault';self.message=f.get('reason','firmware_fault');self.stop_event.set();return True
+                    if self.phase=='calibrating' and f.get('ready')=='1':self.phase='running';self.message='IMU相对航向保持已确认，当前朝向为0°'
+                    return True
+                if line.startswith(('[SERVO]','[MPU]','[LAB],')) or line.startswith('[FOLLOW] mode=LINE'):
+                    self._stopped();self.message='固件已切换到其他模式';return True
+            except (KeyError,ValueError,TypeError,OverflowError):
+                # Parsing only: reader never blocks on UART writes or CV work.
+                self.phase='fault';self.message='独立转向反馈无效';self.stop_event.set();self.request['status']='error'
+            return False
+
+    def _stopped(self):
+        self.owned=False;self.phase='off';self.stop_event.set();self.request['status']='confirmed';self.message='已归中停动力并退出独立模式'
+
+    def _camera_observation(self,now):
+        try:from .camera_line_detector import BlackTapeDetector,DetectorConfig,render_overlay
+        except ImportError:from camera_line_detector import BlackTapeDetector,DetectorConfig,render_overlay
+        import cv2
+        frame=self.camera()
+        # Capture can publish a newer frame after step() took its loop timestamp.
+        # Test age after reading the immutable frame tuple, never against that
+        # earlier timestamp (which would incorrectly label a new frame future).
+        if frame is None or not 0<=self.clock()-frame[1]<=.15:raise ValueError('相机图像超时或已关闭')
+        sequence,read_at,image=frame
+        if sequence==self.last_frame:return None
+        self.last_frame=sequence;p=self.settings['camera']
+        if self.detector is None:
+            self.detector=BlackTapeDetector(DetectorConfig(roi_top=p['roi_top'],target_x=p['target_x'],lookahead=p['lookahead'],threshold_mode=p['threshold_mode'],threshold=p['threshold']))
+        result,_,_=self.detector.detect(image)
+        observation=camera_observation(result,sequence,read_at,p['confidence_min'])
+        # Diagnostics are small, bounded and independent of HTTP rendering.
+        if self.clock()-self.last_preview>=.2:
+            overlay=render_overlay(image,result,self.detector.config,control_label='CAMERA STEERING')
+            overlay=cv2.resize(overlay,(320,240));ok,encoded=cv2.imencode('.jpg',overlay,[cv2.IMWRITE_JPEG_QUALITY,65])
+            if ok:self.jpeg=encoded.tobytes();self.jpeg_sequence+=1
+            self.last_preview=self.clock()
+        return observation
+
+    def step(self):
+        """One bounded control iteration, also callable with fake hardware in tests."""
+        with self.lock:
+            if not self.owned or self.phase in ('off','stopping','fault'):return
+            now=self.clock();phase=self.phase;source=self.source;identifier=self.identifier
+            if phase=='arming':
+                if now-self.started>3:self._fail('3秒内未收到独立转向确认，请烧录新版固件并退出重试')
+                return
+            if phase=='calibrating':
+                if now-self.started>6:self._fail('IMU标定超时，请静止后重新开启')
+            elif self.received is not None and now-self.received>.7:
+                self._fail('固件状态超时');return
+            if source=='imu' and now-self.last_probe>=.5:
+                if self.probe:self.probe(self.timer)
+                else:self.write(self.timer.probe(now))
+                self.last_probe=now
+        # Never hold the receiver lock during CV, JPEG encoding, or image fetch.
+        if phase=='calibrating':return
+        observation=self._camera_observation(now) if source=='camera' else self.observation
+        if observation is None:
+            # Initial IMU data may await the first clock probe. Gateway watchdog
+            # will still stop motion if this wait lasts more than 250 ms.
+            return
+        proposal=standalone_proposal(observation,self.settings[source],self.clock())
+        if not proposal.valid:
+            with self.lock:
+                if identifier==self.identifier:self.observation=observation;self.proposal=proposal
+            self._fail(f'观测无效：{proposal.reason}');return
+        with self.lock:
+            if not self.owned or identifier!=self.identifier or self.phase!='running':return
+            if self.proposal is not None and proposal.sequence==self.proposal.sequence:return
+            demand=arbitrate(source,proposal,self.clock())
+            self.observation=observation;self.proposal=proposal
+            self.sequence=self.sequence%0xffffffff+1
+            self.write(f'@A2,{identifier},{self.sequence},{demand:.4f}\n'.encode('ascii'))
+
+    def _work(self):
+        while not self.stop_event.is_set():
+            start=self.clock()
+            try:self.step()
+            except Exception as exc:self._fail(str(exc))
+            self.stop_event.wait(max(.005,.04-(self.clock()-start)))
+
+    def snapshot(self):
+        with self.lock:
+            now=self.clock()
+            if self.phase=='stopping' and self.request['status']=='pending' and now-self.stop_at>3:
+                self.request['status']='timeout';self.message='未收到退出确认，请检查新版固件和串口，不能确认已退出'
+            return {'source':self.source,'blocking':self.owned,'phase':self.phase,'message':self.message,
+                    'request':dict(self.request),'firmware':dict(self.firmware),
+                    'fresh':self.received is not None and 0<=now-self.received<.7,
+                    'settings':copy.deepcopy(self.settings),'settings_error':self.error,
+                    'observation':serialize(self.observation),'proposal':serialize(self.proposal),
+                    'observation_age_ms':max(0,(now-self.observation.observed_at)*1000) if self.observation else None,
+                    'jpeg_sequence':self.jpeg_sequence,'imu_mount_axes':list(IMU_MOUNT_AXES),
+                    'clock':self.timer.status(now)}
+
+    def shutdown(self):
+        if self.owned:
+            try:self.stop()
+            except OSError:self.stop_event.set()
+        if self.worker and self.worker is not threading.current_thread():self.worker.join(1)

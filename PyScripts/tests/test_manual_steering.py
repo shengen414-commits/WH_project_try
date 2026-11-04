@@ -92,6 +92,21 @@ class ManualSteeringTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.manual.begin('set', 1505)
 
+    def test_expansion_needs_new_firmware_exact_range_and_no_motion(self):
+        request_id,_=self.manual.begin('start')
+        self.ack(request_id,proto=2)
+        with self.assertRaisesRegex(ValueError,'扩大探测范围'):
+            self.manual.begin('expand_low')
+        self.manual.feed('[SERVO] GPIO12 target=1500 us PWM=ready low=1200 mid=1500 high=1800 proto=3')
+        request_id,packet=self.manual.begin('expand_low')
+        self.assertEqual(packet,f'S0003,{request_id}\n'.encode())
+        reply=f'[SERVO_ACK] id={request_id} ok=1 target=1500 low=1175 mid=1500 high=1800 manual=1 ready=1 proto=3 reason=ok'
+        self.assertFalse(self.manual.feed(reply.replace('target=1500','target=1175')))
+        self.assertFalse(self.manual.feed(reply.replace('low=1175','low=1100')))
+        self.assertTrue(self.manual.feed(reply))
+        self.assertEqual(self.manual.snapshot()['target_us'],1500)
+        self.assertEqual(self.manual.snapshot()['low_us'],1175)
+
 
 if __name__ == '__main__':
     unittest.main()

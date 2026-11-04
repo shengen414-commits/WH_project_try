@@ -8,6 +8,9 @@
 #include "automatic_steering.h"
 
 FakeSerial Serial;
+bool independentSteeringBlocking(){return false;}
+void stopIndependentSteering(const char*){}
+bool handleIndependentSteeringPacket(const char*){return true;}
 unsigned long clockMs = 0;
 std::vector<std::pair<char, int>> commands;
 bool diagnosticsMuted = false;
@@ -16,6 +19,7 @@ bool steeringDebug = false;
 int steeringPulse = 1500;
 int steeringMiddle = 1500;
 bool steeringOutputReady() { return steeringDebug; }
+bool expandSteeringDebugRange(bool) { return false; }
 int steeringTargetUs() { return steeringPulse; }
 int steeringLowUs() { return steeringMiddle - 300; }
 int steeringCenterUs() { return steeringMiddle; }

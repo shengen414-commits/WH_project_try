@@ -4,6 +4,7 @@
 #include "line_position.h"
 #include "steering_control.h"
 #include "esc_control.h"
+#include "independent_steering.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -81,6 +82,7 @@ void fault(const char* why) {
     message(why);
 }
 bool canArm() {
+    if(independentSteeringBlocking()){reason="other_controller_active";message(reason);return false;}
     const auto drive = escSteeringState();
     if (steeringDebugActive() || drive.debugNeutral || drive.emergency || drive.rcMode || drive.pwm != 1500) {
         reason = "arm_requires_neutral_normal_mode"; message(reason); return false;
@@ -152,6 +154,7 @@ bool startExternalYawControl() {
     gyroEnabled = true; armed(AutomaticSteeringMode::ExternalYaw); message(reason); return true;
 }
 void stopAutomaticSteering(bool resetDrive) {
+    stopIndependentSteering();
     waitingForLine = false;
     if (mode == AutomaticSteeringMode::Off) { reason = "disabled"; message(reason); return; }
     mode = AutomaticSteeringMode::Off; reason = "disabled";

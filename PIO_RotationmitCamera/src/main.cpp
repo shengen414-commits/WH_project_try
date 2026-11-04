@@ -6,6 +6,7 @@
 #include "steering_control.h"
 #include "automatic_steering.h"
 #include "mpu6050_debug.h"
+#include "independent_steering.h"
 
 void setup() {
     Serial.begin(115200);
@@ -32,8 +33,9 @@ void loop() {
     updateLineSensor();
     updateMPU6050Debug();
     updateAutomaticSteering();
+    updateIndependentSteering();
     publishLineSensor();
     publishSteeringDebug(true);
     publishMPU6050Debug();
-    if (serialNormalMode()) publishAutomaticSteering();
+    if (serialNormalMode() && !independentSteeringBlocking()) publishAutomaticSteering();
 }

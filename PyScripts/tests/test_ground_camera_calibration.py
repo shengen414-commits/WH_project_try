@@ -24,7 +24,7 @@ class GroundCameraTests(unittest.TestCase):
     def detection(self):
         xs=np.linspace(.3,1.1,12)
         points=[[(320-400*(.02+.03*x))/2,(480-300*x)/2] for x in xs]
-        return {'valid':True,'confidence':.9,'points':points,'width':320}
+        return {'valid':True,'confidence':.9,'points':points,'width':320,'height':240}
 
     def test_ground_units_sign_scaling_and_exposure_delay(self):
         c=calibrate(self.pairs())
@@ -46,6 +46,21 @@ class GroundCameraTests(unittest.TestCase):
         with self.assertRaises(ValueError):ground_observation(self.detection(),[320,240],c,10,1)
         detection=self.detection();detection['points']=[[0,p[1]]for p in detection['points']]
         with self.assertRaises(ValueError):ground_observation(detection,[640,480],c,10,1)
+
+    def test_curve_model_is_not_treated_as_straight_metric_observation(self):
+        detection=self.detection();detection['model']='quadratic'
+        with self.assertRaisesRegex(ValueError,'仅支持直线'):
+            ground_observation(detection,[640,480],calibrate(self.pairs()),10,1)
+
+    def test_processing_height_is_scaled_separately(self):
+        detection=self.detection()
+        for point in detection['points']:point[1]*=250/240
+        detection['height']=250
+        result=ground_observation(detection,[640,480],calibrate(self.pairs()),10,1)
+        self.assertAlmostEqual(result.lateral_error_m,-.02,places=6)
+        detection.pop('height')
+        with self.assertRaisesRegex(ValueError,'宽高'):
+            ground_observation(detection,[640,480],calibrate(self.pairs()),10,1)
 
 
 if __name__=='__main__':unittest.main()

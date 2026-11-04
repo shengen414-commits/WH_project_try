@@ -23,7 +23,7 @@ class VehicleStateTests(unittest.TestCase):
         p = defaults()
         self.assertIsNone(p['geometry']['line_pitch_m'])
         self.assertEqual(p['geometry']['imu_yaw_sign'], -1)
-        self.assertIsNone(p['geometry']['imu_axes'])
+        self.assertEqual(p['geometry']['imu_axes'], [1,-2,-3])
         p['geometry']['imu_axes'] = [1, -2, -3]
         validate(p)
         p['geometry']['imu_axes'] = [1, 2, -3]

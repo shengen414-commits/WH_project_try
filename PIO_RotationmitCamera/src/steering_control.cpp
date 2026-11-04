@@ -14,6 +14,7 @@ int targetUs = SteeringConfig::CENTER_US;
 int travelLow = SteeringConfig::LOW_US;
 int travelCenter = SteeringConfig::CENTER_US;
 int travelHigh = SteeringConfig::HIGH_US;
+int debugLow = SteeringConfig::LOW_US, debugHigh = SteeringConfig::HIGH_US;
 constexpr unsigned long HOLD_MS = 800;
 constexpr unsigned long STATUS_MS = 200;
 constexpr unsigned int TEST_STEP_COUNT = 4;
@@ -22,7 +23,7 @@ int testPulse(unsigned int index) {
 }
 
 void writeTarget(int pwm) {
-    targetUs = constrain(pwm, travelLow, travelHigh);
+    targetUs = constrain(pwm, debugEnabled ? debugLow : travelLow, debugEnabled ? debugHigh : travelHigh);
     if (steering.attached()) steering.writeMicroseconds(targetUs);
     lastStatusAt = millis() - STATUS_MS;
 }
@@ -58,6 +59,7 @@ bool saveCurrentSteeringCenter() {
     travelCenter = targetUs;
     travelLow = travelCenter - SteeringConfig::HALF_RANGE_US;
     travelHigh = travelCenter + SteeringConfig::HALF_RANGE_US;
+    debugLow = travelLow; debugHigh = travelHigh;
     sweeping = false;
     lastStatusAt = millis() - STATUS_MS;
     return true;
@@ -65,14 +67,27 @@ bool saveCurrentSteeringCenter() {
 bool steeringOutputReady() { return steering.attached(); }
 int steeringTargetUs() { return targetUs; }
 bool setSteeringDebugPulse(int pwm) {
-    if (!debugEnabled || !steering.attached() || pwm < travelLow || pwm > travelHigh) return false;
+    if (!debugEnabled || !steering.attached() || pwm < debugLow || pwm > debugHigh) return false;
     sweeping = false;
     writeTarget(pwm);
     return true;
 }
 int steeringCenterUs() { return travelCenter; }
-int steeringLowUs() { return travelLow; }
-int steeringHighUs() { return travelHigh; }
+bool expandSteeringDebugRange(bool lower) {
+    if (!debugEnabled || !steering.attached()) return false;
+    if (lower) {
+        if (debugLow <= SteeringConfig::ABS_LOW_US) return false;
+        debugLow = max(SteeringConfig::ABS_LOW_US, debugLow - 25);
+    } else {
+        if (debugHigh >= SteeringConfig::ABS_HIGH_US) return false;
+        debugHigh = min(SteeringConfig::ABS_HIGH_US, debugHigh + 25);
+    }
+    // Only change the allowed range; do not move or persist it to NVS.
+    lastStatusAt = millis() - STATUS_MS;
+    return true;
+}
+int steeringLowUs() { return debugEnabled ? debugLow : travelLow; }
+int steeringHighUs() { return debugEnabled ? debugHigh : travelHigh; }
 bool attachSteeringOutput() {
     initSteeringCalibration();
     if (!steering.attached()) {
@@ -106,6 +121,7 @@ void beginSteeringDebug() {
     sweeping = false;
     // Attach on explicit V, so normal startup does not unexpectedly move steering.
     attachSteeringOutput();
+    debugLow = travelLow; debugHigh = travelHigh;
     writeTarget(travelCenter);
     if (!steering.attached()) Serial.println("[SERVO] ERROR: GPIO12 PWM attach failed");
     help();
@@ -156,7 +172,7 @@ void publishSteeringDebug(bool preciseCommands) {
     char line[128];
     int length = snprintf(line, sizeof(line), "[SERVO] GPIO%d target=%d us PWM=%s sweep=%s low=%d mid=%d high=%d proto=%d\n",
                           SteeringConfig::PIN, targetUs, steering.attached() ? "ready" : "error",
-                          sweeping ? "running" : "idle", travelLow, travelCenter, travelHigh, preciseCommands ? 2 : 0);
+                          sweeping ? "running" : "idle", steeringLowUs(), travelCenter, steeringHighUs(), preciseCommands ? 3 : 0);
     if (length > 0 && length < (int)sizeof(line) && Serial.availableForWrite() >= length) {
         Serial.write((const uint8_t*)line, length);
         lastStatusAt = millis();

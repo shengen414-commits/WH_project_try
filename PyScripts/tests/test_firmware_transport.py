@@ -6,6 +6,18 @@ from pathlib import Path
 
 
 class FirmwareTransportTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('g++'), 'host g++ is optional')
+    def test_independent_gateway_watchdog_sessions_mount_and_no_auto_recovery(self):
+        root=Path(__file__).resolve().parents[2]
+        stubs=Path(__file__).resolve().parent/'firmware_stubs'
+        sources=['esc_control.cpp','steering_control.cpp','automatic_steering.cpp','line_position.cpp','line_controller.cpp','independent_steering.cpp']
+        with tempfile.TemporaryDirectory() as directory:
+            executable=Path(directory)/'independent_test.exe'
+            result=subprocess.run(['g++','-std=c++11','-Wall','-Wextra','-Werror','-I',str(stubs),'-I',str(root/'PIO_RotationmitCamera/include'),
+                *(str(root/'PIO_RotationmitCamera/src'/name) for name in sources),str(stubs/'test_independent_steering.cpp'),'-o',str(executable)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            subprocess.run([str(executable)],check=True,timeout=5)
+
     @unittest.skipUnless(shutil.which('g++'), 'host g++ is optional; ESP32 build uses PlatformIO')
     def test_actual_firmware_parser_with_fake_uart(self):
         root = Path(__file__).resolve().parents[2]
@@ -22,7 +34,7 @@ class FirmwareTransportTests(unittest.TestCase):
     def test_automatic_steering_and_pid_against_real_firmware_modules(self):
         root = Path(__file__).resolve().parents[2]
         stubs = Path(__file__).resolve().parent / 'firmware_stubs'
-        sources = ['esc_control.cpp', 'steering_control.cpp', 'automatic_steering.cpp',
+        sources = ['esc_control.cpp', 'steering_control.cpp', 'automatic_steering.cpp', 'independent_steering.cpp',
                    'line_position.cpp', 'line_controller.cpp', 'serial_transport.cpp']
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / 'automatic_test.exe'
@@ -50,7 +62,7 @@ class FirmwareTransportTests(unittest.TestCase):
     def test_mpu6050_driver_and_serial_debug_against_fake_i2c(self):
         root = Path(__file__).resolve().parents[2]
         stubs = Path(__file__).resolve().parent / 'firmware_stubs'
-        sources = ['esc_control.cpp', 'steering_control.cpp', 'automatic_steering.cpp',
+        sources = ['esc_control.cpp', 'steering_control.cpp', 'automatic_steering.cpp', 'independent_steering.cpp',
                    'line_position.cpp', 'line_controller.cpp', 'serial_transport.cpp', 'mpu6050_debug.cpp', 'imu_sensor.cpp']
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / 'mpu_test.exe'

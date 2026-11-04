@@ -42,10 +42,15 @@ def ground_observation(result, frame_size, calibration, read_time, sequence):
         raise ValueError('相机曝光到读帧的延迟未标定；只显示图像结果')
     if not result.get('valid') or result.get('confidence', 0) < .6:
         raise ValueError('胶带识别质量不足')
+    if result.get('model') == 'quadratic':
+        raise ValueError('当前米制状态模型仅支持直线；弯线可用于独立图像跟随')
     points = np.array(result['points'], dtype=np.float64)
     if len(points) < 6:
         raise ValueError('胶带有效点不足')
-    points *= frame_size[0]/result['width']
+    if any(type(result.get(k)) is not int or result[k] <= 0 for k in ('width','height')):
+        raise ValueError('缺少有效的检测图像宽高，无法映射地面坐标')
+    points[:,0] *= frame_size[0]/result['width']
+    points[:,1] *= frame_size[1]/result['height']
     k = np.array(c['camera_matrix'], dtype=np.float64)
     undistorted = cv2.undistortPoints(points.reshape(-1, 1, 2), k, np.array(c['dist_coeffs']), P=k)
     hull = np.array(c['image_hull'], dtype=np.float32)

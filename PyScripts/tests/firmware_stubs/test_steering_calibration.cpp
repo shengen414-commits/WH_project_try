@@ -43,4 +43,19 @@ int main(int argc, char** argv) {
     assert(pwmOutputs[12] == 1640);
     endSteeringDebug();
     assert(pwmOutputs[12] == 1640);
+    assert(!expandSteeringDebugRange(true));
+    beginSteeringDebug();
+    const int held = pwmOutputs[12];
+    assert(expandSteeringDebugRange(true) && steeringLowUs() == 1315);
+    assert(expandSteeringDebugRange(false) && steeringHighUs() == 1965);
+    assert(pwmOutputs[12] == held); // Expanding never moves the servo.
+    for (int i=0;i<20;++i) { expandSteeringDebugRange(true); expandSteeringDebugRange(false); }
+    assert(steeringLowUs() == 1000 && steeringHighUs() == 2000);
+    assert(!expandSteeringDebugRange(true) && !expandSteeringDebugRange(false));
+    assert(setSteeringDebugPulse(1000) && pwmOutputs[12] == 1000);
+    endSteeringDebug();
+    assert(pwmOutputs[12] == 1640 && steeringLowUs() == 1340 && steeringHighUs() == 1940);
+    beginSteeringDebug();
+    assert(steeringLowUs() == 1340 && steeringHighUs() == 1940);
+    assert(!setSteeringDebugPulse(1000)); // No persistent expansion or automatic control change.
 }

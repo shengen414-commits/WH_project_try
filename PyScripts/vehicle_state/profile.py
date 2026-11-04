@@ -15,9 +15,9 @@ def defaults():
     return {'schema': 1, 'revision': 0, 'geometry': {
         'line_pitch_m': None, 'line_x_m': None, 'line_y_m': None,
         'meters_per_count': None, 'encoder_sign': None, 'wheelbase_m': None,
-        # User confirmed the sensor Z axis points down. X/Y remain unverified.
-        'imu_yaw_sign': -1, 'imu_axes': None},
-        'camera': None, 'actuator': {'center_us': None, 'points': []}}
+        # Confirmed installation: sensor X forward, Y right, Z down.
+        'imu_yaw_sign': -1, 'imu_axes': [1, -2, -3]},
+        'camera': None, 'actuator': {'center_us': None, 'points': [], 'endpoints': {}}}
 
 
 def validate(profile):
@@ -48,7 +48,7 @@ def validate(profile):
         if axes[2] != 3*g['imu_yaw_sign']:
             raise ValueError('当前偏航接口要求传感器 Z 轴竖直，轴映射与 Z 方向必须一致')
     a = profile['actuator']
-    if not isinstance(a, dict) or set(a) != {'center_us', 'points'} or not isinstance(a['points'], list) or len(a['points']) > 32:
+    if not isinstance(a, dict) or not {'center_us', 'points'} <= set(a) or set(a) - {'center_us', 'points', 'endpoints'} or not isinstance(a['points'], list) or len(a['points']) > 32:
         raise ValueError('舵机标定表无效')
     if a['center_us'] is not None and (type(a['center_us']) is not int or not 1300 <= a['center_us'] <= 1700):
         raise ValueError('中位必须来自固件确认')
@@ -59,6 +59,19 @@ def validate(profile):
         if p['pulse_us'] in pulses:
             raise ValueError('脉宽重复')
         pulses.add(p['pulse_us'])
+    endpoints = a.get('endpoints', {})
+    if not isinstance(endpoints, dict) or set(endpoints) - {'left', 'right'}:
+        raise ValueError('左右端点标记无效')
+    for side, point in endpoints.items():
+        if not isinstance(point, dict) or set(point) != {'pulse_us', 'angle_deg'} or type(point['pulse_us']) is not int or not 1000 <= point['pulse_us'] <= 2000:
+            raise ValueError('端点必须来自固件确认脉宽')
+        angle = point['angle_deg']
+        if angle is not None and (not finite(angle) or not 0 < (angle if side == 'left' else -angle) <= 45):
+            raise ValueError('端点角度应左正右负，未知可以留空')
+        if a['center_us'] is None or point['pulse_us'] == a['center_us']:
+            raise ValueError('端点不能与直行中位相同')
+    if len(endpoints) == 2 and (endpoints['left']['pulse_us']-a['center_us'])*(endpoints['right']['pulse_us']-a['center_us']) >= 0:
+        raise ValueError('左右端点应分别位于中位的两侧')
     c = profile['camera']
     if c is not None:
         from .vision import validate_camera
@@ -67,7 +80,7 @@ def validate(profile):
     return profile
 
 
-def actuator_table(profile, actual_center=None):
+def actuator_table(profile, actual_center=None, allow_probe=False):
     a = profile['actuator']
     if a['center_us'] is None or actual_center is None or a['center_us'] != actual_center:
         raise ValueError('标定中位未确认或已变化，请重新标定转角')
@@ -79,16 +92,16 @@ def actuator_table(profile, actual_center=None):
     differences = [b-a for a, b in zip(angles, angles[1:])]
     if not center or min(angles) > -3 or max(angles) < 3 or not (all(d > .1 for d in differences) or all(d < -.1 for d in differences)):
         raise ValueError('需要中位约0°、左右各至少3°，且角度随脉宽严格单调')
-    if any(not actual_center-300 <= p['pulse_us'] <= actual_center+300 for p in points):
+    if not allow_probe and any(not actual_center-300 <= p['pulse_us'] <= actual_center+300 for p in points):
         raise ValueError('标定点超出当前中位±300μs')
     return points
 
 
-def angle_to_pulse(profile, angle_rad, actual_center):
+def angle_to_pulse(profile, angle_rad, actual_center, allow_probe=False):
     """Future actuator adapter: interpolation only; never energizes hardware."""
     if not finite(angle_rad):
         raise ValueError('转角必须有限')
-    points = sorted(actuator_table(profile, actual_center), key=lambda p: p['angle_deg'])
+    points = sorted(actuator_table(profile, actual_center, allow_probe=allow_probe), key=lambda p: p['angle_deg'])
     angle = math.degrees(angle_rad)
     if not points[0]['angle_deg'] <= angle <= points[-1]['angle_deg']:
         raise ValueError('目标超出实测转角范围；禁止外推')
@@ -97,6 +110,28 @@ def angle_to_pulse(profile, angle_rad, actual_center):
             f = (angle-left['angle_deg'])/(right['angle_deg']-left['angle_deg'])
             return round(left['pulse_us']+f*(right['pulse_us']-left['pulse_us']))
     raise ValueError('没有可用插值区间')
+
+
+def calibration_status(profile, manual):
+    """Show exploratory measurements without enabling their use by controllers."""
+    a = copy.deepcopy(profile['actuator'])
+    a.setdefault('endpoints', {})
+    a.update(estimated_angle_deg=None, interpolation_error=None)
+    try:
+        points = actuator_table(profile, manual.get('center_us'), allow_probe=True)
+        if not all(manual.get(k) for k in ('active', 'fresh', 'ready', 'precise')) or manual.get('request', {}).get('status') != 'confirmed':
+            raise ValueError('等待手动模式中的新鲜固件确认，才显示当前估计角度')
+        pulse = manual['target_us']
+        for left, right in zip(points, points[1:]):
+            if left['pulse_us'] <= pulse <= right['pulse_us']:
+                f = (pulse-left['pulse_us'])/(right['pulse_us']-left['pulse_us'])
+                a['estimated_angle_deg'] = left['angle_deg']+f*(right['angle_deg']-left['angle_deg'])
+                break
+        if a['estimated_angle_deg'] is None:
+            raise ValueError('当前 PWM 超出实测点范围，不外推角度')
+    except ValueError as exc:
+        a['interpolation_error'] = str(exc)
+    return a
 
 
 class ProfileStore:

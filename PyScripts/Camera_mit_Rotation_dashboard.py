@@ -28,10 +28,12 @@ try:
     from .camera_replay import CameraReplay, register_camera_replay_routes
     from .manual_steering import ManualSteering
     from .vehicle_state.profile import ProfileStore
+    from .vehicle_state.profile import calibration_status
     from .vehicle_state.service import VehicleLab
     from .vehicle_state.web import register_vehicle_lab
     from .diagnostic_output import DiagnosticOutput
     from .line_response import LineResponse
+    from .independent_steering import IndependentSteering
 except ImportError:
     from telemetry import EncoderStream, CsvRecorder
     from sync_recording import SyncRecorder
@@ -44,10 +46,12 @@ except ImportError:
     from camera_replay import CameraReplay, register_camera_replay_routes
     from manual_steering import ManualSteering
     from vehicle_state.profile import ProfileStore
+    from vehicle_state.profile import calibration_status
     from vehicle_state.service import VehicleLab
     from vehicle_state.web import register_vehicle_lab
     from diagnostic_output import DiagnosticOutput
     from line_response import LineResponse
+    from independent_steering import IndependentSteering
 
 # 确保录像保存根目录存在
 SAVE_DIR = str(Path(os.environ.get('CAR_RECORDS_DIR', str(Path(__file__).resolve().parent.parent / 'Car_Records'))).resolve())
@@ -138,6 +142,8 @@ def probe_vehicle_lab_clock(timer):
 vehicle_lab = VehicleLab(ProfileStore(Path(SAVE_DIR) / 'Vehicle_Calibration' / 'profile.json'),
                          Path(SAVE_DIR) / 'State_Records', write_vehicle_lab_packet,
                          camera=lambda: cam_left.get_observation_frame(), probe=probe_vehicle_lab_clock)
+independent_steering = IndependentSteering(Path(SAVE_DIR) / 'Vehicle_Calibration' / 'independent_steering.json',
+    write_vehicle_lab_packet, lambda: cam_left.get_observation_frame(), probe=probe_vehicle_lab_clock)
 
 
 def clamp_throttle_value(value, fallback=1500):
@@ -423,6 +429,7 @@ def read_esp32_data():
                 sensor_state['last_steering_rx_mono'] = 0
                 imu_visualization.invalidate(message)
                 manual_steering.invalidate(message)
+                independent_steering.invalidate(message)
                 line_response.invalidate(message)
                 vehicle_lab.invalidate(message)
                 with serial_write_lock:
@@ -453,6 +460,7 @@ def read_esp32_data():
                 imu_visualization.feed(line, now_mono_ns / 1e9)
                 steering_requests.feed(line)
                 manual_steering.feed(line)
+                independent_steering.feed(line, now_mono_ns / 1e9)
                 line_response.feed(line, now_mono_ns / 1e9)
                 vehicle_lab.enqueue(line, now_mono_ns / 1e9)
                 sample = encoder_stream.decode(line, now_ns, sensor_state["throttle"], sensor_state["mode"], now_mono_ns)
@@ -721,6 +729,8 @@ def vehicle_lab_operation(action):
             raise ValueError('记录操作正在执行，请稍后重试')
         try:
             if action != 'stop':
+                if independent_steering.blocking() and action != 'independent':
+                    raise ValueError('请先关闭 IMU/相机独立转向')
                 with sync_coordinator.lock:
                     syncing = sync_coordinator.state['active']
                 with speed_record_lock:
@@ -729,7 +739,7 @@ def vehicle_lab_operation(action):
                     raise ValueError('请先结束记录或制动，再进行状态/执行器标定')
                 if sensor_state.get('throttle', 1500) != 1500 or sensor_state.get('mode') == 'RC' or time.monotonic() < estop_ignore_until:
                     raise ValueError('请先归中油门并退出遥控接管/制动')
-                if action == 'start' and (manual_steering.blocking() or not encoder_ready()):
+                if action == 'start' and (manual_steering.blocking() or independent_steering.blocking() or not encoder_ready()):
                     raise ValueError('请先退出手动/IMU调试并等待正常编码器数据')
                 if action == 'point' and vehicle_lab.blocking():
                     raise ValueError('请先退出联合观察，再进入手动舵机测试')
@@ -791,6 +801,8 @@ def imu_command():
                 return jsonify(error='请先结束记录或制动，再切换 MPU 测试模式'), 409
             if manual_steering.blocking():
                 return jsonify(error='请先归中退出手动舵机测试'), 409
+            if independent_steering.blocking():
+                return jsonify(error='请先关闭 IMU/相机独立转向'), 409
             if vehicle_lab.blocking():
                 return jsonify(error='请先退出状态估计联合观察'), 409
             if not esp32_serial or not esp32_serial.is_open:
@@ -918,6 +930,7 @@ def sensor_public_state():
         "serial_framing_errors": sensor_state.get("serial_framing_errors", 0),
         "serial_error": sensor_state.get("serial_error"),
         "manual_steering": manual_steering_public_state(),
+        "independent_steering": independent_steering.snapshot(),
         "line_response": line_response.snapshot(),
         "steering": {**sensor_state.get('steering', {}),
                      'fresh': time.monotonic() - sensor_state.get('last_steering_rx_mono', 0) < 1.0,
@@ -1077,7 +1090,8 @@ def start_record():
 # --- 新增：接收前端油门控制指令 ---
 
 def manual_steering_public_state():
-    return {**manual_steering.snapshot(),
+    state = manual_steering.snapshot()
+    return {**state, 'calibration': calibration_status(vehicle_lab.store.snapshot(), state),
             'serial_open': bool(esp32_serial and esp32_serial.is_open),
             'serial_error': sensor_state.get('serial_error')}
 
@@ -1087,11 +1101,45 @@ def manual_steering_status():
     return jsonify(manual_steering_public_state())
 
 
+@app.post('/steering/independent')
+def independent_steering_command():
+    data=request.get_json(silent=True)
+    if not isinstance(data,dict) or data.get('action') not in ('start','stop','save'):
+        return jsonify(error='需要 start / stop / save 操作'),400
+    action=data['action']
+    try:
+        if action=='stop':
+            independent_steering.stop()
+        else:
+            with vehicle_lab_operation('independent'):
+                if manual_steering.blocking() or vehicle_lab.blocking():raise ValueError('请先退出手动舵机或联合观察模式')
+                if action=='save':independent_steering.configure(data.get('source'),data.get('settings'))
+                else:
+                    if independent_steering.blocking():raise ValueError('请先关闭上一种独立转向')
+                    if not esp32_serial or not esp32_serial.is_open or not encoder_ready():raise ValueError('请连接 ESP32，并退出调试模式等待正常编码器上报')
+                    if sensor_state.get('steering',{}).get('mode') in ('LINE','YAW') or steering_requests.snapshot()['status']=='pending':
+                        raise ValueError('先关闭巡线转向并等待固件确认，再切换独立模式')
+                    independent_steering.start(data.get('source'))
+        return jsonify(independent_steering.snapshot())
+    except (ValueError,OSError) as exc:return jsonify(error=str(exc),state=independent_steering.snapshot()),409
+
+
+@app.get('/steering/independent/status')
+def independent_steering_status():
+    return jsonify(independent_steering.snapshot())
+
+
+@app.get('/steering/independent/image')
+def independent_steering_image():
+    jpeg=independent_steering.jpeg
+    return Response(jpeg,mimetype='image/jpeg',headers={'Cache-Control':'no-store'}) if jpeg else ('',204)
+
+
 @app.post('/steering/manual')
 def manual_steering_command():
     body = request.get_json(silent=True)
     action = body.get('action') if isinstance(body, dict) else None
-    if action not in ('start', 'set', 'center', 'stop', 'calibrate'):
+    if action not in ('start', 'set', 'center', 'stop', 'calibrate', 'expand_low', 'expand_high'):
         return jsonify(error='无效的手动舵机操作'), 400
     pulse = body.get('pulse_us')
     if action == 'set':
@@ -1109,6 +1157,8 @@ def manual_steering_command():
     try:
         with (record_command_lock if action != 'stop' else nullcontext()):
             if action != 'stop':
+                if independent_steering.blocking():
+                    return jsonify(error='请先关闭 IMU/相机独立转向'), 409
                 if vehicle_lab.blocking():
                     return jsonify(error='请先退出状态估计联合观察'), 409
                 with sync_coordinator.lock:
@@ -1146,6 +1196,11 @@ def set_line_steering():
     if not isinstance(payload, dict) or not isinstance(payload.get('enabled'), bool):
         return jsonify(error='enabled 必须是布尔值'), 400
     enabled = payload['enabled']
+    if enabled and independent_steering.blocking():
+        return jsonify(error='请先关闭 IMU/相机独立转向，再开启巡线'), 409
+    if not enabled and independent_steering.blocking():
+        try:independent_steering.stop()
+        except OSError as exc:return jsonify(error=str(exc)),503
     if enabled and line_response.snapshot()['request']['status'] not in ('idle','confirmed'):
         return jsonify(error='巡线参数尚未获固件确认，请先应用参数并等待确认'),409
     if enabled and vehicle_lab.blocking():
@@ -1165,6 +1220,8 @@ def set_line_steering():
                 return jsonify(error='巡线参数正在更新，等待固件确认后再开启'),409
             if enabled and vehicle_lab.owned:
                 return jsonify(error='请先退出状态估计联合观察'), 409
+            if enabled and independent_steering.blocking():
+                return jsonify(error='请先关闭 IMU/相机独立转向'),409
             if enabled and manual_steering.blocking():
                 return jsonify(error='请先归中退出手动舵机测试，再开启巡线'), 409
             request_id = steering_requests.begin(enabled)
@@ -1188,7 +1245,7 @@ def configure_line_response():
             state = sensor_state.get('steering', {})
             if state.get('mode') in ('LINE','YAW') or steering_requests.snapshot().get('status') == 'pending':
                 raise ValueError('先关闭巡线并等待确认，再修改参数')
-            if vehicle_lab.blocking() or manual_steering.blocking() or not encoder_ready():
+            if independent_steering.blocking() or vehicle_lab.blocking() or manual_steering.blocking() or not encoder_ready():
                 raise ValueError('先退出联合观察、手动/IMU测试，恢复正常编码器上报')
             with serial_write_lock:
                 identifier, packet = line_response.begin(request.get_json(silent=True))
@@ -1215,6 +1272,8 @@ def set_throttle():
         val = int(val_str)
         # 安全断言保护
         if 1000 <= val <= 2000:
+            if val != 1500 and independent_steering.blocking() and not independent_steering.can_drive():
+                return jsonify(status='ignored',message='独立转向尚未就绪或已故障，请先关闭重试',reason='independent_not_ready',throttle=1500),409
             if val != 1500 and vehicle_lab.blocking():
                 return jsonify(status='ignored', message='联合观察期间动力锁定中位，请先退出观察',
                                reason='vehicle_lab_active', throttle=1500), 409
@@ -1273,6 +1332,9 @@ def reverse_brake_sequence(token, source_pwm, brake_pwm):
 def e_stop():
     """最高优先级：按当前方向反向小PWM制动2秒后归中。"""
     global estop_ignore_until, brake_sequence_token
+    if independent_steering.blocking():
+        try:independent_steering.stop()
+        except OSError:pass
     if esp32_serial and esp32_serial.is_open:
         payload = request.get_json(silent=True) or {}
         requested_pwm = clamp_throttle_value(
@@ -1316,6 +1378,7 @@ if __name__ == '__main__':
         run_dashboard(app, sync_coordinator)
     finally:
         vehicle_lab.shutdown()
+        independent_steering.shutdown()
         for camera in (cam_left, cam_right):
             camera.running = False
             camera.finish_record()

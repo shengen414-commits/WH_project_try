@@ -104,6 +104,69 @@ class CameraDetectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             BlackTapeDetector().detect(np.zeros((480, 640), np.uint16))
 
+    def test_moderate_curve_uses_local_tangent_and_observed_lookahead(self):
+        y=np.arange(480)
+        x=320+180*((y-460)/300)**2
+        frame=np.full((480,640),200,np.uint8)
+        cv2.polylines(frame,[np.c_[x,y].astype(np.int32)],False,20,22)
+        result,_,_=BlackTapeDetector().detect(frame)
+        self.assertTrue(result['valid'],result['reason'])
+        self.assertEqual(result['model'],'quadratic')
+        self.assertGreater(result['confidence'],.65)
+        ahead_y=result['lookahead_xy'][1]*2
+        expected_x=320+180*((ahead_y-460)/300)**2
+        expected_angle=math.degrees(math.atan(-360*(ahead_y-460)/90000))
+        self.assertAlmostEqual(result['lookahead_error_norm'],(expected_x-320)/320,delta=.015)
+        self.assertAlmostEqual(result['image_angle_deg'],expected_angle,delta=2)
+        self.assertEqual(len(result['centerline']),32)
+        self.assertEqual(render_overlay(frame,result,DetectorConfig()).shape,(480,640,3))
+
+    def test_otsu_local_contrast_recovers_tape_under_dark_shadow(self):
+        frame=tape_image(315,315)
+        frame[210:395]=np.uint8(frame[210:395].astype(float)*.3)
+        result,_,_=BlackTapeDetector().detect(frame)
+        self.assertTrue(result['valid'],result['reason'])
+        self.assertIn('local_contrast',result['threshold_methods'])
+        self.assertAlmostEqual(result['near_error_norm'],(315-320)/320,delta=.02)
+        self.assertGreater(result['confidence'],.65)
+
+    def test_diverging_fork_is_ambiguous_even_with_same_near_center(self):
+        frame=np.full((480,640),200,np.uint8)
+        for x in (160,480):
+            cv2.polylines(frame,[np.array([[320,479],[320,360],[x,160]],np.int32)],False,20,20)
+        result,_,_=BlackTapeDetector().detect(frame)
+        self.assertFalse(result['valid'])
+        self.assertEqual(result['reason'],'ambiguous_lines')
+        self.assertIsNone(result['lookahead_error_norm'])
+
+    def test_hidden_near_end_and_long_gap_are_not_extrapolated(self):
+        near_hidden=tape_image();near_hidden[325:]=190
+        long_gap=tape_image();long_gap[250:380]=190
+        for frame in (near_hidden,long_gap):
+            result,_,_=BlackTapeDetector().detect(frame)
+            self.assertFalse(result['valid'])
+            self.assertIsNone(result['near_error_norm'])
+
+    def test_invalid_frame_after_valid_frame_never_reuses_old_track(self):
+        detector=BlackTapeDetector()
+        self.assertTrue(detector.detect(tape_image())[0]['valid'])
+        result,_,_=detector.detect(np.full((480,640),190,np.uint8))
+        self.assertFalse(result['valid']);self.assertEqual(result['centerline'],[])
+        self.assertIsNone(result['image_angle_deg'])
+
+    def test_straight_tape_does_not_overfit_curve_and_config_is_typed(self):
+        result,_,_=BlackTapeDetector().detect(tape_image(350,300))
+        self.assertTrue(result['valid']);self.assertEqual(result['model'],'linear')
+        for config in (DetectorConfig(bands=18.5),DetectorConfig(work_width=True),
+                       DetectorConfig(max_curve_norm=math.nan),DetectorConfig(max_gap_bands=5),
+                       DetectorConfig(threshold_mode=[]),DetectorConfig(adaptive_block=99999)):
+            with self.assertRaises(ValueError):BlackTapeDetector(config)
+
+    def test_small_roi_does_not_duplicate_measurement_rows(self):
+        detector=BlackTapeDetector(DetectorConfig(roi_top=.6,roi_bottom=.85,bands=32))
+        result,_,_=detector.detect(np.full((80,160),190,np.uint8))
+        self.assertFalse(result['valid']);self.assertEqual(result['reason'],'roi_too_short')
+
 
 class CameraWebTests(unittest.TestCase):
     def setUp(self):

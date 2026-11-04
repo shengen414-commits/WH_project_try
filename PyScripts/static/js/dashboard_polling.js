@@ -47,7 +47,8 @@
                     [global.renderSyncState, data.sync], [global.renderSyncConversion, data.conversion],
                     [global.renderCameraReplay, data.replay],
                     [global.renderLineResponse, data.sensor && data.sensor.line_response],
-                    [global.renderManualSteering, data.sensor && data.sensor.manual_steering]]) {
+                    [global.renderManualSteering, data.sensor && data.sensor.manual_steering],
+                    [global.renderIndependentSteering, data.sensor && data.sensor.independent_steering]]) {
                     try { if (typeof render === 'function') render(state); }
                     catch (error) { console.warn('Dashboard render:', render.name, error.message); }
                 }

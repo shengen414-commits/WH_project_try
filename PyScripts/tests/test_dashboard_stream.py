@@ -12,6 +12,7 @@ from PyScripts.telemetry import CsvRecorder, EncoderStream
 from PyScripts.steering_requests import SteeringRequests
 from PyScripts.manual_steering import ManualSteering
 from PyScripts.line_response import LineResponse
+from PyScripts.independent_steering import IndependentSteering, DEFAULTS
 
 
 class DashboardTests(unittest.TestCase):
@@ -44,6 +45,8 @@ class DashboardTests(unittest.TestCase):
         self.app.manual_steering = ManualSteering()
         self.app.line_response = LineResponse()
         self.app.esp32_serial = Mock(is_open=True, port='/dev/ttyUSB0')
+        self.app.independent_steering=IndependentSteering(Path(self.directory.name)/'independent_test.json',
+            self.app.write_vehicle_lab_packet,lambda:None,autostart=False)
         self.app.sync_coordinator.state = {'active': False, 'phase': 'idle', 'events': []}
         self.app.record_workflow_active.clear()
         self.app.brake_sequence_active.clear()
@@ -407,6 +410,52 @@ class DashboardTests(unittest.TestCase):
         self.receive([f'[SERVO_ACK] id={save} ok=1 target=1600 low=1300 mid=1600 high=1900 manual=1 ready=1 proto=2 reason=ok\n'.encode()])
         state = self.client.get('/steering/manual/status').get_json()
         self.assertEqual((state['low_us'], state['center_us'], state['high_us']), (1300, 1600, 1900))
+
+    def test_manual_probe_range_requires_new_firmware_and_acknowledges_no_motion(self):
+        self.manual_start()
+        self.assertEqual(self.client.post('/steering/manual',json={'action':'expand_low'}).status_code,409)
+        self.receive([b'[SERVO] GPIO12 target=1500 us PWM=ready low=1200 mid=1500 high=1800 proto=3\n'])
+        response=self.client.post('/steering/manual',json={'action':'expand_low'})
+        self.assertEqual(response.status_code,200)
+        request_id=response.json['request_id']
+        self.app.esp32_serial.write.assert_called_with(f'S0003,{request_id}\n'.encode())
+        self.receive([f'[SERVO_ACK] id={request_id} ok=1 target=1500 low=1175 mid=1500 high=1800 manual=1 ready=1 proto=3 reason=ok\n'.encode()])
+        state=self.client.get('/steering/manual/status').json
+        self.assertEqual(state['request']['status'],'confirmed')
+        self.assertEqual(state['target_us'],1500)
+        self.assertEqual(state['low_us'],1175)
+
+    def test_independent_modes_wait_for_ack_and_block_conflicting_outputs(self):
+        self.app.esp32_serial.write.side_effect=lambda packet:len(packet)
+        response=self.client.post('/steering/independent',json={'action':'start','source':'imu'})
+        self.assertEqual(response.status_code,200,response.json)
+        self.assertEqual(response.json['phase'],'arming')
+        identifier=response.json['request']['id']
+        self.assertTrue(self.app.esp32_serial.write.call_args[0][0].startswith(f'@A1,1,{identifier},'.encode()))
+        self.receive([f'[ASSIST_ACK] id={identifier} action=1 source=1 ok=1 lim=80 slew=400 dir=1 reason=imu_calibrating\n'.encode()])
+        self.assertEqual(self.client.get('/steering/independent/status').json['phase'],'calibrating')
+        for url,body in [('/steering/manual',{'action':'start'}),('/steering/line',{'enabled':True}),
+                         ('/imu/command',{'action':'start'}),('/vehicle-lab/command',{'action':'start'})]:
+            self.assertEqual(self.client.post(url,json=body).status_code,409,url)
+        self.assertEqual(self.client.post('/set_throttle?val=1600').status_code,409)
+        with self.app.sync_coordinator.operation_lock:
+            response=self.client.post('/steering/independent',json={'action':'stop'})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json['phase'],'stopping')
+        self.receive([f'[FOLLOW_ACK] id={identifier} action=0 ok=1\n'.encode()])
+        self.assertFalse(self.client.get('/steering/independent/status').json['blocking'])
+
+    def test_independent_settings_and_camera_preflight_do_not_claim_hardware_ready(self):
+        self.app.esp32_serial.write.side_effect=lambda packet:len(packet)
+        self.assertEqual(self.client.post('/steering/independent',json=[]).status_code,400)
+        self.assertEqual(self.client.post('/steering/independent',json={'action':'start','source':'fusion'}).status_code,409)
+        self.assertEqual(self.client.post('/steering/independent',json={'action':'start','source':'camera'}).status_code,409)
+        bad={**DEFAULTS['imu'],'direction':0}
+        self.assertEqual(self.client.post('/steering/independent',json={'action':'save','source':'imu','settings':bad}).status_code,409)
+        self.app.independent_steering.camera=lambda:(1,time.monotonic(),object())
+        response=self.client.post('/steering/independent',json={'action':'start','source':'camera'})
+        self.assertEqual(response.status_code,200,response.json)
+        self.assertEqual(response.json['phase'],'arming')
 
     def test_manual_entry_rejects_recording_throttle_rc_and_conflicting_operations(self):
         self.app.sensor_state['throttle'] = 1600

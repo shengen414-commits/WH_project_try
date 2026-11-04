@@ -24,6 +24,7 @@ bool steeringDebugActive();
 bool steeringOutputReady();
 int steeringTargetUs();
 bool setSteeringDebugPulse(int pulseUs);
+bool expandSteeringDebugRange(bool lower);
 bool attachSteeringOutput();
 bool writeAutomaticSteeringPulse(int pulseUs);
 void centerSteeringOutput();

@@ -6,6 +6,7 @@
 #include "steering_control.h"
 #include "automatic_steering.h"
 #include "mpu6050_debug.h"
+#include "independent_steering.h"
 #include <cstring>
 
 namespace {
@@ -93,6 +94,9 @@ void manualSteeringRequest(int pulse, uint32_t id) {
             ok = saveCurrentSteeringCenter();
             reason = steeringTargetUs() < SteeringConfig::CENTER_LOW_US || steeringTargetUs() > SteeringConfig::CENTER_HIGH_US
                      ? "center_range" : "save_failed";
+        } else if (pulse == 3 || pulse == 4) {
+            ok = expandSteeringDebugRange(pulse == 3);
+            reason = !steeringOutputReady() ? "pwm_failed" : "absolute_limit";
         } else {
             ok = setSteeringDebugPulse(pulse == 0 ? steeringCenterUs() : pulse);
             reason = !steeringOutputReady() ? "pwm_failed" : "out_of_range";
@@ -100,7 +104,7 @@ void manualSteeringRequest(int pulse, uint32_t id) {
     }
     if (ok) reason = "ok";
     pendingSteeringAckLength = snprintf(pendingSteeringAck, sizeof(pendingSteeringAck),
-        "[SERVO_ACK] id=%lu ok=%d target=%d low=%d mid=%d high=%d manual=%d ready=%d proto=2 reason=%s\n",
+        "[SERVO_ACK] id=%lu ok=%d target=%d low=%d mid=%d high=%d manual=%d ready=%d proto=3 reason=%s\n",
         (unsigned long)id, ok, steeringTargetUs(), steeringLowUs(), steeringCenterUs(), steeringHighUs(),
         debugMode == DebugMode::Steering, steeringOutputReady(), reason);
     if (pendingSteeringAckLength >= (int)sizeof(pendingSteeringAck)) pendingSteeringAckLength = 0;
@@ -151,6 +155,10 @@ void pollSerialCommands() {
         if (configPending) {
             if (value == '\n') {
                 configPacket[configLength] = '\0';
+                if(configPacket[0]=='A') {
+                    if(serialNormalMode())handleIndependentSteeringPacket(configPacket);
+                    resetCommand();continue;
+                }
                 const bool ok = serialNormalMode() && handleAutomaticSteeringConfig(configPacket);
                 if (configPacket[0] == 'K' || configPacket[0] == 'k') {
                     const char* comma = strrchr(configPacket, ',');

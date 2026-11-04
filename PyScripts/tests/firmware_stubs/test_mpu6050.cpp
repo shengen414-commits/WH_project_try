@@ -163,4 +163,12 @@ int main() {
     Wire.shortRead = true; tick(); publishLineSensor();
     assert(!readMPU6050Sample(sample));
     feed("R\n"); assert(serialNormalMode() && !Wire.open);
+    Serial.output.clear(); feed("V\nS0003,77\n");
+    assert(Serial.output.find("id=77 ok=1 target=1500 low=1175") != std::string::npos);
+    assert(Serial.output.find("proto=3") != std::string::npos && pwmOutputs[12] == 1500);
+    feed("S1175,78\n"); assert(pwmOutputs[12] == 1175);
+    feed("S0001,79\n");
+    assert(serialNormalMode() && pwmOutputs[12] == 1500);
+    Serial.output.clear(); feed("V\nS1175,80\n");
+    assert(pwmOutputs[12] == 1500 && Serial.output.find("id=80 ok=0") != std::string::npos);
 }

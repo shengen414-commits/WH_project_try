@@ -103,5 +103,58 @@ class VehicleLabWebTests(unittest.TestCase):
         self.assertEqual(self.client.get('/vehicle-lab/trace').status_code,409)
         self.assertEqual(self.client.get('/vehicle-lab').status_code,200)
 
+    def test_manual_endpoints_persist_with_optional_angles_and_probe_interpolation(self):
+        self.manual.update(active=True,fresh=True,ready=True,precise=True,center_us=1500,target_us=1100,
+                           request={'id':42,'status':'confirmed','sent_at':9,'confirmed_at':9})
+        endpoint='/steering/manual/calibration/endpoint'
+        self.assertEqual(self.client.post(endpoint,json={'side':'right','pulse_us':1200}).status_code,409)
+        response=self.client.post(endpoint,json={'side':'right','pulse_us':1100,'request_id':42})
+        self.assertEqual(response.status_code,200)
+        self.assertIsNone(response.json['endpoints']['right']['angle_deg'])
+        self.assertEqual(self.lab.store.snapshot()['actuator']['points'],[])
+        self.assertEqual(self.client.post(endpoint,json={'side':'right','angle_deg':30}).status_code,409)
+        for pulse,angle in [(1100,-30),(1500,0),(1900,30)]:
+            self.manual['target_us']=pulse
+            response=self.client.post('/steering/manual/calibration/point',json={'angle_deg':angle,'pulse_us':pulse,'request_id':42})
+            self.assertEqual(response.status_code,200,response.json)
+        response=self.client.post(endpoint,json={'side':'left','angle_deg':30})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json['endpoints']['left']['pulse_us'],1900)
+        self.assertEqual(response.json['endpoints']['right']['angle_deg'],-30)
+        restored=ProfileStore(self.root/'profile.json').snapshot()
+        self.assertEqual(restored,self.lab.store.snapshot())
+        self.manual['target_us']=1700
+        self.assertAlmostEqual(self.client.get('/steering/manual/calibration').json['estimated_angle_deg'],15)
+        preview=self.client.post('/vehicle-lab/actuator/preview',json={'angle_deg':15})
+        self.assertEqual(preview.json['pulse_us'],1700)
+        self.assertFalse(preview.json['sent_to_hardware'])
+        # Exploration outside ±300 is allowed in read-only preview, never in the
+        # existing controller-facing adapter or state estimator's actuator table.
+        self.assertFalse(self.client.get('/vehicle-lab/status').json['actuator_ready'])
+        self.assertEqual(self.client.post('/vehicle-lab/actuator/preview',json={'angle_deg':31}).status_code,409)
+        exported=self.client.get('/steering/manual/calibration/export').get_data(as_text=True)
+        self.assertIn('1100,-30.0,right,1500',exported)
+        self.assertIn('1900,30,left,1500',exported)
+        self.assertEqual(self.writes,[])
+        self.assertEqual(self.client.post('/steering/manual/calibration/remove',json={'pulse_us':1100}).status_code,200)
+        self.assertNotIn('right',self.lab.store.snapshot()['actuator']['endpoints'])
+
+    def test_endpoint_blocks_unsettled_stale_same_side_and_changed_reference(self):
+        self.manual.update(active=True,fresh=True,ready=True,precise=True,center_us=1500,target_us=1600,
+                           request={'id':10,'status':'confirmed','sent_at':8,'confirmed_at':9.9})
+        endpoint='/steering/manual/calibration/endpoint'
+        self.assertEqual(self.client.post(endpoint,json={'side':'left'}).status_code,409)
+        self.manual['request']['confirmed_at']=9
+        self.assertEqual(self.client.post(endpoint,json={'side':'left'}).status_code,200)
+        self.manual['target_us']=1700
+        self.assertEqual(self.client.post(endpoint,json={'side':'right'}).status_code,409)
+        self.manual['fresh']=False
+        self.assertEqual(self.client.post(endpoint,json={'side':'left'}).status_code,409)
+        self.manual.update(fresh=True,center_us=1540,target_us=1440)
+        self.assertEqual(self.client.post(endpoint,json={'side':'right'}).status_code,200)
+        a=self.lab.store.snapshot()['actuator']
+        self.assertEqual(a['center_us'],1540)
+        self.assertNotIn('left',a['endpoints'])
+
 
 if __name__=='__main__':unittest.main()
