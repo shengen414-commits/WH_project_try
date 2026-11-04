@@ -11,6 +11,10 @@ import math
 IMU_MOUNT_AXES = [1, -2, -3]
 
 
+def observation_timeout(source):
+    return .5 if source == 'camera' else .15
+
+
 @dataclass(frozen=True)
 class SteeringObservation:
     source: str
@@ -62,7 +66,7 @@ def line_observation(probes, observed_at):
 def standalone_proposal(observation, settings, now):
     """Pure PD/proportional test policies; no serial, GPIO, file, or camera I/O."""
     o=observation
-    if not o.valid or not 0 <= now-o.observed_at <= .15:
+    if not o.valid or not 0 <= now-o.observed_at <= observation_timeout(o.source):
         return SteeringProposal(o.source,o.sequence,o.observed_at,now,0.,False,'observation_stale' if o.valid else o.reason)
     lateral_us=heading_us=None
     if o.source=='imu':
@@ -90,7 +94,7 @@ def standalone_proposal(observation, settings, now):
 
 def arbitrate(selected_source, proposal, now):
     """Replace this selector with joint decision logic, keeping the gateway."""
-    if proposal.source!=selected_source or not proposal.valid or not 0 <= now-proposal.observed_at <= .15 or not -1 <= proposal.correction <= 1:
+    if proposal.source!=selected_source or not proposal.valid or not 0 <= now-proposal.observed_at <= observation_timeout(proposal.source) or not -1 <= proposal.correction <= 1:
         raise ValueError('Selected controller has no fresh valid proposal')
     return proposal.correction
 

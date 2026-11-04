@@ -10,11 +10,11 @@ import threading
 import time
 try:
     from .steering_control_pipeline import (SteeringObservation, camera_observation,
-        standalone_proposal, arbitrate, serialize, IMU_MOUNT_AXES)
+        standalone_proposal, arbitrate, serialize, IMU_MOUNT_AXES, observation_timeout)
     from .vehicle_state.clock import DeviceClock
 except ImportError:
     from steering_control_pipeline import (SteeringObservation, camera_observation,
-        standalone_proposal, arbitrate, serialize, IMU_MOUNT_AXES)
+        standalone_proposal, arbitrate, serialize, IMU_MOUNT_AXES, observation_timeout)
     from vehicle_state.clock import DeviceClock
 
 
@@ -63,6 +63,7 @@ class IndependentSteering:
         self.observation=self.proposal=None;self.firmware={};self.error=None;self.jpeg=None;self.jpeg_sequence=0
         self.stop_event=threading.Event();self.worker=None;self.timer=DeviceClock();self.last_probe=-100.;self.last_imu_ms=None
         self.last_frame=None;self.detector=None;self.last_preview=-100.;self.request={'status':'idle'}
+        self.camera_invalid_since=None;self.camera_invalid_reason=None
         if self.path.exists():
             try:
                 saved=json.loads(self.path.read_text(encoding='utf-8'))
@@ -108,7 +109,13 @@ class IndependentSteering:
             generation=self.camera_generation
         started=self.clock()
         try:
-            result=self._detect_camera(started)
+            def publish(observation):
+                with self.lock:
+                    if generation!=self.camera_generation:return
+                    self.camera_observation=observation;self.camera_error=None
+                    self.camera_processing_ms=(self.clock()-started)*1000
+                if self.owned and self.source=='camera':self.step()
+            result=self._detect_camera(started,publish=publish)
             with self.lock:
                 if generation!=self.camera_generation:return
                 if result is not None:
@@ -140,7 +147,7 @@ class IndependentSteering:
 
     def can_drive(self):
         with self.lock:
-            return self.owned and self.phase=='running' and self.firmware.get('ready')=='1' and self.proposal is not None and self.proposal.valid and 0<=self.clock()-self.proposal.observed_at<=.15
+            return self.owned and self.phase=='running' and self.camera_invalid_since is None and self.firmware.get('ready')=='1' and self.proposal is not None and self.proposal.valid and 0<=self.clock()-self.proposal.observed_at<=observation_timeout(self.source)
 
     def configure(self,source,data):
         candidate=validate_settings(source,data)
@@ -170,7 +177,7 @@ class IndependentSteering:
             if source=='camera':
                 if not self.camera_enabled:raise ValueError('请先开启下方相机检测预览，等待新鲜图像后再开启转向')
                 frame=self.camera()
-                if frame is None or not 0<=self.clock()-frame[1]<=.15:raise ValueError('检测相机没有新鲜图像，请检查下方检测预览状态与相机连接')
+                if frame is None or not 0<=self.clock()-frame[1]<=observation_timeout('camera'):raise ValueError('检测相机没有新鲜图像，请检查下方检测预览状态与相机连接')
             if source=='camera':
                 self.camera_observation=None;self.camera_error=None
                 self.camera_wakeup.set()
@@ -178,6 +185,7 @@ class IndependentSteering:
             self.source=source;self.started=self.clock();self.received=None;self.owned=True;self.phase='arming'
             self.observation=self.proposal=None;self.firmware={};self.sequence=0;self.last_imu_ms=None
             self.timer=DeviceClock();self.last_probe=-100.;self.zero_status={};self.output_limits=None;self.fault_detail=None;self.last_target_at=None
+            self.camera_invalid_since=None;self.camera_invalid_reason=None
             self.stop_event=threading.Event();self.request={'action':'start','status':'pending','id':self.identifier}
             p=self.settings[source];number=1 if source=='imu' else 2
             self.message='等待固件确认；IMU需保持车身静止完成零偏标定' if source=='imu' else '等待固件确认相机独立模式'
@@ -301,7 +309,7 @@ class IndependentSteering:
     def _stopped(self):
         self.owned=False;self.phase='off';self.stop_event.set();self.request['status']='confirmed';self.message='已归中停动力并退出独立模式'
 
-    def _detect_camera(self,now):
+    def _detect_camera(self,now,publish=None):
         try:from .camera_line_detector import BlackTapeDetector,DetectorConfig,render_overlay
         except ImportError:from camera_line_detector import BlackTapeDetector,DetectorConfig,render_overlay
         import cv2
@@ -326,10 +334,15 @@ class IndependentSteering:
         result,_,_=self.detector.detect(image)
         detect_end=timing.perf_counter()
         observation=camera_observation(result,sequence,read_at,p['confidence_min'])
+        self.camera_timings={'input_age_ms':input_age,'resize_ms':(detect_start-resize_start)*1000,
+            'detect_ms':(detect_end-detect_start)*1000,'preview_ms':0.,
+            'total_ms':(detect_end-total_start)*1000,'thread_cpu_ms':(timing.thread_time()-cpu_start)*1000,
+            'cv_threads':cv2.getNumThreads(),'work_width':256}
+        if publish is not None:publish(observation)
         # Publish the overlay together with its observation only if this enable generation still matches.
         jpeg=None
         if self.clock()-self.last_preview>=.2:
-            fresh=0<=self.clock()-read_at<=.15
+            fresh=0<=self.clock()-read_at<=observation_timeout('camera')
             preview_result={**result,'control_valid':observation.valid and fresh}
             gate='STALE' if not fresh else 'OK' if observation.valid else f"{observation.reason} {observation.confidence:.2f}<{p['confidence_min']:.2f}"
             overlay=render_overlay(image,preview_result,self.detector.config,control_label=f'PREVIEW gate={gate}')
@@ -346,6 +359,20 @@ class IndependentSteering:
         # Preview has its own worker; the controller consumes its latest immutable result.
         if self.camera_error:raise ValueError(self.camera_error)
         return self.camera_observation
+
+    def _camera_gap(self,reason,identifier,observation=None):
+        """Keep the session alive with neutral targets, never replay old steering."""
+        with self.lock:
+            if not self.owned or self.identifier!=identifier or self.phase!='running':return
+            now=self.clock()
+            if self.camera_invalid_since is None:self.camera_invalid_since=now
+            self.camera_invalid_reason=reason
+            if now-self.camera_invalid_since>=1.:
+                self._fail(f'相机观测连续无效超过1秒：{reason}',observation);return
+            if self.last_target_at is None or now-self.last_target_at>=.035:
+                self.sequence=self.sequence%0xffffffff+1
+                self.write(f'@A2,{identifier},{self.sequence},0.0000\n'.encode('ascii'))
+                self.last_target_at=now
 
     def step(self):
         """One bounded control iteration, also callable with fake hardware in tests."""
@@ -365,7 +392,15 @@ class IndependentSteering:
                 self.last_probe=now
         # Never hold the receiver lock during CV, JPEG encoding, or image fetch.
         if phase=='calibrating':return
-        observation=self._camera_observation(now) if source=='camera' else self.observation
+        if source=='camera':
+            try:observation=self._camera_observation(now)
+            except Exception as exc:
+                self._camera_gap(str(exc),identifier);return
+            if observation is None:
+                self._camera_gap('等待相机观测',identifier);return
+            if not observation.valid or not 0<=self.clock()-observation.observed_at<=observation_timeout('camera'):
+                self._camera_gap(observation.reason if not observation.valid else 'observation_stale',identifier,observation);return
+        else:observation=self.observation
         if observation is None:
             # Initial IMU data may await the first clock probe. Gateway watchdog
             # will still stop motion if this wait lasts more than 250 ms.
@@ -374,19 +409,26 @@ class IndependentSteering:
             with self.lock:
                 if self.proposal is not None and observation.sequence==self.proposal.sequence:
                     # The same already-used result ages while the next frame is
-                    # being computed. Never resubmit it or renew the watchdog.
-                    if self.last_target_at is not None and self.clock()-self.last_target_at>=.25:
-                        self._fail('相机超过250ms未产生新的有效控制目标')
+                    # being computed. Never replay that steering demand; enter
+                    # the neutral recovery window before the UART watchdog.
+                    if self.camera_invalid_since is not None or self.last_target_at is not None and self.clock()-self.last_target_at>=.15:
+                        self._camera_gap('等待新的相机观测',identifier,observation)
                     return
         proposal=standalone_proposal(observation,self.settings[source],self.clock())
         if not proposal.valid:
+            if source=='camera':
+                self._camera_gap(proposal.reason,identifier,observation);return
             with self.lock:
                 if identifier==self.identifier:self.observation=observation;self.proposal=proposal
             self._fail(f'观测无效：{proposal.reason}',observation);return
         with self.lock:
             if not self.owned or identifier!=self.identifier or self.phase!='running':return
             if self.proposal is not None and proposal.sequence==self.proposal.sequence:return
-            demand=arbitrate(source,proposal,self.clock())
+            output_at=self.clock()
+            if source=='camera' and not 0<=output_at-proposal.observed_at<=observation_timeout('camera'):
+                self._camera_gap('observation_stale',identifier,observation);return
+            demand=arbitrate(source,proposal,output_at)
+            if source=='camera':self.camera_invalid_since=None;self.camera_invalid_reason=None
             self.observation=observation;self.proposal=proposal
             self.sequence=self.sequence%0xffffffff+1
             self.write(f'@A2,{identifier},{self.sequence},{demand:.4f}\n'.encode('ascii'))
@@ -412,12 +454,15 @@ class IndependentSteering:
                     'observation_age_ms':max(0,(now-self.observation.observed_at)*1000) if self.observation else None,
                     'jpeg_sequence':self.jpeg_sequence,'imu_mount_axes':list(IMU_MOUNT_AXES),
                     'imu_calibration':dict(self.zero_status),'output_limits':copy.deepcopy(self.output_limits),
+                    'camera_recovery':{'active':self.camera_invalid_since is not None and self.phase=='running',
+                        'elapsed_ms':max(0,(now-self.camera_invalid_since)*1000) if self.camera_invalid_since is not None else 0,
+                        'reason':self.camera_invalid_reason,'grace_ms':1000,'observation_timeout_ms':500},
                     'camera':{'enabled':self.camera_enabled,'error':self.camera_error,
                         'observation':serialize(self.camera_observation),
                         'observation_age_ms':max(0,(now-self.camera_observation.observed_at)*1000) if self.camera_observation else None,
                         'processing_ms':self.camera_processing_ms,'timings':dict(self.camera_timings),'jpeg_sequence':self.jpeg_sequence,
                         'preview_age_ms':max(0,(now-self.jpeg_source_at)*1000) if self.jpeg_source_at is not None else None,
-                        'preview_stale':self.jpeg_source_at is None or not 0<=now-self.jpeg_source_at<=.15},
+                        'preview_stale':self.jpeg_source_at is None or not 0<=now-self.jpeg_source_at<=observation_timeout('camera')},
                     'clock':self.timer.status(now)}
 
     def shutdown(self):

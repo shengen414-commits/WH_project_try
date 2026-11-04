@@ -29,7 +29,7 @@ class IndependentSteeringTests(unittest.TestCase):
             p=standalone_proposal(o,DEFAULTS[source],10.01)
             self.assertLess(arbitrate(source,p,10.01),0)
             with self.assertRaises(ValueError):arbitrate('fusion',p,10.01)
-            self.assertFalse(standalone_proposal(o,DEFAULTS[source],10.2).valid)
+            self.assertFalse(standalone_proposal(o,DEFAULTS[source],10.51).valid)
         self.assertIsNone(o.relative_heading_deg)
         line=line_observation({'valid':True,'fresh':True,'center_channel':0,'sequence':1},10)
         self.assertEqual(line.line_offset_norm,-1)
@@ -59,10 +59,10 @@ class IndependentSteeringTests(unittest.TestCase):
         self.service._camera_observation=lambda now:observation
         self.service.step();self.assertTrue(self.packets[-1].startswith(f'@A2,{sid},1,-'.encode()))
         before=len(self.packets);self.service.step();self.assertEqual(len(self.packets),before)
-        self.now=10.2;self.service.step()
+        self.now=10.16;self.service.step()
         self.assertEqual(self.service.phase,'running')
-        self.assertEqual(len(self.packets),before)
-        self.now=10.26;self.service.step()
+        self.assertTrue(self.packets[-1].endswith(b',0.0000\n'))
+        self.now=11.17;self.service.received=self.now;self.service.step()
         self.assertEqual(self.service.phase,'fault');self.assertEqual(self.packets[-1],f'@A3,{sid}\n'.encode())
         observation=camera_observation({'valid':True,'confidence':1.,'lookahead_error_norm':0,'image_angle_deg':0},2,10.2)
         self.service.step();self.assertEqual(self.packets[-1],f'@A3,{sid}\n'.encode())
@@ -112,6 +112,8 @@ class IndependentSteeringTests(unittest.TestCase):
         blank=np.full_like(image,210)
         self.service.camera=lambda:(2,self.now,blank)
         self.service.camera_step();self.service.step()
+        self.assertEqual(self.service.phase,'running')
+        self.now+=1.01;self.service.received=self.now;self.service.step()
         self.assertEqual(self.service.phase,'fault')
         self.assertTrue(self.packets[-1].startswith(b'@A3,'))
 
@@ -121,9 +123,11 @@ class IndependentSteeringTests(unittest.TestCase):
         self.service.camera=lambda:(1,self.now,image)
         sid=self.arm('camera')
         self.service.camera_step();self.service.step()
+        self.assertEqual(self.service.phase,'running')
+        self.now+=1.01;self.service.received=self.now;self.service.step()
         self.assertEqual(self.service.phase,'fault')  # No line: stop control only.
         self.assertTrue(self.service.camera_enabled)
-        self.assertIsNotNone(self.service.preview_jpeg())
+        self.assertIsNone(self.service.preview_jpeg()) # The original frame is over one second old.
         self.assertTrue(self.packets[-1].startswith(f'@A3,{sid}'.encode()))
         packets=list(self.packets)
         self.now+=.25
@@ -174,7 +178,7 @@ class IndependentSteeringTests(unittest.TestCase):
 
     def test_frame_from_previous_enable_generation_cannot_reappear_after_toggle(self):
         observation=camera_observation({'valid':True,'confidence':.95,'lookahead_error_norm':0,'image_angle_deg':0},1,self.now)
-        def finish_old_detection(now):
+        def finish_old_detection(now,publish=None):
             self.service.set_camera_enabled(False)
             self.service.set_camera_enabled(True)
             return observation,b'old-jpeg'
@@ -252,13 +256,17 @@ class IndependentSteeringTests(unittest.TestCase):
         with patch.object(self.service,'_detect_camera',return_value=(observation,b'jpeg')):
             self.service.camera_step()
         self.service.step()
+        self.assertEqual(self.service.phase,'running')
+        self.now+=.51
+        self.assertTrue(self.service.snapshot()['camera']['preview_stale'])
+        self.now+=.50;self.service.received=self.now;self.service.step()
         self.assertEqual(self.service.phase,'fault')
         self.assertEqual(self.service.camera_observation.reason,'low_confidence')
-        self.assertEqual(self.service.preview_jpeg(),b'jpeg')
+        self.assertIsNone(self.service.preview_jpeg())
         self.assertEqual(self.packets[-1],f'@A3,{sid}\n'.encode())
         self.now+=.3
         self.assertTrue(self.service.snapshot()['camera']['preview_stale'])
-        self.assertEqual(self.service.preview_jpeg(),b'jpeg')
+        self.assertIsNone(self.service.preview_jpeg())
         self.now+=.8
         self.assertIsNone(self.service.preview_jpeg())
         self.assertEqual(self.service.phase,'fault')
@@ -292,7 +300,9 @@ class IndependentSteeringTests(unittest.TestCase):
             self.assertEqual(self.service.phase,'running')
             self.assertEqual(len(self.packets),sent)
             self.now+=.045
-        self.now+=.26;self.service.step()
+        self.now+=.26;self.service.received=self.now;self.service.step()
+        self.assertEqual(self.service.phase,'running')
+        self.now+=1.01;self.service.received=self.now;self.service.step()
         self.assertEqual(self.service.phase,'fault')
 
     def test_camera_worker_submits_immediately_after_detection(self):
@@ -321,6 +331,59 @@ class IndependentSteeringTests(unittest.TestCase):
         self.service.camera_observation=camera_observation({'valid':True,'confidence':.59,'lookahead_error_norm':0,'image_angle_deg':0},1,self.now-.4,.35)
         self.service.start('camera')
         self.assertIsNone(self.service.camera_observation)
+
+    def test_source_specific_freshness_boundaries(self):
+        for source,age,valid in [('camera',.499,True),('camera',.501,False),('imu',.149,True),('imu',.151,False)]:
+            o=SteeringObservation(source,1,10.,True,1.,'ok',image_offset_norm=.2,image_heading_deg=0.,relative_heading_deg=10.,yaw_rate_deg_s=0.)
+            p=standalone_proposal(o,DEFAULTS[source],10.+age)
+            self.assertEqual(p.valid,valid)
+            if valid:arbitrate(source,p,10.+age)
+            else:
+                with self.assertRaises(ValueError):arbitrate(source,p,10.+age)
+
+    def test_camera_loss_sends_neutral_and_recovers_without_rearming(self):
+        sid=self.arm('camera')
+        def frame(seq,valid=True):
+            self.service.camera_observation=camera_observation({'valid':valid,'reason':'no_line','confidence':.95 if valid else 0.,'lookahead_error_norm':-.3,'image_angle_deg':0},seq,self.now)
+        frame(1);self.service.step()
+        self.now+=.05;frame(2,False);self.service.step()
+        self.assertEqual(self.service.phase,'running')
+        self.assertTrue(self.packets[-1].endswith(b',0.0000\n'))
+        self.assertFalse(self.service.can_drive())
+        for _ in range(8):
+            self.now+=.1;self.service.received=self.now;self.service.step()
+            self.assertEqual(self.service.phase,'running')
+            self.assertTrue(self.packets[-1].endswith(b',0.0000\n'))
+        self.now+=.05;frame(3);self.service.step()
+        self.assertEqual(self.service.identifier,sid)
+        self.assertIsNone(self.service.camera_invalid_since)
+        self.assertGreater(self.service.proposal.correction,0)
+        self.now+=.05;frame(4,False);self.service.step()
+        self.now+=1.001;self.service.received=self.now;self.service.step()
+        self.assertEqual(self.service.phase,'fault')
+        frame(5);self.service.step()
+        self.assertEqual(self.service.phase,'fault')
+        self.assertEqual(self.packets[-1],f'@A3,{sid}\n'.encode())
+
+    def test_control_published_before_slow_overlay(self):
+        sid=self.arm('camera')
+        observation=camera_observation({'valid':True,'confidence':.95,'lookahead_error_norm':-.3,'image_angle_deg':0},1,self.now)
+        def detect(now,publish=None):
+            self.now+=.1
+            publish(observation)
+            self.assertTrue(self.packets[-1].startswith(f'@A2,{sid},'.encode()))
+            self.now+=.3 # Encoding has not delayed the first control submission.
+            return observation,b'jpeg'
+        with patch.object(self.service,'_detect_camera',side_effect=detect):self.service.camera_step()
+        self.assertEqual(self.service.phase,'running')
+
+    def test_camera_read_errors_and_no_frames_use_same_grace(self):
+        self.arm('camera');self.service.camera_error='相机读取失败'
+        self.service.step()
+        self.assertEqual(self.service.phase,'running')
+        self.assertTrue(self.packets[-1].endswith(b',0.0000\n'))
+        self.now+=1.001;self.service.received=self.now;self.service.step()
+        self.assertEqual(self.service.phase,'fault')
 
 
 if __name__=='__main__':unittest.main()

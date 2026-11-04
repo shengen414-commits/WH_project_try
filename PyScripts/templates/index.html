@@ -184,7 +184,7 @@
             <details class="manual-probe-range"><summary>相机独立参数与中线预览</summary>
                 <label class="sync-hint"><input id="independent-camera-toggle" type="checkbox"> 开启相机检测预览（独立于顶部 LeftCam）</label>
                 <p id="independent-camera-status" class="sync-hint" role="status">检测预览已关闭；开启并等待出图后再启动相机转向。</p>
-                <p class="sync-hint">使用左相机与黑胶带检测，共用一次硬件采集。检测预览开关与顶部显示独立；关闭转向或发生丢线后仍继续更新预览。画面偏差是归一化图像偏差，图像斜率不是车身真实航向。先核对安装朝向与画面中心；丢线、歧义、低置信度或图像超时会归中停动力，需关闭后重新开启。</p>
+                <p class="sync-hint">使用左相机与黑胶带检测，共用一次硬件采集。检测预览开关与顶部显示独立；关闭转向或发生丢线后仍继续更新预览。画面偏差是归一化图像偏差，图像斜率不是车身真实航向。先核对安装朝向与画面中心；相机观测有效期500ms；丢线、低置信度或图像超时先暂时归中，1秒内恢复可继续转向，连续无效满1秒才锁定停动力，需关闭后重新开启。串口失联仍由固件250ms保护。</p>
                 <p id="independent-camera-travel" class="sync-hint">相机转向行程：右1130 μs，中位1500 μs，左1850 μs。</p>
                 <form id="independent-camera-form" class="independent-settings">
                     <label>横向增益 μs/归一化偏差<input name="kp" type="number" min="0" max="1000" step="1" value="200" required></label>
@@ -297,7 +297,7 @@
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
     <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=2"></script>
     <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=6-fixed-1100-1900"></script>
-    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=11-stage-timing"></script>
+    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=12-camera-grace"></script>
     <script src="{{ url_for('static', filename='js/line_response.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=6-independent"></script>
 </body>

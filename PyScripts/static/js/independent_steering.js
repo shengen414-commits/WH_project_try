@@ -8,7 +8,7 @@
         control_gap:'固件控制循环超时',rc_takeover:'遥控器已接管',tracking:'正在响应偏差',waiting_target:'等待有效观测',imu_calibrating:'静止标定中'};
     const formats=(value,digits=2)=>typeof value==='number'?value.toFixed(digits):'—';
     const detectionReasons={no_line:'未找到黑胶带',low_confidence:'中线置信度不足',ambiguous_lines:'存在多条候选线',
-        observation_stale:'观测超过150ms',roi_too_short:'当前图像的ROI高度不足以采样',no_consistent_path:'近端或前视区域缺少连续可靠的胶带路径',insufficient_straight_support:'有效直线点不足',poor_fit:'中线拟合不可靠',no_far_support:'前视区域没有有效中线'};
+        observation_stale:'观测超过有效期（相机500ms，IMU150ms）',roi_too_short:'当前图像的ROI高度不足以采样',no_consistent_path:'近端或前视区域缺少连续可靠的胶带路径',insufficient_straight_support:'有效直线点不足',poor_fit:'中线拟合不可靠',no_far_support:'前视区域没有有效中线'};
     const zeroReasons={idle:'等待IMU初始化',collecting:'收集稳定样本',complete:'标定完成',
         sample_gap:'采样间断，重新采集',gyro_out_of_range:'原始角速度过大，重新采集',
         accel_out_of_range:'加速度不接近1g，重新采集',gyro_unstable:'角速度波动过大，重新采集',
@@ -45,6 +45,7 @@
         const camera=data.camera||{},firmware=data.firmware||{},observation=data.source==='camera'&&camera.enabled?camera.observation:data.observation,proposal=data.proposal;
         const age=data.source==='camera'&&camera.enabled?camera.observation_age_ms:data.observation_age_ms;
         let detail=data.phase==='fault'?(reasons[data.message]||data.message||reasons[firmware.reason]):(reasons[firmware.reason]||data.message);
+        if(data.camera_recovery?.active)detail=`暂时归中，等待中线恢复 ${formats(data.camera_recovery.elapsed_ms,0)}/1000 ms | ${detectionReasons[data.camera_recovery.reason]||data.camera_recovery.reason}`;
         if(detail?.startsWith('观测无效：')){const code=detail.slice('观测无效：'.length);detail=`观测无效：${detectionReasons[code]||code}`;}
         if(data.phase==='fault'&&data.fault_detail){
             const fault=data.fault_detail;
@@ -55,7 +56,7 @@
         el('independent-observation').textContent=observation?(data.phase==='running'?'最新观测：':data.source==='camera'&&camera.enabled?'检测预览（未控制）：':'历史观测（未控制）：')+(observation.source==='imu'?
             `相对航向 ${formats(observation.relative_heading_deg)}° | 左转正角速度 ${formats(observation.yaw_rate_deg_s)}°/s | 横向位置未知`:
             `画面偏差 ${formats(observation.image_offset_norm,3)} | 图像方向 ${formats(observation.image_heading_deg)}° | 置信度 ${formats(observation.confidence)}`)+` | 数据年龄 ${formats(age,0)} ms`:'观测：等待新鲜数据';
-        el('independent-command').textContent=proposal?`独立候选修正 ${formats(proposal.correction,3)}（左正右负${data.phase==='running'?'':'；已暂停，不发送'}） | 单一输出通道 | ${data.fresh?'固件状态新鲜':'固件状态过期'}`:'候选输出：等待观测与固件确认';
+        el('independent-command').textContent=data.camera_recovery?.active?'当前发送归中目标1500 μs；1秒内恢复有效中线可继续转向':proposal?`独立候选修正 ${formats(proposal.correction,3)}（左正右负${data.phase==='running'?'':'；已暂停，不发送'}） | 单一输出通道 | ${data.fresh?'固件状态新鲜':'固件状态过期'}`:'候选输出：等待观测与固件确认';
         const calculation=el('independent-camera-output');
         if(data.source==='camera'&&proposal?.limited_us!=null&&cameraSettings){
             const target=Math.round(Math.max(cameraSettings.low_us,Math.min(cameraSettings.high_us,1500+cameraSettings.direction*proposal.limited_us)));
