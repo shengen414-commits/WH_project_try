@@ -64,7 +64,7 @@ int main() {
     assert(!startExternalYawControl());
     frameReady = false; assert(!startLineFollowing()); frameReady = true;
     servoAttachSucceeds = false; assert(!startLineFollowing()); servoAttachSucceeds = true;
-    assert(handleAutomaticSteeringConfig("W1450,1500,1550"));
+    assert(handleAutomaticSteeringConfig("W1200,1500,1800"));
     assert(!handleAutomaticSteeringConfig("W1600,1500,1550"));
     feed("N1\n");
     assert(automaticSteeringState().mode == AutomaticSteeringMode::Line);
@@ -159,7 +159,7 @@ int main() {
     assert(!handleAutomaticSteeringConfig("C2"));
     assert(!handleAutomaticSteeringConfig("F-10,0.22,0.16"));
     cycle(0x18,20000); // Finish the preceding rollover/old emergency-latch scenario.
-    feed("V\nS0002,499\nR\n"); // Explicit calibration restores center +/-300 travel.
+    feed("V\nS0002,499\nR\n"); // Legacy save request cannot alter the fixed center.
     feed("@K180,120,0.100,600,1,500\n");
     assert(Serial.output.find("[LINE_CFG] id=500 ok=1") != std::string::npos);
     assert(automaticSteeringState().algorithm == LineControlAlgorithm::Proportional);
@@ -209,3 +209,5 @@ int main() {
     assert(Serial.output.find("mode=OFF") != std::string::npos);
     assert(Serial.output.find("reason=line_too_wide") != std::string::npos);
 }
+
+MPU6050CalibrationStatus mpu6050CalibrationStatus(){return {0,0,0,0,1,"zero_timeout"};}

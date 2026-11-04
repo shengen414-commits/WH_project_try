@@ -47,8 +47,12 @@ def validate_settings(source,data):
 
 
 class IndependentSteering:
-    def __init__(self,path,write,camera,clock=time.monotonic,probe=None,autostart=True):
+    def __init__(self,path,write,camera,clock=time.monotonic,probe=None,autostart=True,camera_capture=None):
         self.path=Path(path);self.write=write;self.camera=camera;self.clock=clock;self.probe=probe;self.autostart=autostart
+        self.camera_capture=camera_capture or (lambda enabled:None)
+        self.camera_enabled=False;self.camera_worker=None;self.camera_shutdown=threading.Event();self.camera_wakeup=threading.Event()
+        self.camera_generation=0;self.camera_observation=None;self.camera_error=None;self.jpeg_at=None;self.camera_processing_ms=None
+        self.zero_status={};self.detector_signature=None;self.camera_toggle_lock=threading.Lock()
         self.lock=threading.RLock();self.settings=copy.deepcopy(DEFAULTS)
         self.owned=False;self.source=None;self.phase='off';self.message='独立转向未开启'
         self.identifier=0;self.sequence=0;self.started=0.;self.received=None
@@ -62,6 +66,58 @@ class IndependentSteering:
                 for source in ('imu','camera'):self.settings[source]=validate_settings(source,saved['profiles'][source])
             except (ValueError,TypeError,KeyError,OSError) as exc:
                 self.error=f'独立转向参数未载入：{exc}；请检查并保存参数后再开启'
+
+    def set_camera_enabled(self, enabled):
+        if type(enabled) is not bool:raise ValueError('enabled需为布尔值')
+        with self.camera_toggle_lock:
+            if not enabled and self.owned and self.source=='camera':self.stop()
+            self.camera_capture(enabled)
+            with self.lock:
+                if enabled==self.camera_enabled:return
+                self.camera_enabled=enabled;self.camera_generation+=1
+                self.camera_observation=None;self.camera_error=None;self.jpeg=None;self.jpeg_at=None
+                if enabled:
+                    self.last_frame=None
+                    if self.autostart and (self.camera_worker is None or not self.camera_worker.is_alive()):
+                        self.camera_worker=threading.Thread(target=self._camera_work,name='steering-camera-preview',daemon=True)
+                        self.camera_worker.start()
+            self.camera_wakeup.set()
+
+    def preview_jpeg(self):
+        with self.lock:
+            observation=self.camera_observation
+            if (not self.camera_enabled or self.jpeg_at is None or self.camera_error or observation is None or
+                    not 0<=self.clock()-observation.observed_at<=.4 or not 0<=self.clock()-self.jpeg_at<=.7):return None
+            return self.jpeg
+
+    def camera_step(self):
+        with self.lock:
+            if not self.camera_enabled:return
+            generation=self.camera_generation
+        started=self.clock()
+        try:
+            result=self._detect_camera(started)
+            with self.lock:
+                if generation!=self.camera_generation:return
+                if result is not None:
+                    observation,jpeg=result
+                    self.camera_observation=observation
+                    self.camera_processing_ms=(self.clock()-started)*1000
+                    if jpeg is not None:
+                        self.jpeg=jpeg;self.jpeg_sequence+=1;self.jpeg_at=self.last_preview=self.clock()
+                self.camera_error=None
+        except Exception as exc:
+            with self.lock:
+                if generation!=self.camera_generation:return
+                self.camera_error=str(exc);self.jpeg=None;self.jpeg_at=None
+        # A bad frame only ends control. The preview worker keeps observing/recovering.
+
+    def _camera_work(self):
+        while not self.camera_shutdown.is_set():
+            started=self.clock()
+            self.camera_step()
+            self.camera_wakeup.wait(max(.005,.04-(self.clock()-started)) if self.camera_enabled else .2)
+            self.camera_wakeup.clear()
 
     def blocking(self):return self.owned
 
@@ -91,12 +147,13 @@ class IndependentSteering:
             if self.owned or self.worker is not None and self.worker.is_alive():raise ValueError('先关闭上一种独立模式')
             if self.error:raise ValueError(self.error)
             if source=='camera':
+                if not self.camera_enabled:raise ValueError('请先开启下方相机检测预览，等待新鲜图像后再开启转向')
                 frame=self.camera()
-                if frame is None or not 0<=self.clock()-frame[1]<=.15:raise ValueError('左相机没有新鲜图像，请先开启并等待出图')
+                if frame is None or not 0<=self.clock()-frame[1]<=.15:raise ValueError('检测相机没有新鲜图像，请检查下方检测预览状态与相机连接')
             self.identifier=secrets.randbelow(0x7fffffff)+1
             self.source=source;self.started=self.clock();self.received=None;self.owned=True;self.phase='arming'
             self.observation=self.proposal=None;self.firmware={};self.sequence=0;self.last_imu_ms=None
-            self.timer=DeviceClock();self.last_probe=-100.;self.last_frame=None;self.jpeg=None;self.detector=None
+            self.timer=DeviceClock();self.last_probe=-100.;self.zero_status={}
             self.stop_event=threading.Event();self.request={'action':'start','status':'pending','id':self.identifier}
             p=self.settings[source];number=1 if source=='imu' else 2
             self.message='等待固件确认；IMU需保持车身静止完成零偏标定' if source=='imu' else '等待固件确认相机独立模式'
@@ -132,6 +189,18 @@ class IndependentSteering:
         if not self.owned:return False
         with self.lock:
             try:
+                if line.startswith('[ASSIST_ZERO] '):
+                    # Optional diagnostics cannot arm control or invalidate valid control feedback.
+                    try:
+                        f=dict(re.findall(r'(\w+)=([^\s]+)',line))
+                        if int(f['id'])!=self.identifier or self.source!='imu':return False
+                        values={key:float(f[key]) for key in ('bias','sd','a')}
+                        samples,restarts=int(f['n']),int(f['reset'])
+                        if (not all(math.isfinite(v) for v in values.values()) or
+                            not 0<=samples<=200 or not 0<=restarts<=100000 or values['sd']<0 or values['a']<0):return False
+                        self.zero_status={**values,'samples':samples,'restarts':restarts,'reason':f['reason']}
+                        return True
+                    except (KeyError,ValueError,TypeError,OverflowError):return False
                 if line.startswith('[SYNC],'):
                     _,identifier,ms=line.split(',');self.timer.reply(int(identifier),int(ms),now);return True
                 if line.startswith('[ASSIST_IMU],'):
@@ -183,7 +252,7 @@ class IndependentSteering:
     def _stopped(self):
         self.owned=False;self.phase='off';self.stop_event.set();self.request['status']='confirmed';self.message='已归中停动力并退出独立模式'
 
-    def _camera_observation(self,now):
+    def _detect_camera(self,now):
         try:from .camera_line_detector import BlackTapeDetector,DetectorConfig,render_overlay
         except ImportError:from camera_line_detector import BlackTapeDetector,DetectorConfig,render_overlay
         import cv2
@@ -195,17 +264,25 @@ class IndependentSteering:
         sequence,read_at,image=frame
         if sequence==self.last_frame:return None
         self.last_frame=sequence;p=self.settings['camera']
-        if self.detector is None:
+        signature=tuple(p[key] for key in ('roi_top','target_x','lookahead','threshold_mode','threshold'))
+        if self.detector is None or signature!=self.detector_signature:
+            self.detector_signature=signature
             self.detector=BlackTapeDetector(DetectorConfig(roi_top=p['roi_top'],target_x=p['target_x'],lookahead=p['lookahead'],threshold_mode=p['threshold_mode'],threshold=p['threshold']))
+        image=cv2.resize(image,(320,240))
         result,_,_=self.detector.detect(image)
         observation=camera_observation(result,sequence,read_at,p['confidence_min'])
-        # Diagnostics are small, bounded and independent of HTTP rendering.
+        # Publish the overlay together with its observation only if this enable generation still matches.
+        jpeg=None
         if self.clock()-self.last_preview>=.2:
             overlay=render_overlay(image,result,self.detector.config,control_label='CAMERA STEERING')
             overlay=cv2.resize(overlay,(320,240));ok,encoded=cv2.imencode('.jpg',overlay,[cv2.IMWRITE_JPEG_QUALITY,65])
-            if ok:self.jpeg=encoded.tobytes();self.jpeg_sequence+=1
-            self.last_preview=self.clock()
-        return observation
+            if ok:jpeg=encoded.tobytes()
+        return observation,jpeg
+
+    def _camera_observation(self, now):
+        # Preview has its own worker; the controller consumes its latest immutable result.
+        if self.camera_error:raise ValueError(self.camera_error)
+        return self.camera_observation
 
     def step(self):
         """One bounded control iteration, also callable with fake hardware in tests."""
@@ -262,9 +339,19 @@ class IndependentSteering:
                     'observation':serialize(self.observation),'proposal':serialize(self.proposal),
                     'observation_age_ms':max(0,(now-self.observation.observed_at)*1000) if self.observation else None,
                     'jpeg_sequence':self.jpeg_sequence,'imu_mount_axes':list(IMU_MOUNT_AXES),
+                    'imu_calibration':dict(self.zero_status),
+                    'camera':{'enabled':self.camera_enabled,'error':self.camera_error,
+                        'observation':serialize(self.camera_observation),
+                        'observation_age_ms':max(0,(now-self.camera_observation.observed_at)*1000) if self.camera_observation else None,
+                        'processing_ms':self.camera_processing_ms,'jpeg_sequence':self.jpeg_sequence},
                     'clock':self.timer.status(now)}
 
     def shutdown(self):
+        self.camera_shutdown.set();self.camera_wakeup.set()
+        self.camera_capture(False)
+        with self.lock:
+            self.camera_enabled=False;self.camera_generation+=1;self.jpeg=None;self.jpeg_at=None
+        if self.camera_worker and self.camera_worker is not threading.current_thread():self.camera_worker.join(1)
         if self.owned:
             try:self.stop()
             except OSError:self.stop_event.set()

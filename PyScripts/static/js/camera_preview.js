@@ -27,6 +27,7 @@
                     }
                 }
             } catch (_) {
+                if (options.clearOnError && enabled && version === generation) clearImage();
                 // Retry without piling requests behind a camera/network failure.
             } finally {
                 cancel(timeout); pending = null;

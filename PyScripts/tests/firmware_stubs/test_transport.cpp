@@ -19,15 +19,14 @@ bool steeringDebug = false;
 int steeringPulse = 1500;
 int steeringMiddle = 1500;
 bool steeringOutputReady() { return steeringDebug; }
-bool expandSteeringDebugRange(bool) { return false; }
+int steeringLow = 1100, steeringHigh = 1900;
 int steeringTargetUs() { return steeringPulse; }
-int steeringLowUs() { return steeringMiddle - 300; }
+int steeringLowUs() { return steeringDebug ? steeringLow : 1200; }
 int steeringCenterUs() { return steeringMiddle; }
-int steeringHighUs() { return steeringMiddle + 300; }
-bool saveCurrentSteeringCenter() {
-    if (!steeringDebug || steeringPulse < 1300 || steeringPulse > 1700) return false;
-    steeringMiddle = steeringPulse;
-    return true;
+int steeringHighUs() { return steeringDebug ? steeringHigh : 1800; }
+bool configureSteeringDebugRange(int low, int high) {
+    if (!steeringDebug || low != 1100 || high != 1900 || steeringPulse < low || steeringPulse > high) return false;
+    steeringLow=low;steeringHigh=high;return true;
 }
 bool setSteeringDebugPulse(int value) {
     if (!steeringDebug || value < steeringLowUs() || value > steeringHighUs()) return false;
@@ -53,7 +52,7 @@ void beginMPU6050Debug() { mpuDebug = true; }
 void endMPU6050Debug() { mpuDebug = false; }
 void handleMPU6050DebugCommand(char value) { mpuCommands += value; }
 void setESCDebugState(bool mute, bool neutral) { diagnosticsMuted = mute; neutralHeld = neutral; }
-void beginSteeringDebug() { steeringDebug = true; steeringPulse = steeringMiddle; }
+void beginSteeringDebug() { steeringDebug = true; steeringPulse = steeringMiddle; steeringLow=1100;steeringHigh=1900; }
 void endSteeringDebug() { steeringDebug = false; steeringPulse = steeringMiddle; }
 void handleSteeringCommand(char value) { steeringCommands += value; }
 unsigned long millis() { return clockMs; }
@@ -212,15 +211,24 @@ int main() {
     assert(autoConfig == "S");  // The manual packet prefix must not steal @S configuration.
 
     feed("V\nS1540,36\nS0002,37\n");
-    assert(steeringMiddle == 1540 && steeringPulse == 1540);
-    assert(Serial.output.find("id=37 ok=1 target=1540 low=1240 mid=1540 high=1840") != std::string::npos);
-    feed("S1800,38\nS0002,39\n");
-    assert(steeringMiddle == 1540 && steeringPulse == 1800);
+    assert(steeringMiddle == 1500 && steeringPulse == 1540);
+    assert(Serial.output.find("id=37 ok=0") != std::string::npos);
+    feed("S1100:1900,");
+    feed("4294967295\n"); // Fragmented longest valid request.
+    assert(steeringLow == 1100 && steeringHigh == 1900 && steeringPulse == 1540);
+    assert(Serial.output.find("id=4294967295 ok=1 target=1540 low=1100 mid=1500 high=1900") != std::string::npos);
+    feed("S1900,38\nS0500:2500,39\n");
+    assert(steeringPulse == 1900 && steeringLow == 1100);
     assert(Serial.output.find("id=39 ok=0") != std::string::npos);
+    Serial.output.clear();
+    feed("S1100:1900,4294967296\nS1100:1900,0\nS1100:1900,12:3\n");
+    assert(Serial.output.empty() && steeringLow == 1100 && steeringPulse == 1900);
     feed("S0000,40\nS0001,41\n");
-    assert(steeringPulse == 1540 && serialNormalMode());
+    assert(steeringPulse == 1500 && serialNormalMode());
 
     Serial.input = std::string(100, '?');
     pollSerialCommands();
     assert(Serial.input.size() == 36);  // Work per loop stays bounded.
 }
+
+MPU6050CalibrationStatus mpu6050CalibrationStatus(){return {0,0,0,0,1,"zero_timeout"};}

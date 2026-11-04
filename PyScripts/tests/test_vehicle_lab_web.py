@@ -139,6 +139,21 @@ class VehicleLabWebTests(unittest.TestCase):
         self.assertEqual(self.client.post('/steering/manual/calibration/remove',json={'pulse_us':1100}).status_code,200)
         self.assertNotIn('right',self.lab.store.snapshot()['actuator']['endpoints'])
 
+    def test_full_manual_range_endpoints_persist_and_export(self):
+        self.manual.update(active=True,fresh=True,ready=True,precise=True,center_us=1500,
+                           request={'id':42,'status':'confirmed','sent_at':9,'confirmed_at':9})
+        for pulse,side,angle in [(500,'right',-30),(2500,'left',30)]:
+            self.manual['target_us']=pulse
+            result=self.client.post('/steering/manual/calibration/endpoint',json={'side':side,'angle_deg':angle,'pulse_us':pulse,'request_id':42})
+            self.assertEqual(result.status_code,200,result.json)
+        restored=ProfileStore(self.root/'profile.json').snapshot()['actuator']
+        self.assertEqual(restored['endpoints']['right']['pulse_us'],500)
+        self.assertEqual(restored['endpoints']['left']['pulse_us'],2500)
+        exported=self.client.get('/steering/manual/calibration/export').get_data(as_text=True)
+        self.assertIn('500,-30,right,1500',exported)
+        self.assertIn('2500,30,left,1500',exported)
+        self.assertEqual(self.writes,[])
+
     def test_endpoint_blocks_unsettled_stale_same_side_and_changed_reference(self):
         self.manual.update(active=True,fresh=True,ready=True,precise=True,center_us=1500,target_us=1600,
                            request={'id':10,'status':'confirmed','sent_at':8,'confirmed_at':9.9})

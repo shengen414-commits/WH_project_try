@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>双路高速感知终端</title>
     <script src="{{ url_for('static', filename='vendor/chartjs/chart.umd.js') }}?v=4.4.8"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='steering-independent-1') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='steering-range-2') }}">
 </head>
 <body>
     <div class="top-bar">
@@ -161,6 +161,7 @@
                 <button id="independent-off" onclick="stopIndependentSteering()">关闭独立转向并归中</button>
             </div>
             <div id="independent-status" class="sync-hint" role="status">独立转向：等待后台状态</div>
+            <div id="independent-imu-calibration" class="sync-hint" role="status"></div>
             <div id="independent-observation" class="sync-hint">观测：—</div>
             <div id="independent-command" class="sync-hint">候选输出：—</div>
             <div id="independent-message" class="sync-hint" role="status"></div>
@@ -177,7 +178,9 @@
                 </form>
             </details>
             <details class="manual-probe-range"><summary>相机独立参数与中线预览</summary>
-                <p class="sync-hint">复用左相机与黑胶带检测。画面偏差是归一化图像偏差，图像斜率不是车身真实航向。先核对安装朝向与画面中心；丢线、歧义、低置信度或图像超时会归中停动力，需关闭后重新开启。</p>
+                <label class="sync-hint"><input id="independent-camera-toggle" type="checkbox"> 开启相机检测预览（独立于顶部 LeftCam）</label>
+                <p id="independent-camera-status" class="sync-hint" role="status">检测预览已关闭；开启并等待出图后再启动相机转向。</p>
+                <p class="sync-hint">使用左相机与黑胶带检测，共用一次硬件采集。检测预览开关与顶部显示独立；关闭转向或发生丢线后仍继续更新预览。画面偏差是归一化图像偏差，图像斜率不是车身真实航向。先核对安装朝向与画面中心；丢线、歧义、低置信度或图像超时会归中停动力，需关闭后重新开启。</p>
                 <form id="independent-camera-form" class="independent-settings">
                     <label>横向增益 μs/归一化偏差<input name="kp" type="number" min="0" max="1000" step="1" value="200" required></label>
                     <label>图像方向增益 μs/°<input name="kd" type="number" min="0" max="10" step=".1" value=".5" required></label>
@@ -193,7 +196,7 @@
                     <label>固定阈值<input name="threshold" type="number" min="0" max="255" step="1" value="80" required></label>
                     <button type="submit">保存相机独立参数</button>
                 </form>
-                <img id="independent-camera-preview" alt="左相机中线检测，冻结时查看状态文字" hidden>
+                <img id="independent-camera-preview" alt="左相机中线检测实时预览" hidden>
             </details>
         </section>
         <details class="manual-steering-panel"><summary>巡线比例响应参数与八路探头</summary>
@@ -218,36 +221,35 @@
                     <button id="manual-steering-start" onclick="manualSteeringAction('start')">进入手动测试</button>
                     <button id="manual-steering-stop" onclick="manualSteeringAction('stop')" disabled>归中并退出</button>
                 </div>
-                <div class="manual-steering-reading">固件输出 <strong id="manual-steering-current">—</strong> μs <span id="manual-steering-range">范围 1200～1800 μs</span></div>
+                <div class="manual-steering-reading">固件输出 <strong id="manual-steering-current">—</strong> μs <span id="manual-steering-range">范围 1100～1900 μs</span></div>
                 <label class="manual-steering-slider-label" for="manual-steering-slider">目标脉宽</label>
-                <input id="manual-steering-slider" type="range" min="1200" max="1800" step="5" value="1500" data-manual-adjust disabled>
-                <div class="manual-steering-values"><span id="manual-steering-low">1200</span><span id="manual-steering-mid">中位 1500</span><span id="manual-steering-high">1800</span></div>
+                <input id="manual-steering-slider" type="range" min="1100" max="1900" step="5" value="1500" data-manual-adjust disabled>
+                <div class="manual-steering-values"><span id="manual-steering-low">1100</span><span id="manual-steering-mid">中位 1500</span><span id="manual-steering-high">1900</span></div>
                 <div class="manual-steering-input-row">
                     <label for="manual-steering-input">目标</label>
-                    <input id="manual-steering-input" type="number" min="1200" max="1800" step="1" value="1500" inputmode="numeric" data-manual-adjust disabled>
+                    <input id="manual-steering-input" type="number" min="1100" max="1900" step="1" value="1500" inputmode="numeric" data-manual-adjust disabled>
                     <span>μs</span><button id="manual-steering-apply" onclick="applyManualSteering()" data-manual-adjust disabled>应用</button>
                 </div>
                 <div class="sync-buttons manual-steering-steps">
-                    <button onclick="stepManualSteering(-1)" data-manual-adjust disabled>−1 μs</button>
-                    <button id="manual-steering-minus" onclick="stepManualSteering(-5)" data-manual-adjust disabled>−5 μs</button>
+                    <button id="manual-step-minus-50" onclick="stepManualSteering(-50)" data-manual-delta="-50" data-manual-adjust disabled>−50 μs</button>
+                    <button id="manual-step-minus-10" onclick="stepManualSteering(-10)" data-manual-delta="-10" data-manual-adjust disabled>−10 μs</button>
+                    <button id="manual-steering-minus" data-manual-delta="-5" onclick="stepManualSteering(-5)" data-manual-adjust disabled>−5 μs</button>
+                    <button data-manual-delta="-1" onclick="stepManualSteering(-1)" data-manual-adjust disabled>−1 μs</button>
                     <button id="manual-steering-center" onclick="manualSteeringAction('center')" data-manual-adjust disabled>舵机回中</button>
-                    <button id="manual-steering-plus" onclick="stepManualSteering(5)" data-manual-adjust disabled>＋5 μs</button>
-                    <button onclick="stepManualSteering(1)" data-manual-adjust disabled>＋1 μs</button>
+                    <button data-manual-delta="1" onclick="stepManualSteering(1)" data-manual-adjust disabled>＋1 μs</button>
+                    <button id="manual-steering-plus" data-manual-delta="5" onclick="stepManualSteering(5)" data-manual-adjust disabled>＋5 μs</button>
+                    <button id="manual-step-plus-10" onclick="stepManualSteering(10)" data-manual-delta="10" data-manual-adjust disabled>＋10 μs</button>
+                    <button id="manual-step-plus-50" onclick="stepManualSteering(50)" data-manual-delta="50" data-manual-adjust disabled>＋50 μs</button>
                 </div>
-                <details class="manual-probe-range"><summary>默认范围不足？逐步扩大探测范围</summary>
-                    <p class="sync-hint">只扩大可输入范围，不会移动舵机。每次25μs，仍需用1～5μs小步试探。车轮不再转动、机构顶住或舵机持续鸣叫时立即退回；软件边界1000～2000μs不是机械安全边界。退出后恢复原控制行程。</p>
-                    <div class="sync-buttons">
-                        <button id="manual-expand-low" onclick="manualSteeringAction('expand_low')" data-manual-adjust disabled>下限扩大25 μs</button>
-                        <button id="manual-expand-high" onclick="manualSteeringAction('expand_high')" data-manual-adjust disabled>上限扩大25 μs</button>
-                    </div>
-                    <small class="sync-hint" id="manual-probe-hint">扩大范围需要新版固件。</small>
-                </details>
-                <div class="sync-buttons"><button id="manual-steering-save-center" onclick="manualSteeringAction('calibrate')" data-manual-adjust disabled>将当前输出保存为直行中位</button></div>
-                <div id="manual-steering-calibration-hint" class="sync-hint">先微调至车轮直行，再保存当前输出。上电回中会采用已保存的中位。</div>
+                <div class="manual-probe-range">
+                    <p class="sync-hint">固定下限 1100 μs · 中位 1500 μs · 上限 1900 μs</p>
+                    <small class="sync-hint" id="manual-probe-hint">手动调试范围固定为1100～1900 μs。</small>
+                </div>
+                <div id="manual-steering-calibration-hint" class="sync-hint">中位固定1500 μs。若此时车轮不直，请调整舵盘或连杆安装。</div>
                 <div id="manual-steering-status" class="sync-hint" role="status" aria-live="polite">先归中油门，再进入手动测试。</div>
                 <section class="manual-calibration">
                     <h4>左右端点与前轮转角标定</h4>
-                    <p class="sync-hint">先调直并保存中位，再记录0°；向两侧逐步调整，停稳后记录。用量角工具测同一前轮，左转为正、右转为负。端点记录可以不填角度；按下记录不会移动舵机，也不会修改自动控制行程。</p>
+                    <p class="sync-hint">固定中位1500μs，先确认车轮直行后记录0°；向两侧逐步调整，停稳后记录。用量角工具测同一前轮，左转为正、右转为负。端点记录可以不填角度；按下记录不会移动舵机，也不会修改自动控制行程。</p>
                     <div class="manual-steering-input-row"><label for="manual-wheel-angle">实测前轮角度</label><input id="manual-wheel-angle" type="number" min="-45" max="45" step="0.1" placeholder="可留空" inputmode="decimal"><span>°</span></div>
                     <div class="sync-buttons">
                         <button id="manual-record-point" onclick="recordManualCalibration('point')" data-calibration-save disabled>记录当前 PWM＋角度</button>
@@ -262,7 +264,7 @@
                     <p id="manual-angle-preview" class="sync-hint">仅在实测区间内插值，查询不会发送舵机命令。</p>
                     <a href="/steering/manual/calibration/export">下载标定 CSV</a>
                     <p id="manual-calibration-message" class="sync-hint" role="status"></p>
-                    <small class="sync-hint">记录保存在香橙派 Vehicle_Calibration/profile.json，与状态测试台共用；重新保存不同中位后需重新记录。估计角度是插值值，不是角度反馈。</small>
+                    <small class="sync-hint">记录保存在香橙派 Vehicle_Calibration/profile.json，与状态测试台共用；更改舵盘或连杆安装后需重新记录。估计角度是插值值，不是角度反馈。</small>
                 </section>
                 <small class="sync-hint">先用小步调整确认实际左右方向。显示值为固件脉宽指令，并非实测车轮角度。</small>
             </div>
@@ -281,12 +283,12 @@
 
     </div>
 
-    <script src="{{ url_for('static', filename='js/camera_preview.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/camera_preview.js') }}?v=2"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}?v=line-prop-3"></script>
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
     <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=2"></script>
-    <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=4-calibration"></script>
-    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=2-path"></script>
+    <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=6-fixed-1100-1900"></script>
+    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=3-live-preview"></script>
     <script src="{{ url_for('static', filename='js/line_response.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=6-independent"></script>
 </body>

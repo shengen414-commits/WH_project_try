@@ -17,9 +17,9 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         const errors = [], commands = [], throttle = [];
         page.on('pageerror', error => errors.push(error.message));
         const manual = { active: false, blocking: false, fresh: false, ready: false, precise: false,
-            calibration_supported: true, center_min_us: 1300, center_max_us: 1700,
-            probe_supported:true, calibration:{center_us:null,points:[],endpoints:{}},
-            target_us: null, low_us: 1200, center_us: 1500, high_us: 1800, serial_open: true, request: { status: 'idle' } };
+            calibration_supported: true, center_min_us: 1500, center_max_us: 1500,
+            range_supported:true,probe_supported:false, calibration:{center_us:null,points:[],endpoints:{}},
+            target_us: null, low_us: 1100, center_us: 1500, high_us: 1900, serial_open: true, request: { status: 'idle' } };
         let next = 100, rejectEntry = false, delayEntry = 0;
         const lineConfig={request:{status:'idle'},applied:null,probes:{fresh:true,valid:true,mask:1,center_channel:0,reason:'valid',side:'left'}};
         const configs=[];
@@ -28,16 +28,15 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         const independent={phase:'off',blocking:false,source:null,request:{status:'idle'},firmware:{},fresh:false,jpeg_sequence:0,settings:{
             imu:{kp:4,kd:.5,deadband:1,max_us:80,slew_us_s:400,direction:1},
             camera:{kp:200,kd:.5,deadband:.03,max_us:80,slew_us_s:400,direction:1,confidence_min:.65,target_x:.5,roi_top:.35,lookahead:.4,threshold_mode:'otsu',threshold:80}}};
-        const independentActions=[];
+        const independentActions=[],cameraToggles=[];let detectionImages=0;
+        independent.camera={enabled:false,observation:null,observation_age_ms:null,error:null,processing_ms:null};
         function ack(target = manual.center_us) {
             const stopping = manual.request.action === 'stop';
-            const calibrating = manual.request.action === 'calibrate';
-            if (calibrating) Object.assign(manual, { center_us: target, low_us: target - 300, high_us: target + 300 });
-            if(manual.request.action==='expand_low')manual.low_us=Math.max(1000,manual.low_us-25);
-            if(manual.request.action==='expand_high')manual.high_us=Math.min(2000,manual.high_us+25);
+            if (manual.request.action === 'range') Object.assign(manual, manual.request.limits);
+            if (stopping) Object.assign(manual, {low_us:1100,high_us:1900});
             Object.assign(manual, { active: !stopping, blocking: !stopping, fresh: true,
                 ready: true, precise: true, target_us: target });
-            manual.request = { ...manual.request, status: 'confirmed', message: stopping ? '已归中并退出手动测试' : calibrating ? `已保存直行中位 ${target}μs，掉电保留` : `ESP32 已确认输出 ${target}μs` };
+            manual.request = { ...manual.request, status: 'confirmed', message: stopping ? '已归中并退出手动测试' : `ESP32 已确认输出 ${target}μs` };
             if(manual.calibration.points.length===3)manual.calibration.estimated_angle_deg=(target-manual.center_us)/10;
         }
         const context = page.context(), external = [];
@@ -71,10 +70,20 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
                 const body = route.request().postDataJSON(); commands.push(body);
                 if (body.action === 'start' && rejectEntry) return route.fulfill({ status: 409, json: { error: '请先结束同步记录' } });
                 manual.request = { id: ++next, action: body.action, target_us: body.pulse_us ?? null,
-                    status: 'pending', sent_at: next, message: '命令已发送，等待 ESP32 确认（最多3秒）' };
+                    limits: {low_us:body.low_us,high_us:body.high_us}, status: 'pending', sent_at: next, message: '命令已发送，等待 ESP32 确认（最多3秒）' };
                 manual.blocking = true;
                 if (body.action === 'start' && delayEntry) await new Promise(resolve => setTimeout(resolve, delayEntry));
                 return route.fulfill({ json: { status: 'requested', request_id: next, state: manual } });
+            }
+            if(url.pathname==='/steering/independent/camera'){
+                const body=route.request().postDataJSON();cameraToggles.push(body);
+                independent.camera.enabled=body.enabled;
+                return route.fulfill({json:independent});
+            }
+            if(url.pathname==='/steering/independent/image'){
+                detectionImages++;
+                if(detectionImages===1)return route.fulfill({status:204});
+                return route.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=','base64')});
             }
             if(url.pathname==='/steering/independent'){
                 const body=route.request().postDataJSON();independentActions.push(body);
@@ -92,7 +101,7 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
                 if(a.points.length===3)a.estimated_angle_deg=(manual.target_us-manual.center_us)/10;
                 return route.fulfill({json:a});
             }
-            if(url.pathname==='/vehicle-lab/actuator/preview')return route.fulfill({json:{pulse_us:1590,sent_to_hardware:false}});
+            if(url.pathname==='/vehicle-lab/actuator/preview')return route.fulfill({json:{pulse_us:1550,sent_to_hardware:false}});
             if (url.pathname === '/set_throttle') { throttle.push(url.searchParams.get('val')); return route.fulfill({ json: { status: 'success' } }); }
             return route.fulfill({ status: 404, body: '' });
         });
@@ -123,26 +132,42 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         assert.deepEqual(commands.at(-1), { action: 'set', pulse_us: 1520 });
         ack(1520);
         await page.waitForFunction(() => !document.getElementById('manual-steering-apply').disabled);
-        await page.locator('#manual-steering-input').fill('1810');
+        await page.locator('#manual-steering-input').fill('1910');
         const beforeInvalid = commands.length;
         await page.locator('#manual-steering-apply').click();
         assert.equal(commands.length, beforeInvalid);
-        assert.ok((await page.locator('#manual-steering-status').innerText()).includes('1200～1800'));
+        assert.ok((await page.locator('#manual-steering-status').innerText()).includes('1100～1900'));
         await page.locator('#manual-steering-input').fill('1540');
         await page.locator('#manual-steering-apply').click();
         await page.waitForFunction(() => document.getElementById('manual-steering-plus').disabled);
         assert.deepEqual(commands.at(-1), { action: 'set', pulse_us: 1540 });
         ack(1540);
         await page.waitForFunction(() => !document.getElementById('manual-steering-center').disabled);
-        await page.locator('#manual-steering-save-center').click();
-        await page.waitForFunction(() => document.getElementById('manual-steering-save-center').disabled);
-        assert.equal(commands.at(-1).action, 'calibrate');
-        assert.equal(await page.locator('#manual-steering-current').innerText(), '1540');
-        ack(1540);
-        await page.waitForFunction(() => document.getElementById('manual-steering-mid').textContent.includes('1540'));
-        assert.equal(await page.locator('#manual-steering-slider').getAttribute('min'), '1240');
-        assert.equal(await page.locator('#manual-steering-slider').getAttribute('max'), '1840');
-        assert.ok((await page.locator('#manual-steering-status').innerText()).includes('掉电保留'));
+        assert.equal(await page.locator('#manual-steering-mid').innerText(),'中位 1500');
+        assert.equal(await page.locator('#manual-range-low').count(),0);
+        assert.equal(await page.locator('#manual-range-high').count(),0);
+        assert.equal(await page.locator('#manual-steering-slider').getAttribute('min'),'1100');
+        assert.equal(await page.locator('#manual-steering-slider').getAttribute('max'),'1900');
+        for(const [id,target] of [['manual-step-minus-10',1530],['manual-step-minus-50',1480],['manual-step-plus-10',1490],['manual-step-plus-50',1540]]){
+            await page.locator(`#${id}`).click();
+            await page.waitForFunction(()=>document.getElementById('manual-steering-plus').disabled);
+            assert.deepEqual(commands.at(-1),{action:'set',pulse_us:target});
+            ack(target);
+            await page.waitForFunction(()=>!document.getElementById('manual-steering-plus').disabled);
+        }
+        for(const [pulse,id,expected] of [[1880,'manual-step-plus-50',1900],[1120,'manual-step-minus-50',1100]]){
+            await page.locator('#manual-steering-input').fill(String(pulse));
+            await page.locator('#manual-steering-apply').click();
+            await page.waitForFunction(()=>document.getElementById('manual-steering-apply').disabled);
+            ack(pulse);
+            await page.waitForFunction(()=>!document.getElementById('manual-steering-apply').disabled);
+            await page.locator(`#${id}`).click();
+            await page.waitForFunction(()=>document.getElementById('manual-steering-apply').disabled);
+            assert.deepEqual(commands.at(-1),{action:'set',pulse_us:expected});
+            ack(expected);
+            await page.waitForFunction(()=>!document.getElementById('manual-steering-apply').disabled);
+            assert.ok(await page.locator(`#${id}`).isDisabled());
+        }
         await page.locator('#manual-steering-center').click();
         await page.waitForFunction(() => document.getElementById('manual-steering-center').disabled);
         assert.equal(commands.at(-1).action, 'center');
@@ -153,7 +178,7 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         await page.locator('#manual-record-point').click();
         await page.waitForFunction(()=>document.getElementById('manual-calibration-points').children.length===1);
         assert.equal(commands.length,beforeRecord);
-        for(const [pulse,angle,side] of [[1640,10,'left'],[1440,-10,'right']]){
+        for(const [pulse,angle,side] of [[1600,10,'left'],[1400,-10,'right']]){
             await page.locator('#manual-steering-input').fill(String(pulse));
             await page.locator('#manual-steering-apply').click();
             await page.waitForFunction(()=>document.getElementById('manual-steering-plus').disabled);
@@ -167,14 +192,10 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         await page.locator('#manual-preview-angle').fill('5');
         const beforeQuery=commands.length;
         await page.getByRole('button',{name:'计算对应 PWM'}).click();
-        await page.waitForFunction(()=>document.getElementById('manual-angle-preview').textContent.includes('1590'));
+        await page.waitForFunction(()=>document.getElementById('manual-angle-preview').textContent.includes('1550'));
         assert.equal(commands.length,beforeQuery);
-        await panel.locator('.manual-probe-range summary').click();
-        await page.locator('#manual-expand-low').click();
-        await page.waitForFunction(()=>document.getElementById('manual-expand-low').disabled);
-        ack(1440);
-        await page.waitForFunction(()=>document.getElementById('manual-steering-low').textContent==='1215');
-        assert.equal(await page.locator('#manual-steering-current').innerText(),'1440');
+        assert.equal(await page.locator('#manual-steering-mid').innerText(),'中位 1500');
+        assert.equal(await page.locator('#manual-steering-current').innerText(),'1400');
         if (process.argv[2]) await panel.screenshot({ path: process.argv[2] });
         await panel.locator(':scope > summary').click();
         await page.waitForFunction(() => document.getElementById('manual-steering-badge').textContent.includes('等待'));
@@ -241,6 +262,28 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         await page.waitForFunction(()=>!document.getElementById('independent-imu-on').disabled);
         assert.equal(independentActions.filter(v=>v.action==='save').length,2);
         assert.deepEqual(throttle,[]);
+        await page.locator('#independent-camera-toggle').evaluate(node=>node.closest('details').open=true);
+        await page.locator('label.switch').filter({has:page.locator('#cam-toggle-left')}).click();
+        const topBefore=await page.locator('#cam-toggle-left').isChecked();
+        await page.locator('#independent-camera-toggle').check();
+        await page.waitForFunction(()=>document.getElementById('independent-camera-status').textContent.includes('已开启'));
+        assert.deepEqual(cameraToggles.at(-1),{enabled:true});
+        assert.equal(await page.locator('#cam-toggle-left').isChecked(),topBefore);
+        await page.waitForFunction(()=>document.getElementById('independent-camera-preview').getAttribute('src')?.startsWith('blob:'));
+        assert.ok(detectionImages>=2); // First empty frame must not stop subsequent refreshes.
+        Object.assign(independent,{source:'camera',phase:'fault',blocking:true,message:'host_sensor_invalid'});
+        independent.camera.observation={source:'camera',valid:true,confidence:.95,reason:'ok',image_offset_norm:.1,image_heading_deg:2};
+        independent.camera.observation_age_ms=30;
+        await page.waitForFunction(()=>document.getElementById('independent-observation').textContent.includes('30 ms'));
+        const beforeFaultImages=detectionImages;
+        await page.waitForTimeout(650);
+        assert.ok(detectionImages>beforeFaultImages+1); // Fault stops output, not preview.
+        Object.assign(independent,{phase:'off',blocking:false});
+        await page.locator('#independent-camera-toggle').uncheck();
+        await page.waitForFunction(()=>document.getElementById('independent-camera-preview').hidden);
+        const stoppedImages=detectionImages;
+        await page.waitForTimeout(400);
+        assert.equal(detectionImages,stoppedImages);
         if(process.argv[3]){
             await page.setViewportSize({width:1440,height:1000});
             await page.locator('.independent-steering-panel details').evaluateAll(nodes=>nodes.forEach(n=>n.open=true));

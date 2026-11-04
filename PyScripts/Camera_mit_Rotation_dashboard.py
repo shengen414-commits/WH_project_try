@@ -143,7 +143,8 @@ vehicle_lab = VehicleLab(ProfileStore(Path(SAVE_DIR) / 'Vehicle_Calibration' / '
                          Path(SAVE_DIR) / 'State_Records', write_vehicle_lab_packet,
                          camera=lambda: cam_left.get_observation_frame(), probe=probe_vehicle_lab_clock)
 independent_steering = IndependentSteering(Path(SAVE_DIR) / 'Vehicle_Calibration' / 'independent_steering.json',
-    write_vehicle_lab_packet, lambda: cam_left.get_observation_frame(), probe=probe_vehicle_lab_clock)
+    write_vehicle_lab_packet, lambda: cam_left.get_observation_frame(), probe=probe_vehicle_lab_clock,
+    camera_capture=lambda enabled: cam_left.request_capture('independent', enabled))
 
 
 def clamp_throttle_value(value, fallback=1500):
@@ -526,6 +527,8 @@ class HighSpeedCamera:
         # --- 新增：休眠开关 ---
         # 如果是右眼，初始状态设为休眠
         self.is_active = False if name == "Right" else True
+        self.capture_consumers = set()
+        self.capture_lock = threading.Lock()
 
         # 这里只供网页预览和单张快照读取最新帧；录制使用有容量上限的写盘队列。
         # 保留 2 帧即可，避免常驻 420 张 640x480 BGR 图像（约 369 MiB）。
@@ -562,6 +565,8 @@ class HighSpeedCamera:
         if not self.cap.isOpened():
             print(f"⚠️ [{self.name}] 摄像头打不开！请检查 /dev/video{self.src}")
             self.available = False
+            self.cap.release()
+            self.cap = None
         else:
             self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -600,18 +605,24 @@ class HighSpeedCamera:
         self.real_fps = 0.0
         print(f"💤 [{self.name}] 摄像头已释放硬件，进入休眠。")
 
+    def capture_requested(self):
+        with self.capture_lock:
+            return self.is_active or bool(self.capture_consumers)
+
+    def request_capture(self, owner, enabled):
+        # HTTP changes intent only. The single capture thread owns open/read/release.
+        with self.capture_lock:
+            if enabled: self.capture_consumers.add(owner)
+            else: self.capture_consumers.discard(owner)
+
     def set_active(self, state):
-        """供外部(网页)调用的开关接口"""
-        if state and not self.is_active:
-            print(f"🔄 准备唤醒 {self.name} 相机...")
-            self._open_camera()
-            self.is_active = True
-        elif not state and self.is_active:
-            print(f"🔄 准备休眠 {self.name} 相机...")
-            self.is_active = False
+        with self.capture_lock:
+            was_active = self.is_active
+            self.is_active = bool(state)
+        if was_active and not state:
             self.finish_record()
             self.replay.enable(False, self.replay.fps)
-            self._close_camera()
+        # Other consumers (e.g. independent detection) retain acquisition ownership.
 
     def start_record(self, session_id, duration_sec=3):
         with self.record_lock:
@@ -641,46 +652,57 @@ class HighSpeedCamera:
     def _update(self):
         stat_started_at = time.perf_counter()
         stat_frame_count = 0
-        while self.running:
-            # 如果处于休眠状态，或者硬件不可用，则挂起线程
-            if not self.is_active or not self.available:
-                stat_started_at = time.perf_counter()
-                stat_frame_count = 0
-                time.sleep(0.5)
-                continue
-
-            ret, frame = self.cap.read()
-            if ret:
+        next_open = 0.
+        last_read_ok = time.monotonic()
+        try:
+            while self.running:
+                if not self.capture_requested():
+                    if self.cap is not None: self._close_camera()
+                    stat_started_at = time.perf_counter(); stat_frame_count = 0
+                    time.sleep(.05)
+                    continue
+                if not self.available:
+                    if time.monotonic() >= next_open:
+                        self._open_camera(); next_open = time.monotonic() + 1.
+                        last_read_ok = time.monotonic()
+                    if not self.available:
+                        time.sleep(.05); continue
+                try:
+                    ret, frame = self.cap.read()
+                except (cv2.error, OSError):
+                    ret, frame = False, None
+                if not ret:
+                    self.observation_frame = None
+                    self.real_fps = 0.
+                    if time.monotonic()-last_read_ok > .5:
+                        self._close_camera(); next_open = time.monotonic() + .2
+                    time.sleep(.01); continue
+                last_read_ok = time.monotonic()
+                if not self.capture_requested(): continue
                 curr_ns = time.time_ns()
                 mono_ns = time.monotonic_ns()
                 self.frame_id += 1
                 self.buffer.append(frame)
                 self.latest_frame_ns = curr_ns
-                # One immutable publication keeps ID, timestamp and frame together.
                 self.observation_frame = (self.frame_id, mono_ns / 1e9, frame)
-
                 with self.record_lock:
                     if self.is_recording:
                         if mono_ns / 1e9 < self.record_deadline:
                             self.image_recorder.submit(frame, curr_ns, mono_ns, self.frame_id)
                         else:
                             self._finish_record_locked()
-
                 self.replay.submit(frame, curr_ns, mono_ns, self.frame_id)
-
                 stat_frame_count += 1
                 if stat_frame_count >= 100:
                     stat_now = time.perf_counter()
                     elapsed = stat_now - stat_started_at
-                    if elapsed > 0:
-                        self.real_fps = stat_frame_count / elapsed
-                    stat_started_at = stat_now
-                    stat_frame_count = 0
-            else:
-                time.sleep(0.01)
+                    if elapsed > 0: self.real_fps = stat_frame_count / elapsed
+                    stat_started_at = stat_now; stat_frame_count = 0
+        finally:
+            self._close_camera()
 
     def get_observation_frame(self):
-        return self.observation_frame if self.is_active and self.available else None
+        return self.observation_frame if self.capture_requested() and self.available else None
 
     def get_latest_frame(self):
         if not self.is_active:
@@ -1124,6 +1146,18 @@ def independent_steering_command():
     except (ValueError,OSError) as exc:return jsonify(error=str(exc),state=independent_steering.snapshot()),409
 
 
+@app.post('/steering/independent/camera')
+def independent_camera_preview():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) != {'enabled'} or type(data['enabled']) is not bool:
+        return jsonify(error='enabled需为布尔值'), 400
+    try:
+        independent_steering.set_camera_enabled(data['enabled'])
+        return jsonify(independent_steering.snapshot())
+    except (ValueError,OSError) as exc:
+        return jsonify(error=str(exc)), 409
+
+
 @app.get('/steering/independent/status')
 def independent_steering_status():
     return jsonify(independent_steering.snapshot())
@@ -1131,17 +1165,20 @@ def independent_steering_status():
 
 @app.get('/steering/independent/image')
 def independent_steering_image():
-    jpeg=independent_steering.jpeg
-    return Response(jpeg,mimetype='image/jpeg',headers={'Cache-Control':'no-store'}) if jpeg else ('',204)
+    jpeg=independent_steering.preview_jpeg()
+    return Response(jpeg,mimetype='image/jpeg',headers={'Cache-Control':'no-store'}) if jpeg else ('',204,{'Cache-Control':'no-store'})
 
 
 @app.post('/steering/manual')
 def manual_steering_command():
     body = request.get_json(silent=True)
     action = body.get('action') if isinstance(body, dict) else None
-    if action not in ('start', 'set', 'center', 'stop', 'calibrate', 'expand_low', 'expand_high'):
+    if action not in ('start', 'set', 'center', 'stop', 'range'):
         return jsonify(error='无效的手动舵机操作'), 400
     pulse = body.get('pulse_us')
+    limits = (body.get('low_us'), body.get('high_us')) if action == 'range' else None
+    if action == 'range' and not manual_steering.valid_range(limits):
+        return jsonify(error='手动调试范围固定为1100～1900μs'), 400
     if action == 'set':
         state = manual_steering.snapshot()
         if type(pulse) is not int or not state['low_us'] <= pulse <= state['high_us']:
@@ -1173,7 +1210,7 @@ def manual_steering_command():
                 if action == 'start' and not encoder_ready():
                     return jsonify(error='请先退出其他调试模式并等待正常编码器上报'), 409
             with serial_write_lock:
-                request_id, packet = manual_steering.begin(action, pulse)
+                request_id, packet = manual_steering.begin(action, pulse, limits)
                 if esp32_serial.write(packet) != len(packet):
                     raise OSError('串口命令未完整发送')
                 if action == 'start':

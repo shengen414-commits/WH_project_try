@@ -8,6 +8,7 @@
 #include "esc_control.h"
 #include "serial_transport.h"
 #include "automatic_steering.h"
+#include "independent_steering.h"
 
 FakeSerial Serial;
 FakeWire Wire;
@@ -50,7 +51,7 @@ int main() {
     assert(fakePinModes()[5] == INPUT);
     // GPIO4/16 now serve SCL/SDA, not the MPU auxiliary XCL/XDA interface.
     assert(pwmOutputs[14] == 1500 && !serialNormalMode());
-    tick(45);
+    tick(65);
     assert(readMPU6050Sample(sample));
     assert(std::fabs(sample.axG - 1) < .001 && std::fabs(sample.ayG + .5f) < .001);
     assert(std::fabs(sample.azG - 1) < .001 && std::fabs(sample.temperatureC - 46.53f) < .001);
@@ -70,10 +71,25 @@ int main() {
     tick(200);
     assert(readMPU6050Sample(sample) && sample.calibrated);
     assert(std::fabs(sample.gzDps - 2) < .001 && std::fabs(sample.correctedGzDps) < .001);
-    feed("Z\n"); word(8, 655); tick();
-    assert(Serial.output.find("ZERO rejected") != std::string::npos);
-    assert(readMPU6050Sample(sample) && sample.calibrated); // Old good bias is preserved.
-    word(8, 0);
+    // Stable offsets above the old raw 3deg/s threshold are not motion.
+    word(8,393); word(10,-328); word(12,524); feed("Z\n"); tick(200);
+    assert(readMPU6050Sample(sample) && sample.calibrated);
+    assert(std::fabs(sample.gzDps-8)<.001 && std::fabs(sample.correctedGzDps)<.001);
+    assert(std::string(mpu6050CalibrationStatus().reason)=="complete");
+    // A brief acceleration disturbance restarts the window instead of failing immediately.
+    feed("Z\n");tick(20);word(4,0);tick();word(4,16384);tick(200);
+    assert(std::string(mpu6050CalibrationStatus().reason)=="complete");
+    assert(mpu6050CalibrationStatus().restarts==1);
+    // Persistent variation on X, even with a stable Z, must fail and retain the prior bias.
+    feed("Z\n");
+    for(int i=0;i<410;++i){word(8,i%2?655:0);tick();}
+    assert(!mpu6050SensorStatus().calibrating);
+    assert(std::string(mpu6050CalibrationStatus().reason)=="gyro_unstable");
+    assert(readMPU6050Sample(sample) && sample.calibrated && std::fabs(sample.correctedGzDps)<.001);
+    word(8,0);word(10,0);word(12,1376);feed("Z\n");tick(200);
+    assert(std::string(mpu6050CalibrationStatus().reason)=="bias_out_of_range");
+    word(12,524);tick();
+    assert(readMPU6050Sample(sample) && std::fabs(sample.correctedGzDps)<.001);
     feed("Z\nE\nT1900\n");
     assert(Serial.input.empty() && pwmOutputs[14] == 1500);
     assert(Serial.output.find("ZERO canceled") != std::string::npos);
@@ -82,7 +98,7 @@ int main() {
     assert(!readMPU6050Sample(sample));
     assert(Serial.output.find("sample_read_failed") != std::string::npos);
     assert(Serial.output.find("[MPU] a=") == std::string::npos);
-    Wire.shortRead = false; feed("M\n"); tick(45);
+    Wire.shortRead = false; feed("M\n"); tick(65);
     assert(readMPU6050Sample(sample) && !sample.calibrated);
     clockMs += 101; assert(!readMPU6050Sample(sample)); // Age checked even if no driver call occurred.
     feed("R\n");
@@ -92,20 +108,20 @@ int main() {
     Serial.output.clear(); publishEncoder(); publishLineSensor();
     assert(Serial.output.find("[ENC]") != std::string::npos && Serial.output.find("[LINE]") != std::string::npos);
 
-    device(0x69); Serial.output.clear(); feed("M\n"); tick(45);
+    device(0x69); Serial.output.clear(); feed("M\n"); tick(65);
     assert(readMPU6050Sample(sample));
     assert(Serial.output.find("address=0x69 WHO_AM_I=0x68") != std::string::npos);
-    device(0x68, 0x98); Serial.output.clear(); feed("M\n"); tick(45);
+    device(0x68, 0x98); Serial.output.clear(); feed("M\n"); tick(65);
     assert(!readMPU6050Sample(sample));
     assert(Serial.output.find("WHO_AM_I=0x98") != std::string::npos);
     assert(Serial.output.find("WHO_AM_I_mismatch") != std::string::npos);
-    device(); Wire.failWriteRegister = 0x1b; Serial.output.clear(); feed("M\n"); tick(45);
+    device(); Wire.failWriteRegister = 0x1b; Serial.output.clear(); feed("M\n"); tick(65);
     assert(!readMPU6050Sample(sample));
     assert(Serial.output.find("configuration_write_failed") != std::string::npos);
-    device(); Wire.ignoreWrites = true; Serial.output.clear(); feed("M\n"); tick(45);
+    device(); Wire.ignoreWrites = true; Serial.output.clear(); feed("M\n"); tick(65);
     assert(!readMPU6050Sample(sample));
     assert(Serial.output.find("configuration_verify_failed") != std::string::npos);
-    device(); Wire.devices.clear(); Serial.output.clear(); feed("M\n"); tick(45);
+    device(); Wire.devices.clear(); Serial.output.clear(); feed("M\n"); tick(65);
     assert(!readMPU6050Sample(sample));
     assert(Serial.output.find("no_response_at_0x68_or_0x69") != std::string::npos);
     device(); Wire.beginOK = false; Serial.output.clear(); feed("M\n"); tick();
@@ -114,7 +130,7 @@ int main() {
     device(); feed("M\nN0\n"); assert(serialNormalMode() && !Wire.open);
     // Six-axis data remains diagnostic only; it has not armed the gyro PID.
     assert(!handleAutomaticSteeringConfig("H1"));
-    device(); feed("o\n"); tick(45); Serial.output.clear();
+    device(); feed("o\n"); tick(65); Serial.output.clear();
     tick(10); publishEncoder(); publishLineSensor();
     assert(Serial.output.find("[IMU],") != std::string::npos);
     assert(Serial.output.find("[MPU] a=") == std::string::npos);
@@ -122,20 +138,20 @@ int main() {
     feed("T2000\nB1900\n"); tick(); assert(pwmOutputs[14] == 1500);
     Wire.shortRead = true; Serial.output.clear(); tick();
     assert(Serial.output.find("[IMU],") == std::string::npos && !readMPU6050Sample(sample));
-    device(); feed("M\n"); tick(45); Serial.output.clear(); tick(20);
+    device(); feed("M\n"); tick(65); Serial.output.clear(); tick(20);
     assert(Serial.output.find("[MPU] a=") != std::string::npos);
     assert(Serial.output.find("[IMU],") == std::string::npos);
     feed("R\n"); assert(serialNormalMode() && !Wire.open);
 
     // The reusable sensor driver runs without diagnostic UART or servo ownership.
     Serial.output.clear(); beginMPU6050Sensor();
-    for (int i = 0; i < 45; ++i) { clockMs += 10; updateMPU6050Sensor(); }
+    for (int i = 0; i < 65; ++i) { clockMs += 10; updateMPU6050Sensor(); }
     assert(readMPU6050Sample(sample));
     assert(Serial.output.empty() && pwmOutputs.count(12) == 0);
     endMPU6050Sensor();
 
     // U combines encoder, line and IMU while neutral remains locked at firmware level.
-    device(); feed("U\n"); tick(45); Serial.output.clear();
+    device(); feed("U\n"); tick(65); Serial.output.clear();
     publishEncoder(); publishLineSensor();
     assert(Serial.output.find("[OBS],") != std::string::npos);
     tick(); publishLineSensor(); // IMU and OBS have separate 10 ms transmission slots.
@@ -163,12 +179,27 @@ int main() {
     Wire.shortRead = true; tick(); publishLineSensor();
     assert(!readMPU6050Sample(sample));
     feed("R\n"); assert(serialNormalMode() && !Wire.open);
-    Serial.output.clear(); feed("V\nS0003,77\n");
-    assert(Serial.output.find("id=77 ok=1 target=1500 low=1175") != std::string::npos);
-    assert(Serial.output.find("proto=3") != std::string::npos && pwmOutputs[12] == 1500);
-    feed("S1175,78\n"); assert(pwmOutputs[12] == 1175);
+    Serial.output.clear(); feed("V\nS1100:1900,77\n");
+    assert(Serial.output.find("id=77 ok=1 target=1500 low=1100") != std::string::npos);
+    assert(Serial.output.find("proto=4") != std::string::npos && pwmOutputs[12] == 1500);
+    feed("S1100,78\n"); assert(pwmOutputs[12] == 1100);
     feed("S0001,79\n");
     assert(serialNormalMode() && pwmOutputs[12] == 1500);
-    Serial.output.clear(); feed("V\nS1175,80\n");
+    Serial.output.clear(); feed("V\nS0500,80\n");
     assert(pwmOutputs[12] == 1500 && Serial.output.find("id=80 ok=0") != std::string::npos);
+    // Full normal-firmware path: real I2C driver + gateway, with a fixed >3deg/s raw bias.
+    feed("R\nN0\nT1500\n");device();
+    word(0,0);word(2,0);word(4,-16384);word(8,393);word(10,-328);word(12,524);
+    Serial.output.clear();feed("@A1,1,90,80,400,1\n");
+    for(int i=0;i<340;++i) {
+        clockMs+=10;updateESC();updateMPU6050Debug();updateAutomaticSteering();updateIndependentSteering();
+        if(i%5==0){char target[48];snprintf(target,sizeof(target),"@A2,90,%d,0\n",i+1);feed(target);}
+    }
+    assert(independentSteeringBlocking() && pwmOutputs[12]==1500);
+    assert(readMPU6050Sample(sample) && sample.calibrated && std::fabs(sample.correctedGzDps)<.001);
+    assert(Serial.output.find("[ASSIST_ZERO] id=90")!=std::string::npos);
+    assert(Serial.output.find("ready=1")!=std::string::npos);
+    assert(Serial.output.find("fault=1")==std::string::npos);
+    feed("@A0,90\n");assert(!independentSteeringBlocking());
+
 }

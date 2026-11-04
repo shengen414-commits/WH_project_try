@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "usage": "reference_only",
+  "test_context": "manual_test; ground_running_not_validated",
+  "source_csv": "steering_calibration.csv",
+  "angle_convention": "left_positive_right_negative",
+  "center_us": 1500,
+  "endpoints": {
+    "right_us": 1130,
+    "left_us": 1850
+  },
+  "points": [
+    {"pulse_us": 1130, "angle_deg": -26.0, "source": "csv_row_2"},
+    {"pulse_us": 1200, "angle_deg": -22.0, "source": "csv_row_3"},
+    {"pulse_us": 1300, "angle_deg": -14.0, "source": "csv_row_4"},
+    {"pulse_us": 1350, "angle_deg": -12.0, "source": "csv_row_5"},
+    {"pulse_us": 1400, "angle_deg": -9.0, "source": "csv_row_6"},
+    {"pulse_us": 1500, "angle_deg": 0.0, "source": "user_defined_neutral; not_a_csv_measurement"},
+    {"pulse_us": 1600, "angle_deg": 9.0, "source": "csv_row_7"},
+    {"pulse_us": 1650, "angle_deg": 12.0, "source": "csv_row_8"},
+    {"pulse_us": 1700, "angle_deg": 17.0, "source": "csv_row_9"},
+    {"pulse_us": 1800, "angle_deg": 20.0, "source": "csv_row_10"},
+    {"pulse_us": 1850, "angle_deg": 26.0, "source": "user_reports_same_angle_as_1870; angle_from_csv_row_11"}
+  ],
+  "saturation_observations": [
+    {
+      "side": "left",
+      "first_reported_limit_us": 1850,
+      "measured_pulse_us": 1870,
+      "measured_angle_deg": 26.0,
+      "source": "csv_row_11_and_user_report",
+      "included_in_interpolation": false
+    }
+  ],
+  "notes": [
+    "原CSV角度为绝对值；根据用户确认，PWM小于1500为右转、大于1500为左转。",
+    "1500/0是用户指定的参考中位；CSV没有1500测量行。",
+    "1850/26依据用户确认的1850与1870同角度，不冒充CSV直接测量点。",
+    "仅在参考点之间分段线性插值，不在参考范围外外推，不把1870作为更大的可用转角。",
+    "只供查询和后续控制模型参考，不自动导入运行标定、不修改控制增益或固件限位。",
+    "地面负载、轮胎、连杆和运行状态可能改变响应，实车应另测并使用独立配置。"
+  ]
+}

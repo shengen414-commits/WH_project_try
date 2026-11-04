@@ -2,6 +2,7 @@ import copy
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from PyScripts.independent_steering import IndependentSteering,DEFAULTS,validate_settings
 from PyScripts.steering_control_pipeline import (SteeringObservation,camera_observation,
     standalone_proposal,arbitrate,line_observation)
@@ -13,6 +14,7 @@ class IndependentSteeringTests(unittest.TestCase):
         self.now=10.;self.packets=[]
         self.service=IndependentSteering(Path(self.temp.name)/'independent.json',self.packets.append,
             lambda:(1,self.now,object()),clock=lambda:self.now,autostart=False)
+        self.service.set_camera_enabled(True)
 
     def arm(self,source):
         self.service.start(source);s=self.service.identifier;p=self.service.settings[source]
@@ -98,15 +100,89 @@ class IndependentSteeringTests(unittest.TestCase):
             self.now+=.001
             return (1,self.now,image)
         self.service.camera=fresh_frame
-        self.arm('camera');self.service.step()
+        self.arm('camera');self.service.camera_step();self.service.step()
         self.assertIsNotNone(self.service.proposal)
         self.assertLess(self.service.proposal.correction,0)
         self.assertIsNotNone(self.service.jpeg)
         blank=np.full_like(image,210)
         self.service.camera=lambda:(2,self.now,blank)
-        self.service.step()
+        self.service.camera_step();self.service.step()
         self.assertEqual(self.service.phase,'fault')
         self.assertTrue(self.packets[-1].startswith(b'@A3,'))
+
+    def test_camera_preview_keeps_processing_after_control_fault_and_recovers_from_read_loss(self):
+        import numpy as np
+        image=np.full((240,320),210,dtype=np.uint8)
+        self.service.camera=lambda:(1,self.now,image)
+        sid=self.arm('camera')
+        self.service.camera_step();self.service.step()
+        self.assertEqual(self.service.phase,'fault')  # No line: stop control only.
+        self.assertTrue(self.service.camera_enabled)
+        self.assertIsNotNone(self.service.preview_jpeg())
+        self.assertTrue(self.packets[-1].startswith(f'@A3,{sid}'.encode()))
+        packets=list(self.packets)
+        self.now+=.25
+        image[:,150:163]=20
+        self.service.camera=lambda:(2,self.now,image)
+        self.service.camera_step();self.service.step()
+        self.assertEqual(self.service.phase,'fault')
+        self.assertTrue(self.service.snapshot()['camera']['observation']['valid'])
+        self.assertEqual(self.packets,packets)  # New valid preview cannot re-arm steering.
+        self.service.camera=lambda:None
+        self.service.camera_step()
+        self.assertIsNone(self.service.preview_jpeg())
+        self.assertIn('超时',self.service.snapshot()['camera']['error'])
+        self.now+=.25
+        self.service.camera=lambda:(3,self.now,image)
+        self.service.camera_step()
+        self.assertIsNotNone(self.service.preview_jpeg())
+        self.assertEqual(self.service.phase,'fault')
+        self.service.set_camera_enabled(False)
+        self.assertEqual(self.service.phase,'stopping')
+        self.assertIsNone(self.service.preview_jpeg())
+
+    def test_camera_capture_switch_and_controllers_have_separate_lifetimes(self):
+        owners=[]
+        self.service.camera_capture=owners.append
+        self.service.set_camera_enabled(False)
+        self.assertEqual(owners,[False])
+        with self.assertRaisesRegex(ValueError,'下方'):self.service.start('camera')
+        self.service.set_camera_enabled(True)
+        self.assertEqual(owners,[False,True])
+        sid=self.arm('camera')
+        self.service.stop()
+        self.service.feed(f'[FOLLOW_ACK] id={sid} action=0 ok=1')
+        self.assertTrue(self.service.camera_enabled)
+        self.assertEqual(owners,[False,True])
+
+    def test_imu_calibration_diagnostics_use_matching_session_and_survive_fault(self):
+        sid=self.arm('imu')
+        line=f'[ASSIST_ZERO] id={sid} n=140 reset=1 bias=8.20 sd=0.040 a=1.001 reason=collecting'
+        self.assertTrue(self.service.feed(line))
+        self.assertEqual(self.service.snapshot()['imu_calibration']['samples'],140)
+        self.assertFalse(self.service.feed(line.replace(f'id={sid}',f'id={sid+1}')))
+        self.service.feed(f'[ASSIST] id={sid} active=1 fault=1 ready=0 reason=gyro_unstable')
+        self.assertEqual(self.service.phase,'fault')
+        self.assertEqual(self.service.snapshot()['imu_calibration']['bias'],8.2)
+
+    def test_frame_from_previous_enable_generation_cannot_reappear_after_toggle(self):
+        observation=camera_observation({'valid':True,'confidence':.95,'lookahead_error_norm':0,'image_angle_deg':0},1,self.now)
+        def finish_old_detection(now):
+            self.service.set_camera_enabled(False)
+            self.service.set_camera_enabled(True)
+            return observation,b'old-jpeg'
+        with patch.object(self.service,'_detect_camera',side_effect=finish_old_detection):
+            self.service.camera_step()
+        self.assertIsNone(self.service.jpeg)
+        self.assertIsNone(self.service.camera_observation)
+
+    def test_optional_zero_diagnostics_cannot_turn_invalid_metrics_into_control_fault(self):
+        sid=self.arm('imu')
+        for line in [f'[ASSIST_ZERO] id={sid} n=-1 reset=0 bias=0 sd=0 a=1 reason=x',
+                     f'[ASSIST_ZERO] id={sid} n=1 reset=0 bias=nan sd=0 a=1 reason=x',
+                     f'[ASSIST_ZERO] id={sid} incomplete']:
+            self.assertFalse(self.service.feed(line))
+            self.assertEqual(self.service.phase,'calibrating')
 
 
 if __name__=='__main__':unittest.main()

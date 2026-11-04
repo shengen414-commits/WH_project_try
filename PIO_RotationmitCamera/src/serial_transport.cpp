@@ -19,7 +19,7 @@ unsigned long lastLineDebugAt = 0;
 uint32_t observeFrameAt = 0, observeImuAt = 0, observeStatusAt = 0, observeEventAt = 0;
 bool observePreferImu = false;
 char command = 0;
-char digits[16]; // Four pulse digits plus comma and uint32 request id.
+char digits[21]; // Sllll:hhhh,id, including a ten-digit uint32 request id.
 unsigned int digitCount = 0;
 unsigned long commandStartedAt = 0;
 bool configPending = false;
@@ -83,6 +83,14 @@ void selectMode(DebugMode mode) {
         observePreferImu = false;
     }
 }
+void manualSteeringAck(uint32_t id, bool ok, const char* reason) {
+    pendingSteeringAckLength = snprintf(pendingSteeringAck, sizeof(pendingSteeringAck),
+        "[SERVO_ACK] id=%lu ok=%d target=%d low=%d mid=%d high=%d manual=%d ready=%d proto=4 reason=%s\n",
+        (unsigned long)id, ok, steeringTargetUs(), steeringLowUs(), steeringCenterUs(), steeringHighUs(),
+        debugMode == DebugMode::Steering, steeringOutputReady(), ok ? "ok" : reason);
+    if (pendingSteeringAckLength >= (int)sizeof(pendingSteeringAck)) pendingSteeringAckLength = 0;
+    publishSteeringAck();
+}
 void manualSteeringRequest(int pulse, uint32_t id) {
     bool ok = false;
     const char* reason = "not_manual";
@@ -90,25 +98,19 @@ void manualSteeringRequest(int pulse, uint32_t id) {
         if (debugMode == DebugMode::Steering) selectMode(DebugMode::Normal);
         ok = true;
     } else if (debugMode == DebugMode::Steering) {
-        if (pulse == 2) {
-            ok = saveCurrentSteeringCenter();
-            reason = steeringTargetUs() < SteeringConfig::CENTER_LOW_US || steeringTargetUs() > SteeringConfig::CENTER_HIGH_US
-                     ? "center_range" : "save_failed";
-        } else if (pulse == 3 || pulse == 4) {
-            ok = expandSteeringDebugRange(pulse == 3);
-            reason = !steeringOutputReady() ? "pwm_failed" : "absolute_limit";
-        } else {
+        if (pulse == 2) reason = "fixed_center";
+        else if (pulse == 3 || pulse == 4) reason = "range_required";
+        else {
             ok = setSteeringDebugPulse(pulse == 0 ? steeringCenterUs() : pulse);
             reason = !steeringOutputReady() ? "pwm_failed" : "out_of_range";
         }
     }
-    if (ok) reason = "ok";
-    pendingSteeringAckLength = snprintf(pendingSteeringAck, sizeof(pendingSteeringAck),
-        "[SERVO_ACK] id=%lu ok=%d target=%d low=%d mid=%d high=%d manual=%d ready=%d proto=3 reason=%s\n",
-        (unsigned long)id, ok, steeringTargetUs(), steeringLowUs(), steeringCenterUs(), steeringHighUs(),
-        debugMode == DebugMode::Steering, steeringOutputReady(), reason);
-    if (pendingSteeringAckLength >= (int)sizeof(pendingSteeringAck)) pendingSteeringAckLength = 0;
-    publishSteeringAck();
+    manualSteeringAck(id, ok, reason);
+}
+void manualSteeringRange(int low, int high, uint32_t id) {
+    const bool ok = debugMode == DebugMode::Steering && configureSteeringDebugRange(low, high);
+    manualSteeringAck(id, ok, debugMode != DebugMode::Steering ? "not_manual" :
+        !steeringOutputReady() ? "pwm_failed" : "range_invalid");
 }
 }
 bool serialNormalMode() { return debugMode == DebugMode::Normal; }
@@ -191,9 +193,10 @@ void pollSerialCommands() {
             continue;
         }
         if ((command == 'N' && digitCount == 1 && value == ',') ||
-            (command == 'S' && digitCount == 4 && value == ',')) {
+            (command == 'S' && ((digitCount == 4 && (value == ':' || value == ',')) ||
+                                  (digitCount == 9 && digits[4] == ':' && value == ',')))) {
             digits[digitCount++] = value;
-        } else if (value >= '0' && value <= '9' && digitCount < (command == 'S' ? 15U : command == 'N' ? 12U : command == '!' ? 10U : 4U)) {
+        } else if (value >= '0' && value <= '9' && digitCount < (command == 'S' ? 20U : command == 'N' ? 12U : command == '!' ? 10U : 4U)) {
             digits[digitCount++] = value;
         } else if (value == '\n') {
             uint32_t requestId = 0;
@@ -204,7 +207,10 @@ void pollSerialCommands() {
                     if (Serial.availableForWrite() >= n) Serial.write((const uint8_t*)reply, n);
                 }
             } else if (command == 'S') {
-                if (digitCount >= 6 && digits[4] == ',' && parseRequestId(5, requestId)) {
+                if (digitCount >= 11 && digits[4] == ':' && digits[9] == ',' && parseRequestId(10, requestId)) {
+                    digits[4] = digits[9] = '\0';
+                    manualSteeringRange(atoi(digits), atoi(digits + 5), requestId);
+                } else if (digitCount >= 6 && digits[4] == ',' && parseRequestId(5, requestId)) {
                     digits[4] = '\0';
                     manualSteeringRequest(atoi(digits), requestId);
                 }

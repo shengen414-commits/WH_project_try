@@ -5,6 +5,7 @@
 #include <driver/gpio.h>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace {
 enum class Stage { Off, Probe, ResetWait, Configure, Verify, Warmup, Running, Failed };
@@ -29,7 +30,13 @@ constexpr uint8_t config[][2] = {
 };
 bool calibrating = false;
 unsigned int calibrationCount = 0;
-float calibrationMean = 0, calibrationM2 = 0, gyroBiasZ = 0;
+float gyroBiasZ = 0;
+float calibrationMean[6] = {}, calibrationM2[6] = {};
+unsigned int calibrationRestarts = 0;
+float calibrationStd = 0, calibrationAcceleration = 0;
+const char* calibrationReason = "idle";
+const char* calibrationLastRejection = "zero_timeout";
+uint32_t calibrationSampleAt = 0;
 uint32_t calibrationAt = 0;
 constexpr unsigned int CALIBRATION_SAMPLES = 200;
 
@@ -72,33 +79,67 @@ bool readRegisters(uint8_t reg, uint8_t* data, uint8_t length) {
 int16_t signedWord(const uint8_t* data) {
     return (int16_t)((uint16_t(data[0]) << 8) | uint16_t(data[1]));
 }
+void resetCalibrationWindow(const char* reason) {
+    calibrationCount = 0;
+    for (unsigned int i=0;i<6;++i) calibrationMean[i] = calibrationM2[i] = 0;
+    calibrationStd = 0;
+    calibrationReason = reason;
+    if (std::strcmp(reason,"collecting")!=0) calibrationLastRejection=reason;
+    ++calibrationRestarts;
+}
+void rejectCalibration(const char* reason) {
+    calibrating = false; calibrationReason = reason;
+    char text[112];
+    snprintf(text,sizeof(text),"ZERO rejected: %s n=%u resets=%u sd=%.3f a=%.3f; previous bias kept",
+        reason,calibrationCount,calibrationRestarts,calibrationStd,calibrationAcceleration);
+    output(text);
+}
 void calibrateSample() {
     if (!calibrating) return;
-    const float acceleration = std::sqrt(latest.axG * latest.axG + latest.ayG * latest.ayG + latest.azG * latest.azG);
-    const float gyro = std::sqrt(latest.gxDps * latest.gxDps + latest.gyDps * latest.gyDps + latest.gzDps * latest.gzDps);
-    if (acceleration < 0.85f || acceleration > 1.15f || gyro > 3 ||
-        uint32_t(millis() - calibrationAt) > 4000) {
-        calibrating = false; output("ZERO rejected: motion/gap detected; previous bias kept"); return;
+    const uint32_t now=millis();
+    calibrationAcceleration = std::sqrt(latest.axG*latest.axG + latest.ayG*latest.ayG + latest.azG*latest.azG);
+    if (uint32_t(now-calibrationAt)>4000) { rejectCalibration(calibrationLastRejection); return; }
+    if (uint32_t(now-calibrationSampleAt)>30) resetCalibrationWindow("sample_gap");
+    calibrationSampleAt=now;
+    // Raw DC offset is what this calibration measures, not proof of motion.
+    // MPU-6050 initial zero-rate tolerance is +/-20 deg/s (product specification).
+    if (calibrationAcceleration<.85f || calibrationAcceleration>1.15f) {
+        resetCalibrationWindow("accel_out_of_range"); return;
     }
+    if (std::fabs(latest.gxDps)>25 || std::fabs(latest.gyDps)>25 || std::fabs(latest.gzDps)>25) {
+        resetCalibrationWindow("gyro_out_of_range"); return;
+    }
+    const float values[]={latest.gxDps,latest.gyDps,latest.gzDps,latest.axG,latest.ayG,latest.azG};
     ++calibrationCount;
-    float delta = latest.gzDps - calibrationMean;
-    calibrationMean += delta / calibrationCount;
-    calibrationM2 += delta * (latest.gzDps - calibrationMean);
-    if (calibrationCount >= CALIBRATION_SAMPLES) {
-        calibrating = false;
-        if (calibrationM2 / (calibrationCount - 1) > 0.25f) {
-            output("ZERO rejected: gyro unstable; previous bias kept"); return;
-        }
-        gyroBiasZ = calibrationMean; latest.calibrated = true;
-        latest.correctedGzDps = latest.gzDps - gyroBiasZ;
-        output("ZERO complete: gyro Z bias saved in RAM only");
+    for (unsigned int i=0;i<6;++i) {
+        const float delta=values[i]-calibrationMean[i];
+        calibrationMean[i]+=delta/calibrationCount;
+        calibrationM2[i]+=delta*(values[i]-calibrationMean[i]);
     }
+    calibrationReason="collecting";
+    if (calibrationCount>1) {
+        calibrationStd=0;
+        for (unsigned int i=0;i<3;++i)
+            calibrationStd=max(calibrationStd,std::sqrt(max(0.f,calibrationM2[i]/(calibrationCount-1))));
+    }
+    if (calibrationCount<CALIBRATION_SAMPLES) return;
+    if (calibrationStd>.5f) {resetCalibrationWindow("gyro_unstable");return;}
+    for (unsigned int i=3;i<6;++i) {
+        if (calibrationM2[i]/(calibrationCount-1)>.0004f) {resetCalibrationWindow("accel_unstable");return;}
+    }
+    for (unsigned int i=0;i<3;++i) {
+        if (std::fabs(calibrationMean[i])>20) {rejectCalibration("bias_out_of_range");return;}
+    }
+    calibrating=false;calibrationReason="complete";
+    gyroBiasZ=calibrationMean[2];latest.calibrated=true;
+    latest.correctedGzDps=latest.gzDps-gyroBiasZ;
+    output("ZERO complete: stable 200 samples; gyro Z bias saved in RAM only");
 }
 }
 
 void beginMPU6050Sensor() {
     endMPU6050Sensor(); sensorEnabled = true;
-    latest = {}; gyroBiasZ = 0; errors = 0; probe = 0; configIndex = verifyIndex = 0; wrongIdentitySeen = false;
+    latest = {}; gyroBiasZ = 0; calibrationCount=calibrationRestarts=0; calibrationStd=calibrationAcceleration=0; calibrationReason="idle"; errors = 0; probe = 0; configIndex = verifyIndex = 0; wrongIdentitySeen = false;
     if (!pinsValid()) { fail("invalid_or_conflicting_pins"); return; }
     if (MPU6050Config::AD0_PIN >= 0) {
         // Set output latch before changing direction; select address 0x68.
@@ -125,11 +166,11 @@ bool readMPU6050Sample(MPU6050Sample& sample) {
 void handleMPU6050SensorCommand(char command) {
     if (!sensorEnabled) return;
     if (command >= 'a' && command <= 'z') command -= 'a' - 'A';
-    if (command == 'E') { calibrating = false; output("ZERO canceled; ESC remains neutral"); }
+    if (command == 'E') { calibrating = false; calibrationReason="canceled"; output("ZERO canceled; ESC remains neutral"); }
     if (command != 'Z') return;
     MPU6050Sample sample;
     if (!readMPU6050Sample(sample)) { output("ZERO unavailable: wait for valid MPU readings"); return; }
-    calibrating = true; calibrationCount = 0; calibrationMean = calibrationM2 = 0; calibrationAt = millis();
+    calibrating=true; calibrationLastRejection="zero_timeout"; calibrationRestarts=0; resetCalibrationWindow("collecting"); calibrationRestarts=0; calibrationAt=calibrationSampleAt=millis();
     output("ZERO started: keep car STILL for 2 seconds; raw w readings remain unchanged");
 }
 void updateMPU6050Sensor() {
@@ -166,7 +207,7 @@ void updateMPU6050Sensor() {
         return;
     }
     case Stage::Warmup:
-        if (uint32_t(millis() - stageAt) >= 50) {
+        if (uint32_t(millis() - stageAt) >= 250) {
             stage = Stage::Running; lastSampleAt = millis() - MPU6050Config::SAMPLE_MS;
             output("READY: +/-2g, +/-500deg/s, 100Hz DLPF20Hz; Z=zero when still; yaw PID is NOT connected");
         }
@@ -192,4 +233,8 @@ void updateMPU6050Sensor() {
 
 MPU6050SensorStatus mpu6050SensorStatus() {
     return {sensorEnabled, stage == Stage::Running, calibrating, eventSequence, eventMessage};
+}
+
+MPU6050CalibrationStatus mpu6050CalibrationStatus() {
+    return {calibrationCount,calibrationRestarts,calibrationMean[2],calibrationStd,calibrationAcceleration,calibrationReason};
 }

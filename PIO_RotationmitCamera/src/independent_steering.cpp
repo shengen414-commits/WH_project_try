@@ -5,11 +5,12 @@
 #include "imu_sensor.h"
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace {
 bool owned=false, failed=false, imuReady=false, zeroStarted=false, targetValid=false;
 bool statusPending=false;
-uint32_t session=0, sequence=0, received=0, started=0, updated=0, published=0, imuPublished=0, imuAt=0;
+uint32_t session=0, sequence=0, received=0, started=0, updated=0, published=0, imuPublished=0, imuAt=0, zeroPublished=0;
 int source=0, direction=1, amplitude=100, slew=400;
 float output=1500, target=0, heading=0, rate=0;
 const char* reason="disabled";
@@ -38,6 +39,15 @@ void publish(uint32_t now) {
         int n=snprintf(line,sizeof(line),"[ASSIST] id=%lu source=%d active=%d fault=%d ready=%d pwm=%d mid=%d reason=%s\n",
             (unsigned long)session,source,owned,failed,source==2||imuReady,(int)std::lround(output),steeringCenterUs(),reason);
         if(n>0 && n<(int)sizeof(line) && Serial.availableForWrite()>=n) {Serial.write((const uint8_t*)line,n);published=now;statusPending=false;}
+    }
+    if(owned && source==1 && !imuReady && uint32_t(now-zeroPublished)>=200) {
+        const auto zero=mpu6050CalibrationStatus(); char line[128], sensorReason[40];
+        const auto sensor=mpu6050SensorStatus();
+        const char* detail=zero.reason;
+        if(!sensor.ready && sensor.message && std::sscanf(sensor.message,"ERROR=%39[^ ;]",sensorReason)==1)detail=sensorReason;
+        const int n=snprintf(line,sizeof(line),"[ASSIST_ZERO] id=%lu n=%u reset=%u bias=%.2f sd=%.3f a=%.3f reason=%s\n",
+            (unsigned long)session,zero.samples,zero.restarts,zero.meanZ,zero.gyroStd,zero.acceleration,detail);
+        if(n>0 && n<(int)sizeof(line) && Serial.availableForWrite()>=n) {Serial.write((const uint8_t*)line,n);zeroPublished=now;}
     }
     if(owned && !failed && source==1 && imuReady && uint32_t(now-imuPublished)>=50) {
         char line[96];
@@ -74,7 +84,7 @@ bool handleIndependentSteeringPacket(const char* packet) {
             stopAutomaticSteering();
             source=requestedSource;session=id;sequence=0;target=0;targetValid=false;
             amplitude=limit;slew=speed;direction=sign;owned=true;failed=false;imuReady=false;zeroStarted=false;
-            started=updated=received=millis();published=started-200;imuPublished=started-50;heading=rate=0;
+            started=updated=received=millis();published=started-200;zeroPublished=started-200;imuPublished=started-50;heading=rate=0;
             output=steeringCenterUs();centerSteeringOutput();setESCSteeringInhibit(source==1);
             reason=source==1?"imu_calibrating":"waiting_target";
             if(source==1)beginMPU6050Sensor();
@@ -101,13 +111,16 @@ void updateIndependentSteering() {
     if(source==1) {
         MPU6050Sample sample;const auto status=mpu6050SensorStatus();
         if(!imuReady) {
-            if(uint32_t(now-started)>5000){fail("imu_zero_failed");publish(now);return;}
+            if(uint32_t(now-started)>5000){fail("imu_zero_timeout");publish(now);return;}
+            if(!status.ready && status.message && std::strncmp(status.message,"ERROR=",6)==0) {
+                fail("imu_init_failed");publish(now);return;
+            }
             if(readMPU6050Sample(sample)) {
                 if(!zeroStarted){handleMPU6050SensorCommand('Z');zeroStarted=true;}
                 else if(sample.calibrated && !status.calibrating) {
                     imuReady=true;imuAt=sample.timeMs;heading=rate=0;received=updated=now;published=now-200;
                     reason="waiting_target";setESCSteeringInhibit(false);
-                } else if(!status.calibrating){fail("imu_zero_failed");publish(now);return;}
+                } else if(!status.calibrating){fail(mpu6050CalibrationStatus().reason);publish(now);return;}
             }
             if(!imuReady){publish(now);return;}
         }

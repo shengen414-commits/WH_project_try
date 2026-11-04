@@ -26,3 +26,9 @@ void handleMPU6050SensorCommand(char command);
 bool readMPU6050Sample(MPU6050Sample& sample);
 struct MPU6050SensorStatus { bool active; bool ready; bool calibrating; uint32_t event; const char* message; };
 MPU6050SensorStatus mpu6050SensorStatus();
+struct MPU6050CalibrationStatus {
+    unsigned int samples, restarts;
+    float meanZ, gyroStd, acceleration;
+    const char* reason;
+};
+MPU6050CalibrationStatus mpu6050CalibrationStatus();

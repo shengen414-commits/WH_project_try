@@ -3,14 +3,14 @@ const context = vm.createContext({AbortController});
 vm.runInContext(fs.readFileSync('PyScripts/static/js/camera_preview.js', 'utf8'), context);
 (async () => {
     const timers = new Map(), requests = [], shown = [], revoked = [];
-    let next = 0;
-    const preview = context.createCameraPreview({url: '/camera/preview/left',
+    let next = 0, cleared=0;
+    const preview = context.createCameraPreview({url: '/camera/preview/left', clearOnError:true,
         setTimeout: (fn, ms) => {timers.set(++next, {fn, ms});return next;}, clearTimeout: id => timers.delete(id),
         fetch: (url, options) => new Promise((resolve, reject) => {
             requests.push({url, resolve, signal:options.signal});
             options.signal.addEventListener('abort', () => reject(Object.assign(new Error(), {name:'AbortError'})));
         }),
-        showImage: url => shown.push(url), clearImage() {},
+        showImage: url => shown.push(url), clearImage() {cleared++;},
         createObjectURL: () => `blob:${++next}`, revokeObjectURL: url => revoked.push(url)});
     const settle = () => new Promise(resolve => setImmediate(resolve));
     preview.setEnabled(true);
@@ -29,6 +29,7 @@ vm.runInContext(fs.readFileSync('PyScripts/static/js/camera_preview.js', 'utf8')
     preview.setEnabled(true);
     let fired = [...timers.entries()].find(([,t])=>t.ms===1500);timers.delete(fired[0]);fired[1].fn();await settle();
     assert.ok(requests[2].signal.aborted);
+    assert.ok(cleared>=3); // Disable and timeout clear stale images in detection preview.
     fired = [...timers.entries()].find(([,t])=>t.ms===80);timers.delete(fired[0]);fired[1].fn();
     requests[3].resolve({ok:true,status:204});await settle();
     preview.setEnabled(false);

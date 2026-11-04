@@ -7,8 +7,8 @@ class ManualSteeringTests(unittest.TestCase):
         self.now = [100.0]
         self.manual = ManualSteering(clock=lambda: self.now[0])
 
-    def ack(self, request_id, target=1500, manual=1, ok=1, ready=1, center=1500, proto=2):
-        return self.manual.feed(f'[SERVO_ACK] id={request_id} ok={ok} target={target} low={center-300} mid={center} high={center+300} manual={manual} ready={ready} proto={proto} reason={"ok" if ok else "pwm_failed"}')
+    def ack(self, request_id, target=1500, manual=1, ok=1, ready=1, center=1500, proto=4):
+        return self.manual.feed(f'[SERVO_ACK] id={request_id} ok={ok} target={target} low={center-400} mid={center} high={center+400} manual={manual} ready={ready} proto={proto} reason={"ok" if ok else "pwm_failed"}')
 
     def test_commands_wait_for_matching_firmware_ack(self):
         request_id, packet = self.manual.begin('start')
@@ -45,29 +45,16 @@ class ManualSteeringTests(unittest.TestCase):
         self.assertFalse(self.manual.blocking())
         self.assertEqual(self.manual.snapshot()['request']['status'], 'confirmed')
 
-    def test_save_center_requires_explicit_action_and_matching_ack(self):
-        request_id, _ = self.manual.begin('start')
-        self.ack(request_id)
-        move, _ = self.manual.begin('set', 1540)
-        self.ack(move, target=1540)
-        save, packet = self.manual.begin('calibrate')
-        self.assertEqual(packet, f'S0002,{save}\n'.encode())
-        self.assertEqual(self.manual.snapshot()['center_us'], 1500)
-        self.assertFalse(self.ack(save, target=1540, center=1540, proto=1))
-        self.assertTrue(self.ack(save, target=1540, center=1540))
-        state = self.manual.snapshot()
-        self.assertEqual((state['low_us'], state['center_us'], state['high_us'], state['target_us']), (1240, 1540, 1840, 1540))
-        self.assertIn('掉电保留', state['request']['message'])
-        move, _ = self.manual.begin('set', 1800)
-        self.ack(move, target=1800, center=1540)
-        with self.assertRaisesRegex(ValueError, '1300～1700'):
-            self.manual.begin('calibrate')
-
-    def test_older_protocol_can_move_but_cannot_save_center(self):
-        request_id, _ = self.manual.begin('start')
-        self.ack(request_id, proto=1)
-        with self.assertRaisesRegex(ValueError, '不支持保存中位'):
-            self.manual.begin('calibrate')
+    def test_fixed_center_and_old_protocol_cannot_adjust(self):
+        rid, _ = self.manual.begin('start')
+        self.ack(rid, proto=3)
+        for action, pulse in [('calibrate', None), ('set', 1505), ('center', None)]:
+            with self.assertRaises(ValueError):
+                self.manual.begin(action, pulse)
+        self.assertFalse(self.manual.snapshot()['range_supported'])
+        self.manual.begin('stop')
+        self.manual.normal_frame()
+        self.assertFalse(self.manual.blocking())
 
     def test_old_firmware_can_be_detected_and_exited_but_not_fine_adjusted(self):
         self.manual.feed('[SERVO] GPIO12 target=1500 us PWM=ready sweep=idle')
@@ -92,20 +79,23 @@ class ManualSteeringTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.manual.begin('set', 1505)
 
-    def test_expansion_needs_new_firmware_exact_range_and_no_motion(self):
-        request_id,_=self.manual.begin('start')
-        self.ack(request_id,proto=2)
-        with self.assertRaisesRegex(ValueError,'扩大探测范围'):
-            self.manual.begin('expand_low')
-        self.manual.feed('[SERVO] GPIO12 target=1500 us PWM=ready low=1200 mid=1500 high=1800 proto=3')
-        request_id,packet=self.manual.begin('expand_low')
-        self.assertEqual(packet,f'S0003,{request_id}\n'.encode())
-        reply=f'[SERVO_ACK] id={request_id} ok=1 target=1500 low=1175 mid=1500 high=1800 manual=1 ready=1 proto=3 reason=ok'
-        self.assertFalse(self.manual.feed(reply.replace('target=1500','target=1175')))
-        self.assertFalse(self.manual.feed(reply.replace('low=1175','low=1100')))
-        self.assertTrue(self.manual.feed(reply))
-        self.assertEqual(self.manual.snapshot()['target_us'],1500)
-        self.assertEqual(self.manual.snapshot()['low_us'],1175)
+    def test_fixed_range_exact_ack_edges_and_no_expansion(self):
+        rid,_=self.manual.begin('start');self.ack(rid)
+        self.assertEqual((self.manual.low,self.manual.center,self.manual.high),(1100,1500,1900))
+        for invalid in [(500,2500),(1200,1800),(1000,1900),(1100,2000),(1100.0,1900),(True,1900)]:
+            with self.assertRaises(ValueError):self.manual.begin('range',limits=invalid)
+        rid,packet=self.manual.begin('range',limits=(1100,1900))
+        self.assertEqual(packet,f'S1100:1900,{rid}\n'.encode())
+        self.assertFalse(self.ack(rid,target=1600))
+        self.assertTrue(self.ack(rid))
+        for pulse in (1100,1900):
+            rid,_=self.manual.begin('set',pulse)
+            self.assertTrue(self.ack(rid,target=pulse))
+        for pulse in (1099,1901,500,2500):
+            with self.assertRaises(ValueError):self.manual.begin('set',pulse)
+        self.assertTrue(self.manual.feed('[SERVO] GPIO12 target=1500 us PWM=ready low=1200 mid=1500 high=1800 proto=4'))
+        self.assertFalse(self.manual.snapshot()['range_supported'])
+        with self.assertRaises(ValueError):self.manual.begin('set',1505)
 
 
 if __name__ == '__main__':

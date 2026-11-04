@@ -4,7 +4,7 @@
     const panel = el('manual-steering-panel');
     if (!panel) return;
     let state = { active: false, blocking: false, serial_open: false, request: {},
-        low_us: 1200, center_us: 1500, high_us: 1800 };
+        low_us: 1100, center_us: 1500, high_us: 1900 };
     let busy = false, actionInFlight = '', error = '', exitQueued = false, confirmationTimer = null;
     let confirmationErrorId = null;
     let calibrationBusy = false;
@@ -26,22 +26,18 @@
         const pending = incoming.status === 'pending';
         if (!pending && confirmationTimer !== null) { clearTimeout(confirmationTimer); confirmationTimer = null; }
         const blocked = blocking();
-        const adjust = data.active && data.fresh && data.ready && data.precise && !pending && !busy && !calibrationBusy;
+        const adjust = data.active && data.fresh && data.ready && data.precise && data.range_supported && !pending && !busy && !calibrationBusy;
         el('manual-steering-start').disabled = busy || pending || blocked || !data.serial_open;
         el('manual-steering-stop').disabled = busy || !blocked;
         document.querySelectorAll('[data-manual-adjust]').forEach(control => control.disabled = !adjust);
-        el('manual-steering-minus').disabled = !adjust || data.target_us <= data.low_us;
-        el('manual-steering-plus').disabled = !adjust || data.target_us >= data.high_us;
-        el('manual-expand-low').disabled = !adjust || !data.probe_supported || data.low_us <= 1000;
-        el('manual-expand-high').disabled = !adjust || !data.probe_supported || data.high_us >= 2000;
-        el('manual-probe-hint').textContent = data.probe_supported ? '仅本次手动测试有效，记录端点不自动应用为控制限位。' : '扩大探测范围需要重新烧录新版 esp32dev；原范围内可正常记录。';
+        document.querySelectorAll('[data-manual-delta]').forEach(control => {
+            const delta = Number(control.dataset.manualDelta);
+            control.disabled = !adjust || (delta < 0 ? data.target_us <= data.low_us : data.target_us >= data.high_us);
+        });
+        el('manual-probe-hint').textContent = data.range_supported
+            ? '手动调试固定1100～1900 μs；加减和输入均受此范围限制，中位1500 μs。'
+            : '固定1100～1900 μs范围需要重新烧录新版 esp32dev 固件。';
         document.querySelectorAll('[data-calibration-save]').forEach(control => control.disabled = !adjust || incoming.status !== 'confirmed' || calibrationBusy);
-        const centerLow = data.center_min_us ?? 1300, centerHigh = data.center_max_us ?? 1700;
-        el('manual-steering-save-center').disabled = !adjust || !data.calibration_supported ||
-            data.target_us < centerLow || data.target_us > centerHigh;
-        el('manual-steering-calibration-hint').textContent = !data.calibration_supported
-            ? '保存中位需要本次更新的固件。默认1500μs不一定对应车轮直行。'
-            : `先微调至车轮直行，再保存当前输出；掉电后仍有效。可标定中位 ${centerLow}～${centerHigh}μs，保存后范围为新中位±300μs。`;
         for (const id of ['manual-steering-slider', 'manual-steering-input']) {
             el(id).min = data.low_us;
             el(id).max = data.high_us;
@@ -58,6 +54,7 @@
         if (!data.serial_open) message = data.serial_error || 'ESP32 串口未连接';
         else if (data.active && !data.fresh) message += ' | 舵机状态已过期，请检查连接或归中退出。';
         else if (data.active && !data.precise) message += ' | 旧固件不支持精确脉宽，请烧录新版 esp32dev。';
+        else if (data.active && !data.range_supported) message += ' | 请烧录支持固定1100～1900 μs范围的新版 esp32dev。';
         else if (data.active && !data.ready) message += ' | 舵机 PWM 未就绪。';
         el('manual-steering-status').textContent = message;
         const failed = !!error || ['error', 'timeout', 'rejected'].includes(incoming.status);
@@ -165,7 +162,7 @@
         try {
             const response = await global.fetch('/steering/manual', { method: 'POST',
                 headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
-                body: JSON.stringify({ action, ...(pulse === undefined ? {} : { pulse_us: pulse }) }) });
+                body: JSON.stringify({ action, ...(pulse === undefined ? {} : action === 'range' ? pulse : { pulse_us: pulse }) }) });
             const data = await response.json();
             if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
             renderManualSteering(data.state);

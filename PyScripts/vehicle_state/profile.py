@@ -54,7 +54,7 @@ def validate(profile):
         raise ValueError('中位必须来自固件确认')
     pulses = set()
     for p in a['points']:
-        if not isinstance(p, dict) or set(p) != {'pulse_us', 'angle_deg'} or type(p['pulse_us']) is not int or not 1000 <= p['pulse_us'] <= 2000 or not finite(p['angle_deg']) or abs(p['angle_deg']) > 45:
+        if not isinstance(p, dict) or set(p) != {'pulse_us', 'angle_deg'} or type(p['pulse_us']) is not int or not 500 <= p['pulse_us'] <= 2500 or not finite(p['angle_deg']) or abs(p['angle_deg']) > 45:
             raise ValueError('每点需要确认的脉宽和人工测得的前轮角度（左正右负，±45°内）')
         if p['pulse_us'] in pulses:
             raise ValueError('脉宽重复')
@@ -63,7 +63,7 @@ def validate(profile):
     if not isinstance(endpoints, dict) or set(endpoints) - {'left', 'right'}:
         raise ValueError('左右端点标记无效')
     for side, point in endpoints.items():
-        if not isinstance(point, dict) or set(point) != {'pulse_us', 'angle_deg'} or type(point['pulse_us']) is not int or not 1000 <= point['pulse_us'] <= 2000:
+        if not isinstance(point, dict) or set(point) != {'pulse_us', 'angle_deg'} or type(point['pulse_us']) is not int or not 500 <= point['pulse_us'] <= 2500:
             raise ValueError('端点必须来自固件确认脉宽')
         angle = point['angle_deg']
         if angle is not None and (not finite(angle) or not 0 < (angle if side == 'left' else -angle) <= 45):

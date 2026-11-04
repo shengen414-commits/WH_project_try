@@ -49,7 +49,7 @@ int main() {
     handleSteeringCommand('K');
     assert(pwmOutputs[12] == 1550);
     assert(setSteeringDebugPulse(1505) && pwmOutputs[12] == 1505);
-    assert(!setSteeringDebugPulse(1199) && !setSteeringDebugPulse(1801));
+    assert(!setSteeringDebugPulse(1099) && !setSteeringDebugPulse(1901));
     assert(steeringTargetUs() == 1505);
     handleSteeringCommand('K');
     Serial.output.clear();

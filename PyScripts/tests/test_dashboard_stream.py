@@ -364,7 +364,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         request_id = response.get_json()['request_id']
         self.app.esp32_serial.write.assert_called_with(f'V\nS0000,{request_id}\n'.encode())
-        self.receive([f'[SERVO_ACK] id={request_id} ok=1 target=1500 low=1200 mid=1500 high=1800 manual=1 ready=1 proto=2 reason=ok\n'.encode()])
+        self.receive([f'[SERVO_ACK] id={request_id} ok=1 target=1500 low=1100 mid=1500 high=1900 manual=1 ready=1 proto=4 reason=ok\n'.encode()])
         return request_id
 
     def test_manual_panel_is_folded_and_commands_have_firmware_confirmation(self):
@@ -397,33 +397,22 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.client.post('/imu/command', json={'action': 'start'}).status_code, 409)
         self.app.esp32_serial.reset_input_buffer.assert_not_called()
 
-    def test_manual_can_reach_wider_range_and_save_current_straight_position(self):
+    def test_manual_fixed_limits_edges_and_no_expansion(self):
         self.manual_start()
-        response = self.client.post('/steering/manual', json={'action': 'set', 'pulse_us': 1600})
-        self.assertEqual(response.status_code, 200)
-        request_id = response.get_json()['request_id']
-        self.receive([f'[SERVO_ACK] id={request_id} ok=1 target=1600 low=1200 mid=1500 high=1800 manual=1 ready=1 proto=2 reason=ok\n'.encode()])
-        response = self.client.post('/steering/manual', json={'action': 'calibrate'})
-        self.assertEqual(response.status_code, 200)
-        save = response.get_json()['request_id']
-        self.app.esp32_serial.write.assert_called_with(f'S0002,{save}\n'.encode())
-        self.receive([f'[SERVO_ACK] id={save} ok=1 target=1600 low=1300 mid=1600 high=1900 manual=1 ready=1 proto=2 reason=ok\n'.encode()])
-        state = self.client.get('/steering/manual/status').get_json()
-        self.assertEqual((state['low_us'], state['center_us'], state['high_us']), (1300, 1600, 1900))
+        for low,high in [(500,2500),(1200,1800),(1100.0,1900),(1100,2000)]:
+            self.assertEqual(self.client.post('/steering/manual',json={'action':'range','low_us':low,'high_us':high}).status_code,400)
+        for pulse in (1100,1900):
+            response=self.client.post('/steering/manual',json={'action':'set','pulse_us':pulse})
+            self.assertEqual(response.status_code,200)
+            rid=response.json['request_id']
+            self.receive([f'[SERVO_ACK] id={rid} ok=1 target={pulse} low=1100 mid=1500 high=1900 manual=1 ready=1 proto=4 reason=ok\n'.encode()])
+        for pulse in (1099,1901,500,2500):
+            self.assertEqual(self.client.post('/steering/manual',json={'action':'set','pulse_us':pulse}).status_code,400)
 
-    def test_manual_probe_range_requires_new_firmware_and_acknowledges_no_motion(self):
+    def test_manual_fixed_range_requires_matching_firmware_limits(self):
         self.manual_start()
-        self.assertEqual(self.client.post('/steering/manual',json={'action':'expand_low'}).status_code,409)
-        self.receive([b'[SERVO] GPIO12 target=1500 us PWM=ready low=1200 mid=1500 high=1800 proto=3\n'])
-        response=self.client.post('/steering/manual',json={'action':'expand_low'})
-        self.assertEqual(response.status_code,200)
-        request_id=response.json['request_id']
-        self.app.esp32_serial.write.assert_called_with(f'S0003,{request_id}\n'.encode())
-        self.receive([f'[SERVO_ACK] id={request_id} ok=1 target=1500 low=1175 mid=1500 high=1800 manual=1 ready=1 proto=3 reason=ok\n'.encode()])
-        state=self.client.get('/steering/manual/status').json
-        self.assertEqual(state['request']['status'],'confirmed')
-        self.assertEqual(state['target_us'],1500)
-        self.assertEqual(state['low_us'],1175)
+        self.receive([b'[SERVO] GPIO12 target=1500 us PWM=ready low=1200 mid=1500 high=1800 proto=4\n'])
+        self.assertEqual(self.client.post('/steering/manual',json={'action':'set','pulse_us':1505}).status_code,409)
 
     def test_independent_modes_wait_for_ack_and_block_conflicting_outputs(self):
         self.app.esp32_serial.write.side_effect=lambda packet:len(packet)
@@ -452,6 +441,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.client.post('/steering/independent',json={'action':'start','source':'camera'}).status_code,409)
         bad={**DEFAULTS['imu'],'direction':0}
         self.assertEqual(self.client.post('/steering/independent',json={'action':'save','source':'imu','settings':bad}).status_code,409)
+        self.app.independent_steering.set_camera_enabled(True)
         self.app.independent_steering.camera=lambda:(1,time.monotonic(),object())
         response=self.client.post('/steering/independent',json={'action':'start','source':'camera'})
         self.assertEqual(response.status_code,200,response.json)
@@ -504,6 +494,47 @@ class DashboardTests(unittest.TestCase):
         recorder.submit.assert_not_called()  # Late frames excluded regardless of frame count.
         recorder.finish.assert_called_once()
         camera.available = False
+
+    def test_independent_capture_owner_survives_top_preview_toggle(self):
+        camera=self.app.cam_left
+        camera.available=True
+        camera.observation_frame=(1,time.monotonic(),object())
+        camera.request_capture('independent',True)
+        try:
+            with patch.object(camera,'_close_camera') as close:
+                self.assertEqual(self.client.get('/toggle_cam?camera=left&state=off').status_code,200)
+                self.assertFalse(camera.is_active)
+                self.assertTrue(camera.capture_requested())
+                self.assertIsNotNone(camera.get_observation_frame())
+                close.assert_not_called() # HTTP never releases an in-use capture handle.
+            camera.request_capture('independent',False)
+            self.assertFalse(camera.capture_requested())
+            self.assertIsNone(camera.get_observation_frame())
+        finally:
+            camera.request_capture('independent',False);camera.available=False
+
+    def test_detection_switch_never_arms_or_changes_top_camera_and_stale_image_is_hidden(self):
+        service=self.app.independent_steering
+        owner=[];service.camera_capture=owner.append
+        self.app.cam_left.set_active(False)
+        for invalid in [{},{'enabled':1},{'enabled':True,'extra':True}]:
+            self.assertEqual(self.client.post('/steering/independent/camera',json=invalid).status_code,400)
+        response=self.client.post('/steering/independent/camera',json={'enabled':True})
+        self.assertEqual(response.status_code,200)
+        self.assertTrue(response.json['camera']['enabled'])
+        self.assertFalse(self.app.cam_left.is_active)
+        self.assertEqual(owner,[True])
+        self.app.esp32_serial.write.assert_not_called()
+        self.assertEqual(self.client.get('/steering/independent/image').status_code,204)
+        from PyScripts.steering_control_pipeline import camera_observation
+        now=time.monotonic()
+        service.camera_observation=camera_observation({'valid':True,'confidence':.95,'lookahead_error_norm':0,'image_angle_deg':0},1,now)
+        service.jpeg=b'jpeg';service.jpeg_at=now
+        self.assertEqual(self.client.get('/steering/independent/image').data,b'jpeg')
+        service.jpeg_at=now-1
+        self.assertEqual(self.client.get('/steering/independent/image').status_code,204)
+        self.assertEqual(self.client.post('/steering/independent/camera',json={'enabled':False}).status_code,200)
+        self.assertEqual(owner,[True,False])
 
     def test_preview_returns_finite_response_without_changing_camera_or_recording(self):
         with patch.object(self.app.cam_left, 'get_latest_frame', return_value=None), \

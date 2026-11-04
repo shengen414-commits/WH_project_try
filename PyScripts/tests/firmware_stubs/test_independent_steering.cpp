@@ -68,3 +68,5 @@ int main(){
     for(int i=0;i<4;++i){rcHigh=true;rcInterrupt();clockMs+=2;rcHigh=false;rcInterrupt();clockMs+=18;updateESC();updateIndependentSteering();}
     assert(!independentSteeringBlocking()&&pwmOutputs[12]==1500&&pwmOutputs[14]==2000);
 }
+
+MPU6050CalibrationStatus mpu6050CalibrationStatus(){return {0,0,0,0,1,"zero_timeout"};}
