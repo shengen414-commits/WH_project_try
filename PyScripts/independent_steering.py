@@ -19,8 +19,8 @@ except ImportError:
 
 
 DEFAULTS={
-    'imu':{'kp':4.,'kd':.5,'deadband':1.,'max_us':80,'slew_us_s':400,'direction':1},
-    'camera':{'kp':200.,'kd':.5,'deadband':.03,'max_us':80,'slew_us_s':400,'direction':1,
+    'imu':{'kp':4.,'kd':.5,'deadband':1.,'max_us':370,'slew_us_s':400,'direction':1,'low_us':1130,'high_us':1850},
+    'camera':{'kp':200.,'kd':.5,'deadband':.03,'max_us':370,'low_us':1130,'high_us':1850,'slew_us_s':400,'direction':1,
               'confidence_min':.65,'target_x':.5,'roi_top':.35,'lookahead':.4,'threshold_mode':'otsu','threshold':80},
     # Reserved deliberately separate from individual test gains. No fusion mode
     # can be armed until a joint policy and its validation are implemented.
@@ -34,9 +34,13 @@ def validate_settings(source,data):
         value=data[key]
         if type(value) not in (int,float) or not math.isfinite(value) or not lo<=value<=hi:
             raise ValueError(f'{key} 需为 {lo}～{hi} 的有限数')
-    for key,lo,hi in [('max_us',10,300),('slew_us_s',50,1200)]:
+    for key,lo,hi in [('max_us',10,400),('slew_us_s',50,1200)]:
         if type(data[key]) is not int or not lo<=data[key]<=hi:raise ValueError(f'{key} 需为 {lo}～{hi} 的整数')
     if type(data['direction']) is not int or data['direction'] not in (-1,1):raise ValueError('PWM方向应为±1')
+    if source in ('imu','camera'):
+        if (type(data['low_us']) is not int or type(data['high_us']) is not int or
+                not 1100<=data['low_us']<1500<data['high_us']<=1900):
+            raise ValueError('独立转向输出范围需位于1100～1900μs内，且下限<1500<上限')
     if source=='camera':
         for key,lo,hi in [('confidence_min',.5,.99),('target_x',.1,.9),('roi_top',.1,.6),('lookahead',.1,.8)]:
             if type(data[key]) not in (int,float) or not math.isfinite(data[key]) or not lo<=data[key]<=hi:
@@ -52,7 +56,7 @@ class IndependentSteering:
         self.camera_capture=camera_capture or (lambda enabled:None)
         self.camera_enabled=False;self.camera_worker=None;self.camera_shutdown=threading.Event();self.camera_wakeup=threading.Event()
         self.camera_generation=0;self.camera_observation=None;self.camera_error=None;self.jpeg_at=None;self.camera_processing_ms=None
-        self.zero_status={};self.detector_signature=None;self.camera_toggle_lock=threading.Lock()
+        self.zero_status={};self.output_limits=None;self.detector_signature=None;self.camera_toggle_lock=threading.Lock()
         self.lock=threading.RLock();self.settings=copy.deepcopy(DEFAULTS)
         self.owned=False;self.source=None;self.phase='off';self.message='独立转向未开启'
         self.identifier=0;self.sequence=0;self.started=0.;self.received=None
@@ -62,8 +66,15 @@ class IndependentSteering:
         if self.path.exists():
             try:
                 saved=json.loads(self.path.read_text(encoding='utf-8'))
-                if saved.get('schema')!=1:raise ValueError('配置版本不支持')
-                for source in ('imu','camera'):self.settings[source]=validate_settings(source,saved['profiles'][source])
+                if saved.get('schema') not in (1,2,3):raise ValueError('配置版本不支持')
+                profiles=copy.deepcopy(saved['profiles'])
+                if saved['schema']==1:
+                    # One-time migration: adopt the explicitly requested measured IMU travel,
+                    # retaining gains/rate/direction; camera migration follows below.
+                    profiles['imu'].update(max_us=370,low_us=1130,high_us=1850)
+                if saved['schema']<3:
+                    profiles['camera'].update(max_us=370,low_us=1130,high_us=1850)
+                for source in ('imu','camera'):self.settings[source]=validate_settings(source,profiles[source])
             except (ValueError,TypeError,KeyError,OSError) as exc:
                 self.error=f'独立转向参数未载入：{exc}；请检查并保存参数后再开启'
 
@@ -134,7 +145,7 @@ class IndependentSteering:
             temporary=self.path.with_suffix('.tmp')
             try:
                 with temporary.open('w',encoding='utf-8') as f:
-                    json.dump({'schema':1,'profiles':profiles},f,ensure_ascii=False,allow_nan=False,indent=2)
+                    json.dump({'schema':3,'profiles':profiles},f,ensure_ascii=False,allow_nan=False,indent=2)
                     f.flush();os.fsync(f.fileno())
                 os.replace(temporary,self.path)
             finally:
@@ -153,11 +164,12 @@ class IndependentSteering:
             self.identifier=secrets.randbelow(0x7fffffff)+1
             self.source=source;self.started=self.clock();self.received=None;self.owned=True;self.phase='arming'
             self.observation=self.proposal=None;self.firmware={};self.sequence=0;self.last_imu_ms=None
-            self.timer=DeviceClock();self.last_probe=-100.;self.zero_status={}
+            self.timer=DeviceClock();self.last_probe=-100.;self.zero_status={};self.output_limits=None
             self.stop_event=threading.Event();self.request={'action':'start','status':'pending','id':self.identifier}
             p=self.settings[source];number=1 if source=='imu' else 2
             self.message='等待固件确认；IMU需保持车身静止完成零偏标定' if source=='imu' else '等待固件确认相机独立模式'
-            try:self.write(f"@A1,{number},{self.identifier},{p['max_us']},{p['slew_us_s']},{p['direction']}\n".encode('ascii'))
+            bounds=f",{p['low_us']},{p['high_us']}"
+            try:self.write(f"@A1,{number},{self.identifier},{p['max_us']},{p['slew_us_s']},{p['direction']}{bounds}\n".encode('ascii'))
             except Exception as exc:
                 self.phase='fault';self.message=str(exc);self.request['status']='error';raise
             if self.autostart:
@@ -233,6 +245,10 @@ class IndependentSteering:
                         p=self.settings[self.source]
                         if ok!=1 or int(f['source'])!=(1 if self.source=='imu' else 2) or (int(f['lim']),int(f['slew']),int(f['dir']))!=(p['max_us'],p['slew_us_s'],p['direction']):
                             self.phase='fault';self.message='固件拒绝开启或参数确认不一致';self.request['status']='rejected';self.stop_event.set();return True
+                        if self.source in ('imu','camera'):
+                            if (f.get('low'),f.get('high'))!=(str(p['low_us']),str(p['high_us'])):
+                                self.phase='fault';self.message='固件未确认独立转向专用行程，请烧录新版固件';self.request['status']='rejected';self.stop_event.set();return True
+                            self.output_limits={'low_us':p['low_us'],'center_us':1500,'high_us':p['high_us']}
                         self.phase='calibrating' if self.source=='imu' else 'running';self.request['status']='confirmed'
                         self.message='IMU静止标定中，请保持车身不动' if self.source=='imu' else '相机独立转向已确认'
                         self.received=now;return True
@@ -339,7 +355,7 @@ class IndependentSteering:
                     'observation':serialize(self.observation),'proposal':serialize(self.proposal),
                     'observation_age_ms':max(0,(now-self.observation.observed_at)*1000) if self.observation else None,
                     'jpeg_sequence':self.jpeg_sequence,'imu_mount_axes':list(IMU_MOUNT_AXES),
-                    'imu_calibration':dict(self.zero_status),
+                    'imu_calibration':dict(self.zero_status),'output_limits':copy.deepcopy(self.output_limits),
                     'camera':{'enabled':self.camera_enabled,'error':self.camera_error,
                         'observation':serialize(self.camera_observation),
                         'observation_age_ms':max(0,(now-self.camera_observation.observed_at)*1000) if self.camera_observation else None,

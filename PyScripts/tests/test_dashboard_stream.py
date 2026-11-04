@@ -421,7 +421,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(response.json['phase'],'arming')
         identifier=response.json['request']['id']
         self.assertTrue(self.app.esp32_serial.write.call_args[0][0].startswith(f'@A1,1,{identifier},'.encode()))
-        self.receive([f'[ASSIST_ACK] id={identifier} action=1 source=1 ok=1 lim=80 slew=400 dir=1 reason=imu_calibrating\n'.encode()])
+        self.receive([f'[ASSIST_ACK] id={identifier} action=1 source=1 ok=1 lim=370 slew=400 dir=1 low=1130 high=1850 reason=imu_calibrating\n'.encode()])
         self.assertEqual(self.client.get('/steering/independent/status').json['phase'],'calibrating')
         for url,body in [('/steering/manual',{'action':'start'}),('/steering/line',{'enabled':True}),
                          ('/imu/command',{'action':'start'}),('/vehicle-lab/command',{'action':'start'})]:

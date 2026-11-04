@@ -190,7 +190,7 @@ int main() {
     // Full normal-firmware path: real I2C driver + gateway, with a fixed >3deg/s raw bias.
     feed("R\nN0\nT1500\n");device();
     word(0,0);word(2,0);word(4,-16384);word(8,393);word(10,-328);word(12,524);
-    Serial.output.clear();feed("@A1,1,90,80,400,1\n");
+    Serial.output.clear();feed("@A1,1,90,370,400,1,1130,1850\n");
     for(int i=0;i<340;++i) {
         clockMs+=10;updateESC();updateMPU6050Debug();updateAutomaticSteering();updateIndependentSteering();
         if(i%5==0){char target[48];snprintf(target,sizeof(target),"@A2,90,%d,0\n",i+1);feed(target);}

@@ -31,6 +31,10 @@
             }
             initialized=true;
         }
+        const imu=data.settings?.imu,limits=data.output_limits;
+        if(imu)el('independent-imu-travel').textContent=`已保存IMU行程：右${imu.low_us} μs（−${1500-imu.low_us}），中位1500 μs，左${imu.high_us} μs（＋${imu.high_us-1500}） | 最大修正${imu.max_us} μs | ${data.source==='imu'&&limits?'固件已确认专用行程':'开启IMU后等待固件确认'}。小偏差的响应幅度由航向增益决定。`;
+        const cameraSettings=data.settings?.camera;
+        if(cameraSettings)el('independent-camera-travel').textContent=`已保存相机行程：右${cameraSettings.low_us} μs，中位1500 μs，左${cameraSettings.high_us} μs | 最大修正${cameraSettings.max_us} μs | ${data.source==='camera'&&limits?'固件已确认专用行程':'开启相机转向后等待固件确认'}。小偏差响应仍由横向增益和图像方向增益决定。`;
         const blocked=!!data.blocking;
         for(const source of ['imu','camera']){
             el(`independent-${source}-on`).disabled=busy||blocked||cameraBusy;

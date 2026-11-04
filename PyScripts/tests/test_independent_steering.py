@@ -1,5 +1,6 @@
 import copy
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,7 +19,8 @@ class IndependentSteeringTests(unittest.TestCase):
 
     def arm(self,source):
         self.service.start(source);s=self.service.identifier;p=self.service.settings[source]
-        self.service.feed(f"[ASSIST_ACK] id={s} action=1 source={1 if source=='imu' else 2} ok=1 lim={p['max_us']} slew={p['slew_us_s']} dir={p['direction']} reason=ok")
+        bounds=f"low={p['low_us']} high={p['high_us']}"
+        self.service.feed(f"[ASSIST_ACK] id={s} action=1 source={1 if source=='imu' else 2} ok=1 lim={p['max_us']} slew={p['slew_us_s']} dir={p['direction']} {bounds} reason=ok")
         return s
 
     def test_pure_policies_are_opposite_to_error_and_use_separate_gains(self):
@@ -183,6 +185,50 @@ class IndependentSteeringTests(unittest.TestCase):
                      f'[ASSIST_ZERO] id={sid} incomplete']:
             self.assertFalse(self.service.feed(line))
             self.assertEqual(self.service.phase,'calibrating')
+
+    def test_legacy_imu_profile_migrates_travel_and_retains_gains_and_camera(self):
+        old=copy.deepcopy(DEFAULTS)
+        old['imu'].pop('low_us');old['imu'].pop('high_us')
+        old['imu'].update(kp=7.,max_us=80,direction=-1)
+        old['camera']['max_us']=120
+        self.service.path.write_text(json.dumps({'schema':1,'profiles':old}),encoding='utf-8')
+        restored=IndependentSteering(self.service.path,self.packets.append,lambda:None,autostart=False)
+        self.assertIsNone(restored.error)
+        self.assertEqual((restored.settings['imu']['low_us'],restored.settings['imu']['high_us'],restored.settings['imu']['max_us']),(1130,1850,370))
+        self.assertEqual((restored.settings['imu']['kp'],restored.settings['imu']['direction']),(7.,-1))
+        self.assertEqual(restored.settings['camera'],{**old['camera'],'max_us':370,'low_us':1130,'high_us':1850})
+        restored.configure('imu',restored.settings['imu'])
+        self.assertEqual(json.loads(self.service.path.read_text())['schema'],3)
+        restored.settings['imu']['max_us']=200
+        restored.configure('imu',restored.settings['imu'])
+        again=IndependentSteering(self.service.path,self.packets.append,lambda:None,autostart=False)
+        self.assertEqual(again.settings['imu']['max_us'],200) # Migration only once, explicit later choices persist.
+
+    def test_imu_travel_is_transmitted_and_must_be_acknowledged(self):
+        self.service.start('imu');sid=self.service.identifier
+        self.assertEqual(self.packets[-1],f'@A1,1,{sid},370,400,1,1130,1850\n'.encode())
+        self.service.feed(f'[ASSIST_ACK] id={sid} action=1 source=1 ok=1 lim=370 slew=400 dir=1 low=1200 high=1800 reason=ok')
+        self.assertEqual(self.service.phase,'fault')
+        self.assertIsNone(self.service.snapshot()['output_limits'])
+        for low,high in [(1099,1850),(1130,1901),(1500,1850),(1130,1500),(True,1850)]:
+            with self.assertRaises(ValueError):validate_settings('imu',{**DEFAULTS['imu'],'low_us':low,'high_us':high})
+
+    def test_schema_two_migrates_only_camera_and_schema_three_retains_custom_values(self):
+        saved=copy.deepcopy(DEFAULTS)
+        saved['imu'].update(max_us=200,kp=8,low_us=1200,high_us=1800)
+        saved['camera'].pop('low_us');saved['camera'].pop('high_us')
+        saved['camera'].update(max_us=80,kp=250)
+        self.service.path.write_text(json.dumps({'schema':2,'profiles':saved}),encoding='utf-8')
+        restored=IndependentSteering(self.service.path,self.packets.append,lambda:None,autostart=False)
+        self.assertIsNone(restored.error)
+        self.assertEqual(restored.settings['imu'],saved['imu'])
+        self.assertEqual(restored.settings['camera']['max_us'],370)
+        self.assertEqual(restored.settings['camera']['kp'],250)
+        restored.configure('camera',{**restored.settings['camera'],'max_us':220})
+        again=IndependentSteering(self.service.path,self.packets.append,lambda:None,autostart=False)
+        self.assertEqual(again.settings['camera']['max_us'],220)
+        self.service.start('camera');sid=self.service.identifier
+        self.assertEqual(self.packets[-1],f'@A1,2,{sid},370,400,1,1130,1850\n'.encode())
 
 
 if __name__=='__main__':unittest.main()

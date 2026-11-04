@@ -62,6 +62,34 @@ int main(){
     step();assert(calibrating);calibrating=false;sample.calibrated=false;step();
     setESCThrottle(1800);updateESC();assert(pwmOutputs[14]==1500); // Rejected calibration never arms propulsion.
     packet("A0,103");
+    // Explicit IMU travel bypasses the legacy +/-300 cap, retaining gateway slew/watchdog.
+    Serial.output.clear();packet("A1,1,106,370,400,1,1130,1850");
+    assert(Serial.output.find("lim=370 slew=400 dir=1 low=1130 high=1850")!=std::string::npos);
+    step();assert(calibrating);sample.calibrated=true;calibrating=false;sample.correctedGzDps=0;step();
+    unsigned int counter=0;
+    const auto hold=[&](int id,float demand,int repeats) {
+        for(int i=0;i<repeats;++i) {
+            char text[64];snprintf(text,sizeof(text),"A2,%d,%u,%.3f",id,++counter,demand);packet(text);step(5);
+        }
+    };
+    hold(106,1,25);assert(pwmOutputs[12]==1850);
+    hold(106,-1,45);assert(pwmOutputs[12]==1130);
+    hold(106,0,25);assert(pwmOutputs[12]==1500);
+    packet("A0,106");
+    assert(writeAutomaticSteeringPulse(1900) && pwmOutputs[12]==1800); // Ordinary travel unchanged.
+    centerSteeringOutput();
+    packet("A1,1,107,370,400,-1,1130,1850");
+    step();sample.calibrated=true;calibrating=false;step();counter=0;
+    hold(107,1,25);assert(pwmOutputs[12]==1130);
+    hold(107,-1,45);assert(pwmOutputs[12]==1850);
+    packet("A0,107");
+    packet("A1,1,108,400,400,1,1000,2000");assert(!independentSteeringBlocking());
+    packet("A1,2,109,370,400,1,1130,1850");assert(independentSteeringBlocking());counter=0;
+    hold(109,1,25);assert(pwmOutputs[12]==1850);
+    hold(109,-1,45);assert(pwmOutputs[12]==1130);
+    step(26);assert(pwmOutputs[12]==1500); // Camera still stops on stale host demand.
+    packet("A0,109");
+    assert(writeAutomaticSteeringPulse(1900) && pwmOutputs[12]==1800);centerSteeringOutput();
     packet("A1,2,104,80,400,1");packet("A2,104,1,1");step(4);
     stopAutomaticSteering();assert(!independentSteeringBlocking()&&pwmOutputs[12]==1500);
     packet("A1,2,105,80,400,1");packet("A2,105,1,1");step(3);

@@ -167,13 +167,16 @@
             <div id="independent-message" class="sync-hint" role="status"></div>
             <details class="manual-probe-range"><summary>IMU 独立参数 · X前 / Y右 / Z下</summary>
                 <p class="sync-hint">开启时静止约2～3秒完成零偏标定，当前位置朝向为目标0°。IMU只能保持相对航向，不能单独判断横向离线；偏航会随时间漂移。重新开启会重置目标方向。</p>
+                <p id="independent-imu-travel" class="sync-hint">IMU行程：右1130 μs，中位1500 μs，左1850 μs。最大行程与航向增益分别调整。</p>
                 <form id="independent-imu-form" class="independent-settings">
                     <label>航向增益 μs/°<input name="kp" type="number" min="0" max="50" step=".1" value="4" required></label>
                     <label>角速度阻尼 μs/(°/s)<input name="kd" type="number" min="0" max="10" step=".1" value=".5" required></label>
                     <label>航向死区 °<input name="deadband" type="number" min="0" max="10" step=".1" value="1" required></label>
-                    <label>最大修正 μs<input name="max_us" type="number" min="10" max="300" step="1" value="80" required></label>
+                    <label>最大修正 μs<input name="max_us" type="number" min="10" max="400" step="1" value="370" required></label>
                     <label>变化速度 μs/s<input name="slew_us_s" type="number" min="50" max="1200" step="1" value="400" required></label>
                     <label>PWM左右方向<select name="direction"><option value="1">+1：PWM增大为左转</option><option value="-1">−1：PWM减小为左转</option></select></label>
+                    <label>右侧PWM下限 μs<input name="low_us" type="number" min="1100" max="1499" step="1" value="1130" required></label>
+                    <label>左侧PWM上限 μs<input name="high_us" type="number" min="1501" max="1900" step="1" value="1850" required></label>
                     <button type="submit">保存 IMU 独立参数</button>
                 </form>
             </details>
@@ -181,11 +184,12 @@
                 <label class="sync-hint"><input id="independent-camera-toggle" type="checkbox"> 开启相机检测预览（独立于顶部 LeftCam）</label>
                 <p id="independent-camera-status" class="sync-hint" role="status">检测预览已关闭；开启并等待出图后再启动相机转向。</p>
                 <p class="sync-hint">使用左相机与黑胶带检测，共用一次硬件采集。检测预览开关与顶部显示独立；关闭转向或发生丢线后仍继续更新预览。画面偏差是归一化图像偏差，图像斜率不是车身真实航向。先核对安装朝向与画面中心；丢线、歧义、低置信度或图像超时会归中停动力，需关闭后重新开启。</p>
+                <p id="independent-camera-travel" class="sync-hint">相机转向行程：右1130 μs，中位1500 μs，左1850 μs。</p>
                 <form id="independent-camera-form" class="independent-settings">
                     <label>横向增益 μs/归一化偏差<input name="kp" type="number" min="0" max="1000" step="1" value="200" required></label>
                     <label>图像方向增益 μs/°<input name="kd" type="number" min="0" max="10" step=".1" value=".5" required></label>
                     <label>偏差死区<input name="deadband" type="number" min="0" max=".3" step=".01" value=".03" required></label>
-                    <label>最大修正 μs<input name="max_us" type="number" min="10" max="300" step="1" value="80" required></label>
+                    <label>最大修正 μs<input name="max_us" type="number" min="10" max="400" step="1" value="370" required></label>
                     <label>变化速度 μs/s<input name="slew_us_s" type="number" min="50" max="1200" step="1" value="400" required></label>
                     <label>PWM左右方向<select name="direction"><option value="1">+1：PWM增大为左转</option><option value="-1">−1：PWM减小为左转</option></select></label>
                     <label>最低置信度<input name="confidence_min" type="number" min=".5" max=".99" step=".01" value=".65" required></label>
@@ -194,6 +198,8 @@
                     <label>前视位置比例<input name="lookahead" type="number" min=".1" max=".8" step=".01" value=".4" required></label>
                     <label>阈值方法<select name="threshold_mode"><option value="otsu">Otsu自动</option><option value="fixed">固定阈值</option><option value="adaptive">自适应</option></select></label>
                     <label>固定阈值<input name="threshold" type="number" min="0" max="255" step="1" value="80" required></label>
+                    <label>右侧PWM下限 μs<input name="low_us" type="number" min="1100" max="1499" step="1" value="1130" required></label>
+                    <label>左侧PWM上限 μs<input name="high_us" type="number" min="1501" max="1900" step="1" value="1850" required></label>
                     <button type="submit">保存相机独立参数</button>
                 </form>
                 <img id="independent-camera-preview" alt="左相机中线检测实时预览" hidden>
@@ -288,7 +294,7 @@
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
     <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=2"></script>
     <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=6-fixed-1100-1900"></script>
-    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=3-live-preview"></script>
+    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=5-camera-travel"></script>
     <script src="{{ url_for('static', filename='js/line_response.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=6-independent"></script>
 </body>

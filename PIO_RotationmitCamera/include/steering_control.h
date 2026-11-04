@@ -30,6 +30,8 @@ bool expandSteeringDebugRange(bool lower);
 bool configureSteeringDebugRange(int lowUs, int highUs);
 bool attachSteeringOutput();
 bool writeAutomaticSteeringPulse(int pulseUs);
+// Only the session-checked independent gateway supplies these separate limits.
+bool writeIndependentSteeringPulse(int pulseUs, int lowUs, int highUs);
 void centerSteeringOutput();
 bool configureSteeringTravel(int lowUs, int centerUs, int highUs);
 int steeringCenterUs();

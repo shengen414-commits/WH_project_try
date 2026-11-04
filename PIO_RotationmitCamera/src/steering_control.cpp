@@ -20,10 +20,14 @@ int testPulse(unsigned int index) {
     return index == 0 ? travelCenter - 50 : index == 2 ? travelCenter + 50 : travelCenter;
 }
 
-void writeTarget(int pwm) {
-    targetUs = constrain(pwm, debugEnabled ? debugLow : travelLow, debugEnabled ? debugHigh : travelHigh);
+void writeLimitedTarget(int pwm, int low, int high) {
+    targetUs = constrain(pwm, low, high);
     if (steering.attached()) steering.writeMicroseconds(targetUs);
     lastStatusAt = millis() - STATUS_MS;
+}
+
+void writeTarget(int pwm) {
+    writeLimitedTarget(pwm,debugEnabled ? debugLow : travelLow,debugEnabled ? debugHigh : travelHigh);
 }
 
 void help() {
@@ -68,6 +72,12 @@ bool attachSteeringOutput() {
 bool writeAutomaticSteeringPulse(int pwm) {
     if (debugEnabled || !steering.attached()) return false;
     writeTarget(pwm);
+    return true;
+}
+bool writeIndependentSteeringPulse(int pwm, int low, int high) {
+    if (debugEnabled || !steering.attached() || low<SteeringConfig::DEBUG_LOW_US ||
+        high>SteeringConfig::DEBUG_HIGH_US || low>=travelCenter || high<=travelCenter) return false;
+    writeLimitedTarget(pwm,low,high);
     return true;
 }
 void centerSteeringOutput() {

@@ -9,7 +9,8 @@
 
 namespace {
 bool owned=false, failed=false, imuReady=false, zeroStarted=false, targetValid=false;
-bool statusPending=false;
+bool statusPending=false,customTravel=false;
+int outputLow=1200,outputHigh=1800;
 uint32_t session=0, sequence=0, received=0, started=0, updated=0, published=0, imuPublished=0, imuAt=0, zeroPublished=0;
 int source=0, direction=1, amplitude=100, slew=400;
 float output=1500, target=0, heading=0, rate=0;
@@ -24,8 +25,13 @@ void flushAck() {
     }
 }
 void acknowledge(uint32_t id,int action,bool ok) {
-    ackLength=snprintf(pendingAck,sizeof(pendingAck),"[ASSIST_ACK] id=%lu action=%d source=%d ok=%d lim=%d slew=%d dir=%d reason=%s\n",
-        (unsigned long)id,action,source,ok,amplitude,slew,direction,reason);
+    if(customTravel) {
+        ackLength=snprintf(pendingAck,sizeof(pendingAck),"[ASSIST_ACK] id=%lu action=%d source=%d ok=%d lim=%d slew=%d dir=%d low=%d high=%d reason=%s\n",
+            (unsigned long)id,action,source,ok,amplitude,slew,direction,outputLow,outputHigh,reason);
+    } else {
+        ackLength=snprintf(pendingAck,sizeof(pendingAck),"[ASSIST_ACK] id=%lu action=%d source=%d ok=%d lim=%d slew=%d dir=%d reason=%s\n",
+            (unsigned long)id,action,source,ok,amplitude,slew,direction,reason);
+    }
     if(ackLength>=(int)sizeof(pendingAck))ackLength=0;
     flushAck();
 }
@@ -62,7 +68,7 @@ bool independentSteeringBlocking(){return owned;}
 void stopIndependentSteering(const char* why) {
     if(!owned)return;
     if(source==1)endMPU6050Sensor();
-    owned=false;failed=false;imuReady=false;targetValid=false;target=0;reason=why;
+    owned=false;customTravel=false;failed=false;imuReady=false;targetValid=false;target=0;reason=why;
     output=steeringCenterUs();centerSteeringOutput();if(!escSteeringState().rcMode)setESCSteeringInhibit(false);
     published=millis()-200;statusPending=true;publish(millis());
 }
@@ -74,14 +80,19 @@ bool handleIndependentSteeringPacket(const char* packet) {
         if(ok) {if(action==0)stopIndependentSteering();else if(owned)fail("host_sensor_invalid");}
         acknowledge(id,action,ok);return true;
     }
-    if(sscanf(packet+1,"%d,%d,%lu,%d,%d,%d %c",&action,&requestedSource,&id,&limit,&speed,&sign,&extra)==6 && action==1 && id>0 && id<=UINT32_MAX) {
+    int low=0,high=0;
+    const bool extended=sscanf(packet+1,"%d,%d,%lu,%d,%d,%d,%d,%d %c",&action,&requestedSource,&id,&limit,&speed,&sign,&low,&high,&extra)==8;
+    const bool legacy=!extended && sscanf(packet+1,"%d,%d,%lu,%d,%d,%d %c",&action,&requestedSource,&id,&limit,&speed,&sign,&extra)==6;
+    if((extended||legacy) && action==1 && id>0 && id<=UINT32_MAX) {
         const auto drive=escSteeringState();
-        bool ok=!owned && (requestedSource==1||requestedSource==2) && limit>=10 && limit<=300 && speed>=50 && speed<=1200 &&
+        bool ok=!owned && (requestedSource==1||requestedSource==2) && limit>=10 && limit<=(extended?400:300) &&
+            (!extended || ((requestedSource==1||requestedSource==2) && low>=1100 && low<1500 && high>1500 && high<=1900)) && speed>=50 && speed<=1200 &&
             (sign==1||sign==-1) && !steeringDebugActive() && !drive.debugNeutral && !drive.emergency && !drive.rcMode && drive.pwm==1500 &&
             (automaticSteeringState().mode==AutomaticSteeringMode::Off||automaticSteeringState().mode==AutomaticSteeringMode::Fault);
         if(ok)ok=attachSteeringOutput();
         if(ok) {
             stopAutomaticSteering();
+            customTravel=extended;outputLow=extended?low:steeringLowUs();outputHigh=extended?high:steeringHighUs();
             source=requestedSource;session=id;sequence=0;target=0;targetValid=false;
             amplitude=limit;slew=speed;direction=sign;owned=true;failed=false;imuReady=false;zeroStarted=false;
             started=updated=received=millis();published=started-200;zeroPublished=started-200;imuPublished=started-50;heading=rate=0;
@@ -141,9 +152,9 @@ void updateIndependentSteering() {
     if(dt>=10) {
         if(dt>100){fail("control_gap");publish(now);return;}
         updated=now;
-        const float desired=clamp(steeringCenterUs()+direction*target*amplitude,steeringLowUs(),steeringHighUs());
+        const float desired=clamp(steeringCenterUs()+direction*target*amplitude,outputLow,outputHigh);
         output=clamp(desired,output-slew*dt*.001f,output+slew*dt*.001f);
-        if(!writeAutomaticSteeringPulse((int)std::lround(output))){fail("steering_output_failed");publish(now);return;}
+        if(!(customTravel?writeIndependentSteeringPulse((int)std::lround(output),outputLow,outputHigh):writeAutomaticSteeringPulse((int)std::lround(output)))){fail("steering_output_failed");publish(now);return;}
         reason=targetValid?"tracking":"waiting_target";
     }
     publish(now);
