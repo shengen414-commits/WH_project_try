@@ -653,6 +653,7 @@ class HighSpeedCamera:
         stat_started_at = time.perf_counter()
         stat_frame_count = 0
         next_open = 0.
+        next_vision_decode = 0.
         last_read_ok = time.monotonic()
         try:
             while self.running:
@@ -668,7 +669,22 @@ class HighSpeedCamera:
                     if not self.available:
                         time.sleep(.05); continue
                 try:
-                    ret, frame = self.cap.read()
+                    with self.capture_lock:
+                        vision_only = 'independent' in self.capture_consumers
+                    vision_only = vision_only and not self.is_recording and not self.replay.enabled
+                    if vision_only:
+                        # Drain MJPEG buffers at device speed, decode at 30Hz.
+                        # Sleeping here would accumulate stale hardware frames.
+                        ret = self.cap.grab()
+                        if ret:
+                            last_read_ok = time.monotonic()
+                            if last_read_ok < next_vision_decode: continue
+                            ret, frame = self.cap.retrieve()
+                            next_vision_decode = time.monotonic() + 1./30
+                        else: frame = None
+                    else:
+                        next_vision_decode = 0.
+                        ret, frame = self.cap.read()
                 except (cv2.error, OSError):
                     ret, frame = False, None
                 if not ret:

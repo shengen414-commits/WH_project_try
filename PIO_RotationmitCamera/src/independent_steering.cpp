@@ -24,13 +24,14 @@ void flushAck() {
         Serial.write((const uint8_t*)pendingAck,ackLength);ackLength=0;
     }
 }
-void acknowledge(uint32_t id,int action,bool ok) {
+void acknowledge(uint32_t id,int action,bool ok,const char* rejection=nullptr) {
+    const char* ackReason=rejection?rejection:reason;
     if(customTravel) {
         ackLength=snprintf(pendingAck,sizeof(pendingAck),"[ASSIST_ACK] id=%lu action=%d source=%d ok=%d lim=%d slew=%d dir=%d low=%d high=%d reason=%s\n",
-            (unsigned long)id,action,source,ok,amplitude,slew,direction,outputLow,outputHigh,reason);
+            (unsigned long)id,action,source,ok,amplitude,slew,direction,outputLow,outputHigh,ackReason);
     } else {
         ackLength=snprintf(pendingAck,sizeof(pendingAck),"[ASSIST_ACK] id=%lu action=%d source=%d ok=%d lim=%d slew=%d dir=%d reason=%s\n",
-            (unsigned long)id,action,source,ok,amplitude,slew,direction,reason);
+            (unsigned long)id,action,source,ok,amplitude,slew,direction,ackReason);
     }
     if(ackLength>=(int)sizeof(pendingAck))ackLength=0;
     flushAck();
@@ -89,7 +90,17 @@ bool handleIndependentSteeringPacket(const char* packet) {
             (!extended || ((requestedSource==1||requestedSource==2) && low>=1100 && low<1500 && high>1500 && high<=1900)) && speed>=50 && speed<=1200 &&
             (sign==1||sign==-1) && !steeringDebugActive() && !drive.debugNeutral && !drive.emergency && !drive.rcMode && drive.pwm==1500 &&
             (automaticSteeringState().mode==AutomaticSteeringMode::Off||automaticSteeringState().mode==AutomaticSteeringMode::Fault);
-        if(ok)ok=attachSteeringOutput();
+        if(!ok && !owned) {
+            if(requestedSource!=1 && requestedSource!=2)reason="invalid_source";
+            else if(limit<10 || limit>(extended?400:300) || speed<50 || speed>1200 || (sign!=1 && sign!=-1) ||
+                    (extended && (low<1100 || low>=1500 || high<=1500 || high>1900)))reason="invalid_parameters";
+            else if(steeringDebugActive() || drive.debugNeutral)reason="debug_mode_active";
+            else if(drive.emergency)reason="emergency_active";
+            else if(drive.rcMode)reason="rc_takeover";
+            else if(drive.pwm!=1500)reason="throttle_not_neutral";
+            else reason="other_controller_active";
+        }
+        if(ok && !attachSteeringOutput()){ok=false;reason="pwm_attach_failed";}
         if(ok) {
             stopAutomaticSteering();
             customTravel=extended;outputLow=extended?low:steeringLowUs();outputHigh=extended?high:steeringHighUs();
@@ -99,8 +110,8 @@ bool handleIndependentSteeringPacket(const char* packet) {
             output=steeringCenterUs();centerSteeringOutput();setESCSteeringInhibit(source==1);
             reason=source==1?"imu_calibrating":"waiting_target";
             if(source==1)beginMPU6050Sensor();
-        } else if(!owned)reason="arm_rejected";
-        acknowledge(id,1,ok);return true;
+        }
+        acknowledge(id,1,ok,!ok&&owned?"controller_owned":nullptr);return true;
     }
     if(sscanf(packet+1,"%d,%lu,%lu,%f %c",&action,&id,&seq,&value,&extra)==4 && action==2) {
         if(owned && !failed && id==session && seq>0 && seq<=UINT32_MAX && newer(seq,sequence) && std::isfinite(value) && std::fabs(value)<=1 &&

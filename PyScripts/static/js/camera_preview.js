@@ -3,6 +3,12 @@
     function createCameraPreview(options) {
         let enabled = false, generation = 0, timer = null, pending = null, objectUrl = null;
         const later = options.setTimeout, cancel = options.clearTimeout;
+        const now = options.now || Date.now;
+        let lastSuccess = null;
+        function unavailable(state) {
+            if(options.onStatus)options.onStatus(state);
+            if(!options.emptyGraceMs || lastSuccess===null || now()-lastSuccess>=options.emptyGraceMs)clearImage();
+        }
         function clearImage() {
             if (objectUrl !== null) options.revokeObjectURL(objectUrl);
             objectUrl = null;
@@ -16,18 +22,19 @@
             try {
                 const response = await options.fetch(options.url, {cache: 'no-store', signal: controller.signal});
                 if (response.status === 204) {
-                    if (version === generation) clearImage();
+                    if (version === generation) unavailable('empty');
                 } else {
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const blob = await response.blob();
                     if (enabled && version === generation && !controller.signal.aborted) {
                         const next = options.createObjectURL(blob), previous = objectUrl;
-                        objectUrl = next; options.showImage(next);
+                        objectUrl = next; options.showImage(next);lastSuccess=now();
+                        if(options.onStatus)options.onStatus('ok');
                         if (previous !== null) options.revokeObjectURL(previous);
                     }
                 }
             } catch (_) {
-                if (options.clearOnError && enabled && version === generation) clearImage();
+                if (options.clearOnError && enabled && version === generation) unavailable('error');
                 // Retry without piling requests behind a camera/network failure.
             } finally {
                 cancel(timeout); pending = null;
@@ -42,7 +49,7 @@
                 if (timer !== null) cancel(timer);
                 timer = null;
                 if (pending) pending.abort();
-                if (!enabled) clearImage();
+                if (!enabled) {lastSuccess=null;clearImage();}
                 else tick();
             }
         };

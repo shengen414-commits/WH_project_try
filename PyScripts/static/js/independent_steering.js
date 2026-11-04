@@ -15,7 +15,8 @@
         accel_unstable:'加速度波动过大，重新采集',zero_timeout:'稳定样本不足，标定超时',
         bias_out_of_range:'零偏超出允许范围',canceled:'已取消'};
     const image=el('independent-camera-preview');
-    const preview=global.createCameraPreview({url:'/steering/independent/image',intervalMs:150,clearOnError:true,
+    const preview=global.createCameraPreview({url:'/steering/independent/image',intervalMs:150,clearOnError:true,emptyGraceMs:600,
+        onStatus:status=>{el('independent-camera-transport').textContent=status==='ok'?'图像请求正常':status==='empty'?'图像接口暂时无帧（HTTP 204），正在重试；短暂保留最近画面':'图像请求失败或超时，正在重试；保留画面最多600ms';},
         fetch:global.fetch.bind(global),setTimeout:global.setTimeout.bind(global),clearTimeout:global.clearTimeout.bind(global),
         createObjectURL:global.URL.createObjectURL.bind(global.URL),revokeObjectURL:global.URL.revokeObjectURL.bind(global.URL),
         showImage:url=>{image.src=url;image.hidden=false;},clearImage:()=>{image.removeAttribute('src');image.hidden=true;}});

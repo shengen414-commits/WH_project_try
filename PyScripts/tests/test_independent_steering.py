@@ -307,5 +307,20 @@ class IndependentSteeringTests(unittest.TestCase):
         self.assertEqual(self.service.phase,'running')
         self.assertTrue(self.packets[-1].startswith(f'@A2,{sid},'.encode()))
 
+    def test_arm_rejection_retains_actual_and_expected_fields(self):
+        self.service.start('camera');sid=self.service.identifier
+        self.service.feed(f'[ASSIST_ACK] id={sid} action=1 source=2 ok=0 lim=80 slew=400 dir=1 reason=controller_owned')
+        state=self.service.snapshot()
+        self.assertEqual(state['request']['expected']['lim'],370)
+        self.assertEqual(state['request']['ack']['lim'],'80')
+        self.assertIn('controller_owned',state['message'])
+        self.assertIn('lim:请求370/回包80',state['message'])
+        self.assertIn('low:请求1130/回包缺失',state['message'])
+
+    def test_camera_start_discards_old_preflight_result_before_arm(self):
+        self.service.camera_observation=camera_observation({'valid':True,'confidence':.59,'lookahead_error_norm':0,'image_angle_deg':0},1,self.now-.4,.35)
+        self.service.start('camera')
+        self.assertIsNone(self.service.camera_observation)
+
 
 if __name__=='__main__':unittest.main()

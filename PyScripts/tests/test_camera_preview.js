@@ -34,5 +34,15 @@ vm.runInContext(fs.readFileSync('PyScripts/static/js/camera_preview.js', 'utf8')
     requests[3].resolve({ok:true,status:204});await settle();
     preview.setEnabled(false);
     assert.equal(timers.size, 0);
+    let clock=0, clears=0, code=200;
+    const retry=[];
+    const tolerant=context.createCameraPreview({url:'/test',emptyGraceMs:600,clearOnError:true,now:()=>clock,
+        setTimeout:(fn,ms)=>{if(ms===80)retry.push(fn);return 1;},clearTimeout:()=>{},
+        fetch:async()=>({ok:true,status:code,blob:async()=>({})}),
+        createObjectURL:()=> 'blob:test',revokeObjectURL:()=>{},showImage:()=>{},clearImage:()=>clears++});
+    tolerant.setEnabled(true);await settle();
+    code=204;clock=200;retry.shift()();await settle();assert.equal(clears,0);
+    clock=601;retry.shift()();await settle();assert.equal(clears,1);
+    tolerant.setEnabled(false);
     console.log('Camera preview: single flight, finite timeout, close cancellation, reopen, no-frame retry and blob cleanup passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

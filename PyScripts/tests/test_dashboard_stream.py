@@ -495,6 +495,28 @@ class DashboardTests(unittest.TestCase):
         recorder.finish.assert_called_once()
         camera.available = False
 
+
+    def test_detection_drains_capture_without_decoding_every_hardware_frame(self):
+        camera=self.app.cam_left
+        camera.is_active=camera.available=camera.running=True
+        camera.is_recording=False
+        camera.request_capture('independent',True)
+        self.addCleanup(camera.request_capture,'independent',False)
+        camera.cap=Mock();cap=camera.cap
+        grabs=[]
+        def grab():
+            grabs.append(1)
+            if len(grabs)==3:camera.running=False
+            return True
+        cap.grab.side_effect=grab
+        cap.retrieve.return_value=(True,object())
+        with patch.object(camera.replay,'submit') as submit, patch.object(camera.replay,'enabled',False), patch.object(self.app.time,'monotonic',return_value=10.):
+            camera._update()
+        self.assertEqual(len(grabs),3)
+        cap.retrieve.assert_called_once()
+        cap.read.assert_not_called()
+        submit.assert_called_once()
+
     def test_independent_capture_owner_survives_top_preview_toggle(self):
         camera=self.app.cam_left
         camera.available=True

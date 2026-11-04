@@ -171,6 +171,9 @@ class IndependentSteering:
                 if not self.camera_enabled:raise ValueError('请先开启下方相机检测预览，等待新鲜图像后再开启转向')
                 frame=self.camera()
                 if frame is None or not 0<=self.clock()-frame[1]<=.15:raise ValueError('检测相机没有新鲜图像，请检查下方检测预览状态与相机连接')
+            if source=='camera':
+                self.camera_observation=None;self.camera_error=None
+                self.camera_wakeup.set()
             self.identifier=secrets.randbelow(0x7fffffff)+1
             self.source=source;self.started=self.clock();self.received=None;self.owned=True;self.phase='arming'
             self.observation=self.proposal=None;self.firmware={};self.sequence=0;self.last_imu_ms=None
@@ -260,12 +263,23 @@ class IndependentSteering:
                         if self.phase=='stopping' and action==0 and ok==1:self._stopped();return True
                         if self.phase!='arming' or action!=1:return False
                         p=self.settings[self.source]
-                        if ok!=1 or int(f['source'])!=(1 if self.source=='imu' else 2) or (int(f['lim']),int(f['slew']),int(f['dir']))!=(p['max_us'],p['slew_us_s'],p['direction']):
-                            self.phase='fault';self.message='固件拒绝开启或参数确认不一致';self.request['status']='rejected';self.stop_event.set();return True
-                        if self.source in ('imu','camera'):
-                            if (f.get('low'),f.get('high'))!=(str(p['low_us']),str(p['high_us'])):
-                                self.phase='fault';self.message='固件未确认独立转向专用行程，请烧录新版固件';self.request['status']='rejected';self.stop_event.set();return True
-                            self.output_limits={'low_us':p['low_us'],'center_us':1500,'high_us':p['high_us']}
+                        expected={'source':1 if self.source=='imu' else 2,'lim':p['max_us'],'slew':p['slew_us_s'],
+                                  'dir':p['direction'],'low':p['low_us'],'high':p['high_us']}
+                        self.request['expected']=dict(expected);self.request['ack']=dict(f)
+                        differences=[f"{key}:请求{value}/回包{f.get(key,'缺失')}" for key,value in expected.items() if f.get(key)!=str(value)]
+                        if ok!=1 or differences:
+                            cause=f.get('reason','未提供原因')
+                            explanation={'controller_owned':'固件仍被已有控制会话占用','invalid_parameters':'参数超出固件允许范围',
+                                'debug_mode_active':'固件仍在串口调试模式','emergency_active':'急停保护仍生效',
+                                'rc_takeover':'遥控器正在接管','throttle_not_neutral':'固件油门尚未归中1500',
+                                'other_controller_active':'其他自动转向仍在运行','pwm_attach_failed':'舵机PWM初始化失败',
+                                'arm_rejected':'固件拒绝，当前版本未提供细分原因'}.get(cause,cause)
+                            cause=f'{explanation} [{cause}]'
+                            self.phase='fault';self.message=(f'固件拒绝开启（{cause}）' if ok!=1 else '固件参数确认不一致')
+                            if differences:self.message+='；'+'，'.join(differences)
+                            if 'low' not in f or 'high' not in f:self.message+='；回包缺少专用行程，请确认已烧录支持相机1130～1850μs行程的新版esp32dev'
+                            self.request['status']='rejected';self.stop_event.set();return True
+                        self.output_limits={'low_us':p['low_us'],'center_us':1500,'high_us':p['high_us']}
                         self.phase='calibrating' if self.source=='imu' else 'running';self.request['status']='confirmed'
                         self.message='IMU静止标定中，请保持车身不动' if self.source=='imu' else '相机独立转向已确认'
                         self.received=now;return True
@@ -303,7 +317,7 @@ class IndependentSteering:
         if self.detector is None or signature!=self.detector_signature:
             self.detector_signature=signature
             self.detector=BlackTapeDetector(DetectorConfig(roi_top=p['roi_top'],target_x=p['target_x'],lookahead=p['lookahead'],threshold_mode=p['threshold_mode'],threshold=p['threshold'],max_width=p['max_width']))
-        image=cv2.resize(image,(320,240))
+        image=cv2.resize(image,(256,192))
         result,_,_=self.detector.detect(image)
         observation=camera_observation(result,sequence,read_at,p['confidence_min'])
         # Publish the overlay together with its observation only if this enable generation still matches.
