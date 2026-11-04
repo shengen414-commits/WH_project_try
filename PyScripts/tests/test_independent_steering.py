@@ -132,8 +132,10 @@ class IndependentSteeringTests(unittest.TestCase):
         self.assertEqual(self.packets,packets)  # New valid preview cannot re-arm steering.
         self.service.camera=lambda:None
         self.service.camera_step()
+        self.assertIsNotNone(self.service.preview_jpeg()) # Brief capture gaps do not blink the preview.
+        self.now+=1.1
         self.assertIsNone(self.service.preview_jpeg())
-        self.assertIn('超时',self.service.snapshot()['camera']['error'])
+        self.assertIn('未出图',self.service.snapshot()['camera']['error'])
         self.now+=.25
         self.service.camera=lambda:(3,self.now,image)
         self.service.camera_step()
@@ -229,6 +231,34 @@ class IndependentSteeringTests(unittest.TestCase):
         self.assertEqual(again.settings['camera']['max_us'],220)
         self.service.start('camera');sid=self.service.identifier
         self.assertEqual(self.packets[-1],f'@A1,2,{sid},370,400,1,1130,1850\n'.encode())
+
+    def test_camera_diagnostics_show_cancellation_without_changing_control_policy(self):
+        o=camera_observation({'valid':True,'confidence':.95,'lookahead_error_norm':-.23,'image_angle_deg':20.},1,10.)
+        p=standalone_proposal(o,{**DEFAULTS['camera'],'kp':200.,'kd':2.},10.)
+        self.assertAlmostEqual(p.lateral_us,40.)
+        self.assertAlmostEqual(p.heading_us,-40.)
+        self.assertAlmostEqual(p.requested_us,0.)
+        self.assertAlmostEqual(p.correction,0.)
+        p=standalone_proposal(o,{**DEFAULTS['camera'],'kp':200.,'kd':100.},10.)
+        self.assertEqual(p.limited_us,-370.)
+        self.assertEqual(p.correction,-1.)
+
+    def test_low_confidence_keeps_preview_but_stops_control_and_preview_has_bounded_age(self):
+        sid=self.arm('camera')
+        observation=camera_observation({'valid':True,'confidence':.60,'lookahead_error_norm':-.2,'image_angle_deg':10.},1,self.now,.65)
+        with patch.object(self.service,'_detect_camera',return_value=(observation,b'jpeg')):
+            self.service.camera_step()
+        self.service.step()
+        self.assertEqual(self.service.phase,'fault')
+        self.assertEqual(self.service.camera_observation.reason,'low_confidence')
+        self.assertEqual(self.service.preview_jpeg(),b'jpeg')
+        self.assertEqual(self.packets[-1],f'@A3,{sid}\n'.encode())
+        self.now+=.3
+        self.assertTrue(self.service.snapshot()['camera']['preview_stale'])
+        self.assertEqual(self.service.preview_jpeg(),b'jpeg')
+        self.now+=.8
+        self.assertIsNone(self.service.preview_jpeg())
+        self.assertEqual(self.service.phase,'fault')
 
 
 if __name__=='__main__':unittest.main()

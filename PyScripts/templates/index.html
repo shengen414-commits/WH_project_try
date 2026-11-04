@@ -163,6 +163,7 @@
             <div id="independent-status" class="sync-hint" role="status">独立转向：等待后台状态</div>
             <div id="independent-imu-calibration" class="sync-hint" role="status"></div>
             <div id="independent-observation" class="sync-hint">观测：—</div>
+            <div id="independent-camera-output" class="sync-hint" role="status"></div>
             <div id="independent-command" class="sync-hint">候选输出：—</div>
             <div id="independent-message" class="sync-hint" role="status"></div>
             <details class="manual-probe-range"><summary>IMU 独立参数 · X前 / Y右 / Z下</summary>
@@ -187,7 +188,7 @@
                 <p id="independent-camera-travel" class="sync-hint">相机转向行程：右1130 μs，中位1500 μs，左1850 μs。</p>
                 <form id="independent-camera-form" class="independent-settings">
                     <label>横向增益 μs/归一化偏差<input name="kp" type="number" min="0" max="1000" step="1" value="200" required></label>
-                    <label>图像方向增益 μs/°<input name="kd" type="number" min="0" max="10" step=".1" value=".5" required></label>
+                    <label>图像方向增益 μs/°<input name="kd" type="number" min="0" max="100" step=".1" value=".5" required></label>
                     <label>偏差死区<input name="deadband" type="number" min="0" max=".3" step=".01" value=".03" required></label>
                     <label>最大修正 μs<input name="max_us" type="number" min="10" max="400" step="1" value="370" required></label>
                     <label>变化速度 μs/s<input name="slew_us_s" type="number" min="50" max="1200" step="1" value="400" required></label>
@@ -295,7 +296,7 @@
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
     <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=2"></script>
     <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=6-fixed-1100-1900"></script>
-    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=6-wide-tape"></script>
+    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=8-preview-freshness"></script>
     <script src="{{ url_for('static', filename='js/line_response.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=6-independent"></script>
 </body>

@@ -362,7 +362,8 @@ def render_overlay(frame, result, config, control_label="DEMO: no steering outpu
         cv2.circle(overlay, xy(point), 2, (100, 100, 255), -1)
     if result["valid"]:
         centerline = result.get('centerline') or result['line_ends']
-        cv2.polylines(overlay,[np.array([xy(p) for p in centerline],dtype=np.int32)],False,(60,255,80),3)
+        path_color=(60,255,80) if result.get('control_valid',True) else (0,180,255)
+        cv2.polylines(overlay,[np.array([xy(p) for p in centerline],dtype=np.int32)],False,path_color,3)
         for point in result["points"]:
             cv2.circle(overlay, xy(point), 3, (0, 255, 255), -1)
         near, ahead = xy(result["near_xy"]), xy(result["lookahead_xy"])

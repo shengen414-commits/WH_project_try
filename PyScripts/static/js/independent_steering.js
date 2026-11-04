@@ -50,6 +50,12 @@
             `相对航向 ${formats(observation.relative_heading_deg)}° | 左转正角速度 ${formats(observation.yaw_rate_deg_s)}°/s | 横向位置未知`:
             `画面偏差 ${formats(observation.image_offset_norm,3)} | 图像方向 ${formats(observation.image_heading_deg)}° | 置信度 ${formats(observation.confidence)}`)+` | 数据年龄 ${formats(age,0)} ms`:'观测：等待新鲜数据';
         el('independent-command').textContent=proposal?`独立候选修正 ${formats(proposal.correction,3)}（左正右负${data.phase==='running'?'':'；已暂停，不发送'}） | 单一输出通道 | ${data.fresh?'固件状态新鲜':'固件状态过期'}`:'候选输出：等待观测与固件确认';
+        const calculation=el('independent-camera-output');
+        if(data.source==='camera'&&proposal?.limited_us!=null&&cameraSettings){
+            const target=Math.round(Math.max(cameraSettings.low_us,Math.min(cameraSettings.high_us,1500+cameraSettings.direction*proposal.limited_us)));
+            const opposing=proposal.lateral_us*proposal.heading_us<0;
+            calculation.textContent=`${data.phase==='running'?'相机控制计算':'上次相机控制计算（已停用）'}：横向项 ${formats(proposal.lateral_us,1)} μs ＋ 方向项 ${formats(proposal.heading_us,1)} μs ＝ ${formats(proposal.requested_us,1)} μs | 幅度限幅后 ${formats(proposal.limited_us,1)} μs | 计算目标PWM ${target} μs（未计变化速度）${opposing?' | 两项方向相反，会互相抵消':''}`;
+        }else calculation.textContent=data.camera?.enabled&&data.phase!=='running'?'检测预览正在运行；绿色中线不代表转向已启用。请查看上方独立转向状态。':'';
         if(waitingExit && data.phase==='off'){waitingExit=false;el('independent-message').textContent=data.message||'已确认独立转向关闭';}
         else if(waitingExit && data.request?.status==='timeout')el('independent-message').textContent=data.message;
         if(blocked){
@@ -61,8 +67,9 @@
         el('independent-camera-toggle').checked=cameraBusy?cameraWanted:!!camera.enabled;
         el('independent-camera-toggle').disabled=cameraBusy||busy;
         const detected=camera.observation;
+        image.style.opacity=camera.preview_stale?'0.55':'1';
         el('independent-camera-status').textContent=camera.enabled?
-            `检测预览已开启（独立于顶部LeftCam） | ${camera.error|| (detected?detectionReasons[detected.reason]||detected.reason:'等待相机出图')} | 数据年龄 ${formats(camera.observation_age_ms,0)} ms | 检测耗时 ${formats(camera.processing_ms,0)} ms`:'检测预览已关闭；请先开启此开关，等待出图后再开启相机转向。';
+            `检测预览已开启（独立于顶部LeftCam） | ${camera.error|| (detected?detectionReasons[detected.reason]||detected.reason:'等待相机出图')} | 置信度 ${formats(detected?.confidence)} / 门槛 ${formats(cameraSettings?.confidence_min)} | ${camera.preview_stale?'预览延迟/历史帧，禁止用于控制':'预览新鲜'} | 数据年龄 ${formats(camera.observation_age_ms,0)} ms | 检测耗时 ${formats(camera.processing_ms,0)} ms`:'检测预览已关闭；请先开启此开关，等待出图后再开启相机转向。';
         updatePreview();
 
     }

@@ -531,7 +531,7 @@ class DashboardTests(unittest.TestCase):
         service.camera_observation=camera_observation({'valid':True,'confidence':.95,'lookahead_error_norm':0,'image_angle_deg':0},1,now)
         service.jpeg=b'jpeg';service.jpeg_at=now
         self.assertEqual(self.client.get('/steering/independent/image').data,b'jpeg')
-        service.jpeg_at=now-1
+        service.jpeg_at=now-2
         self.assertEqual(self.client.get('/steering/independent/image').status_code,204)
         self.assertEqual(self.client.post('/steering/independent/camera',json={'enabled':False}).status_code,200)
         self.assertEqual(owner,[True,False])

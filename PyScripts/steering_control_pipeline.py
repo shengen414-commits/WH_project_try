@@ -36,6 +36,10 @@ class SteeringProposal:
     correction: float  # -1..1, positive = physical left, before PWM direction mapping.
     valid: bool
     reason: str
+    lateral_us: float | None = None
+    heading_us: float | None = None
+    requested_us: float | None = None
+    limited_us: float | None = None
 
 
 def camera_observation(result, sequence, read_at, confidence_min=.65):
@@ -60,6 +64,7 @@ def standalone_proposal(observation, settings, now):
     o=observation
     if not o.valid or not 0 <= now-o.observed_at <= .15:
         return SteeringProposal(o.source,o.sequence,o.observed_at,now,0.,False,'observation_stale' if o.valid else o.reason)
+    lateral_us=heading_us=None
     if o.source=='imu':
         if o.relative_heading_deg is None or o.yaw_rate_deg_s is None:
             raise ValueError('IMU observation requires heading and yaw rate')
@@ -71,12 +76,16 @@ def standalone_proposal(observation, settings, now):
             raise ValueError('Camera observation requires image offset and heading')
         offset=o.image_offset_norm
         error=0. if abs(offset)<=settings['deadband'] else offset-math.copysign(settings['deadband'],offset)
-        correction_us=-settings['kp']*error-settings['kd']*o.image_heading_deg
+        lateral_us=-settings['kp']*error
+        heading_us=-settings['kd']*o.image_heading_deg
+        correction_us=lateral_us+heading_us
     else:
         raise ValueError('Standalone policy is available only for imu/camera; fusion needs its own policy')
     if not math.isfinite(correction_us):
         raise ValueError('Non-finite control output')
-    return SteeringProposal(o.source,o.sequence,o.observed_at,now,max(-1.,min(1.,correction_us/settings['max_us'])),True,'ok')
+    limited_us=max(-settings['max_us'],min(settings['max_us'],correction_us))
+    return SteeringProposal(o.source,o.sequence,o.observed_at,now,limited_us/settings['max_us'],True,'ok',
+        lateral_us=lateral_us,heading_us=heading_us,requested_us=correction_us,limited_us=limited_us)
 
 
 def arbitrate(selected_source, proposal, now):

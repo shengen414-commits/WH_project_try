@@ -254,6 +254,10 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         await page.waitForFunction(()=>document.getElementById('independent-status').textContent.includes('等待固件确认'));
         Object.assign(independent,{phase:'running',observation:{source:'camera',image_offset_norm:.2,image_heading_deg:1,confidence:.9},proposal:{correction:-.5},observation_age_ms:20,firmware:{pwm:1460,ready:'1',reason:'tracking'}});
         await page.waitForFunction(()=>document.getElementById('independent-observation').textContent.includes('画面偏差 0.200'));
+        independent.proposal={correction:0,lateral_us:40,heading_us:-40,requested_us:0,limited_us:0};
+        await page.waitForFunction(()=>document.getElementById('independent-camera-output').textContent.includes('计算目标PWM 1500'));
+        assert.ok((await page.locator('#independent-camera-output').innerText()).includes('两项方向相反'));
+
         Object.assign(independent,{phase:'fault',firmware:{pwm:1500,reason:'host_target_stale'}});
         await page.waitForFunction(()=>document.getElementById('independent-status').textContent.includes('已停止'));
         assert.ok(await page.locator('#independent-imu-on').isDisabled());
