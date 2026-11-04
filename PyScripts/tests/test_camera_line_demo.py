@@ -162,6 +162,21 @@ class CameraDetectorTests(unittest.TestCase):
                        DetectorConfig(threshold_mode=[]),DetectorConfig(adaptive_block=99999)):
             with self.assertRaises(ValueError):BlackTapeDetector(config)
 
+    def test_wide_perspective_tape_with_bright_seam_and_changed_visible_horizon(self):
+        for horizon in (40,85,105):
+            for half_width in (35,47):
+                frame=np.full((240,320),170,np.uint8)
+                polygon=np.array([[155,horizon],[165,horizon],[160+half_width,239],[160-half_width,239]],np.int32)
+                cv2.fillPoly(frame,[polygon],35)
+                cv2.line(frame,(160,horizon),(160,239),170,3) # seam / small reflection
+                result,_,_=BlackTapeDetector().detect(frame)
+                self.assertTrue(result['valid'],(horizon,half_width,result['reason']))
+                self.assertGreater(result['confidence'],.65)
+                self.assertLess(abs(result['near_error_norm']),.02)
+        too_wide=np.full((240,320),170,np.uint8)
+        cv2.rectangle(too_wide,(80,0),(240,239),30,-1)
+        self.assertFalse(BlackTapeDetector().detect(too_wide)[0]['valid'])
+
     def test_small_roi_does_not_duplicate_measurement_rows(self):
         detector=BlackTapeDetector(DetectorConfig(roi_top=.6,roi_bottom=.85,bands=32))
         result,_,_=detector.detect(np.full((80,160),190,np.uint8))

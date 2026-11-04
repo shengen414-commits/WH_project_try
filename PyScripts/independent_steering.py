@@ -21,7 +21,7 @@ except ImportError:
 DEFAULTS={
     'imu':{'kp':4.,'kd':.5,'deadband':1.,'max_us':370,'slew_us_s':400,'direction':1,'low_us':1130,'high_us':1850},
     'camera':{'kp':200.,'kd':.5,'deadband':.03,'max_us':370,'low_us':1130,'high_us':1850,'slew_us_s':400,'direction':1,
-              'confidence_min':.65,'target_x':.5,'roi_top':.35,'lookahead':.4,'threshold_mode':'otsu','threshold':80},
+              'max_width':.32,'confidence_min':.65,'target_x':.5,'roi_top':.35,'lookahead':.4,'threshold_mode':'otsu','threshold':80},
     # Reserved deliberately separate from individual test gains. No fusion mode
     # can be armed until a joint policy and its validation are implemented.
     'fusion':{'enabled':False,'policy':None}}
@@ -42,7 +42,7 @@ def validate_settings(source,data):
                 not 1100<=data['low_us']<1500<data['high_us']<=1900):
             raise ValueError('独立转向输出范围需位于1100～1900μs内，且下限<1500<上限')
     if source=='camera':
-        for key,lo,hi in [('confidence_min',.5,.99),('target_x',.1,.9),('roi_top',.1,.6),('lookahead',.1,.8)]:
+        for key,lo,hi in [('max_width',.03,.35),('confidence_min',.5,.99),('target_x',.1,.9),('roi_top',.1,.6),('lookahead',.1,.8)]:
             if type(data[key]) not in (int,float) or not math.isfinite(data[key]) or not lo<=data[key]<=hi:
                 raise ValueError(f'{key} 超出 {lo}～{hi}')
         if data['threshold_mode'] not in ('otsu','fixed','adaptive') or type(data['threshold']) is not int or not 0<=data['threshold']<=255:
@@ -66,7 +66,7 @@ class IndependentSteering:
         if self.path.exists():
             try:
                 saved=json.loads(self.path.read_text(encoding='utf-8'))
-                if saved.get('schema') not in (1,2,3):raise ValueError('配置版本不支持')
+                if saved.get('schema') not in (1,2,3,4):raise ValueError('配置版本不支持')
                 profiles=copy.deepcopy(saved['profiles'])
                 if saved['schema']==1:
                     # One-time migration: adopt the explicitly requested measured IMU travel,
@@ -74,6 +74,7 @@ class IndependentSteering:
                     profiles['imu'].update(max_us=370,low_us=1130,high_us=1850)
                 if saved['schema']<3:
                     profiles['camera'].update(max_us=370,low_us=1130,high_us=1850)
+                profiles['camera'].setdefault('max_width',.32)
                 for source in ('imu','camera'):self.settings[source]=validate_settings(source,profiles[source])
             except (ValueError,TypeError,KeyError,OSError) as exc:
                 self.error=f'独立转向参数未载入：{exc}；请检查并保存参数后再开启'
@@ -145,7 +146,7 @@ class IndependentSteering:
             temporary=self.path.with_suffix('.tmp')
             try:
                 with temporary.open('w',encoding='utf-8') as f:
-                    json.dump({'schema':3,'profiles':profiles},f,ensure_ascii=False,allow_nan=False,indent=2)
+                    json.dump({'schema':4,'profiles':profiles},f,ensure_ascii=False,allow_nan=False,indent=2)
                     f.flush();os.fsync(f.fileno())
                 os.replace(temporary,self.path)
             finally:
@@ -280,10 +281,10 @@ class IndependentSteering:
         sequence,read_at,image=frame
         if sequence==self.last_frame:return None
         self.last_frame=sequence;p=self.settings['camera']
-        signature=tuple(p[key] for key in ('roi_top','target_x','lookahead','threshold_mode','threshold'))
+        signature=tuple(p[key] for key in ('roi_top','target_x','lookahead','threshold_mode','threshold','max_width'))
         if self.detector is None or signature!=self.detector_signature:
             self.detector_signature=signature
-            self.detector=BlackTapeDetector(DetectorConfig(roi_top=p['roi_top'],target_x=p['target_x'],lookahead=p['lookahead'],threshold_mode=p['threshold_mode'],threshold=p['threshold']))
+            self.detector=BlackTapeDetector(DetectorConfig(roi_top=p['roi_top'],target_x=p['target_x'],lookahead=p['lookahead'],threshold_mode=p['threshold_mode'],threshold=p['threshold'],max_width=p['max_width']))
         image=cv2.resize(image,(320,240))
         result,_,_=self.detector.detect(image)
         observation=camera_observation(result,sequence,read_at,p['confidence_min'])

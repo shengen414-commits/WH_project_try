@@ -27,7 +27,7 @@ const html = execFileSync(process.env.PYTHON || 'python', ['-X', 'utf8', '-B', '
         let steeringState={mode:'OFF',fresh:true,reason:'disabled'};
         const independent={phase:'off',blocking:false,source:null,request:{status:'idle'},firmware:{},fresh:false,jpeg_sequence:0,settings:{
             imu:{kp:4,kd:.5,deadband:1,max_us:370,slew_us_s:400,direction:1,low_us:1130,high_us:1850},
-            camera:{kp:200,kd:.5,deadband:.03,max_us:370,low_us:1130,high_us:1850,slew_us_s:400,direction:1,confidence_min:.65,target_x:.5,roi_top:.35,lookahead:.4,threshold_mode:'otsu',threshold:80}}};
+            camera:{max_width:.32,kp:200,kd:.5,deadband:.03,max_us:370,low_us:1130,high_us:1850,slew_us_s:400,direction:1,confidence_min:.65,target_x:.5,roi_top:.35,lookahead:.4,threshold_mode:'otsu',threshold:80}}};
         const independentActions=[],cameraToggles=[];let detectionImages=0;
         independent.camera={enabled:false,observation:null,observation_age_ms:null,error:null,processing_ms:null};
         function ack(target = manual.center_us) {

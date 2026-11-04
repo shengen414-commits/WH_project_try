@@ -198,7 +198,7 @@ class IndependentSteeringTests(unittest.TestCase):
         self.assertEqual((restored.settings['imu']['kp'],restored.settings['imu']['direction']),(7.,-1))
         self.assertEqual(restored.settings['camera'],{**old['camera'],'max_us':370,'low_us':1130,'high_us':1850})
         restored.configure('imu',restored.settings['imu'])
-        self.assertEqual(json.loads(self.service.path.read_text())['schema'],3)
+        self.assertEqual(json.loads(self.service.path.read_text())['schema'],4)
         restored.settings['imu']['max_us']=200
         restored.configure('imu',restored.settings['imu'])
         again=IndependentSteering(self.service.path,self.packets.append,lambda:None,autostart=False)

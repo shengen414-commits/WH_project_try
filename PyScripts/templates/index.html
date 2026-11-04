@@ -197,6 +197,7 @@
                     <label>ROI上边界比例<input name="roi_top" type="number" min=".1" max=".6" step=".01" value=".35" required></label>
                     <label>前视位置比例<input name="lookahead" type="number" min=".1" max=".8" step=".01" value=".4" required></label>
                     <label>阈值方法<select name="threshold_mode"><option value="otsu">Otsu自动</option><option value="fixed">固定阈值</option><option value="adaptive">自适应</option></select></label>
+                    <label>最大胶带宽度（画面比例）<input name="max_width" type="number" min=".03" max=".35" step=".01" value=".32" required></label>
                     <label>固定阈值<input name="threshold" type="number" min="0" max="255" step="1" value="80" required></label>
                     <label>右侧PWM下限 μs<input name="low_us" type="number" min="1100" max="1499" step="1" value="1130" required></label>
                     <label>左侧PWM上限 μs<input name="high_us" type="number" min="1501" max="1900" step="1" value="1850" required></label>
@@ -294,7 +295,7 @@
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
     <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=2"></script>
     <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=6-fixed-1100-1900"></script>
-    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=5-camera-travel"></script>
+    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=6-wide-tape"></script>
     <script src="{{ url_for('static', filename='js/line_response.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=6-independent"></script>
 </body>

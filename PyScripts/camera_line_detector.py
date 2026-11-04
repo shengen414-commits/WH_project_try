@@ -26,7 +26,7 @@ class DetectorConfig:
     adaptive_block: int = 61
     adaptive_c: int = 12
     min_width: float = 0.008
-    max_width: float = 0.18
+    max_width: float = 0.32
     min_contrast: float = 12.0
     bands: int = 18
     min_coverage: float = 0.55
@@ -255,7 +255,7 @@ class BlackTapeDetector:
             kernel_width = 2*max(2, round(cfg.max_width*width))+1
             local = cv2.morphologyEx(crop, cv2.MORPH_BLACKHAT, np.ones((1,kernel_width),np.uint8))
             local_mask = np.uint8(local >= cfg.min_contrast)*255
-            masks.append(local_mask); methods.append('local_contrast')
+            masks.append(local_mask); methods.extend(['local_contrast','row_otsu'])
         full_mask = np.zeros_like(gray)
         full_mask[top:bottom, left:right] = np.maximum.reduce(masks)
         result = empty_result("no_line", width, height)
@@ -271,9 +271,19 @@ class BlackTapeDetector:
             relative_y = y - top
             profile = crop[max(0, relative_y - 2):relative_y + 3].mean(axis=0)
             found = []
-            for candidate_mask in masks:
-                band_mask = candidate_mask[max(0, relative_y - 2):relative_y + 3]
-                occupied = np.mean(band_mask > 0, axis=0) >= 0.6
+            occupied_sets = [np.mean(candidate_mask[max(0, relative_y - 2):relative_y + 3] > 0, axis=0) >= .6
+                             for candidate_mask in masks]
+            if cfg.threshold_mode == 'otsu':
+                # Per-row illumination/perspective: a global threshold can split
+                # a wide near-field tape or merge its distant end with furniture.
+                _, row_mask = cv2.threshold(np.uint8(profile),0,255,cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+                occupied_sets.append(row_mask.ravel() > 0)
+            for occupied in occupied_sets:
+                # Join only small internal bright defects (glare/seams); preserve
+                # larger separations between distinct tape paths.
+                gap_kernel = max(3, round(width*.02) | 1)
+                occupied = cv2.morphologyEx(np.uint8(occupied).reshape(1,-1),cv2.MORPH_CLOSE,
+                                           np.ones((1,gap_kernel),np.uint8)).ravel() > 0
                 transitions = np.diff(np.r_[False, occupied, False].astype(np.int8))
                 starts, ends = np.flatnonzero(transitions == 1), np.flatnonzero(transitions == -1)
                 for start, end in zip(starts, ends):
