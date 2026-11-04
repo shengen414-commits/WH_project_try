@@ -42,7 +42,7 @@ def validate_settings(source,data):
                 not 1100<=data['low_us']<1500<data['high_us']<=1900):
             raise ValueError('独立转向输出范围需位于1100～1900μs内，且下限<1500<上限')
     if source=='camera':
-        for key,lo,hi in [('max_width',.03,.35),('confidence_min',.5,.99),('target_x',.1,.9),('roi_top',.1,.6),('lookahead',.1,.8)]:
+        for key,lo,hi in [('max_width',.03,.35),('confidence_min',.3,.99),('target_x',.1,.9),('roi_top',.1,.6),('lookahead',.1,.8)]:
             if type(data[key]) not in (int,float) or not math.isfinite(data[key]) or not lo<=data[key]<=hi:
                 raise ValueError(f'{key} 超出 {lo}～{hi}')
         if data['threshold_mode'] not in ('otsu','fixed','adaptive') or type(data['threshold']) is not int or not 0<=data['threshold']<=255:
