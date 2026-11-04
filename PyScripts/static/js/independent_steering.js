@@ -45,6 +45,11 @@
         const age=data.source==='camera'&&camera.enabled?camera.observation_age_ms:data.observation_age_ms;
         let detail=data.phase==='fault'?(reasons[data.message]||data.message||reasons[firmware.reason]):(reasons[firmware.reason]||data.message);
         if(detail?.startsWith('观测无效：')){const code=detail.slice('观测无效：'.length);detail=`观测无效：${detectionReasons[code]||code}`;}
+        if(data.phase==='fault'&&data.fault_detail){
+            const fault=data.fault_detail;
+            const why=fault.reason?.startsWith('观测无效：')?`观测无效：${detectionReasons[fault.reason.slice(5)]||fault.reason.slice(5)}`:fault.reason;
+            detail=`${why} | 停机时：年龄${formats(fault.observation_age_ms,0)} ms、置信度${formats(fault.confidence)} / ${formats(fault.confidence_min)}、检测${formats(fault.processing_ms,0)} ms`;
+        }
         el('independent-status').textContent=`独立转向：${data.source==='imu'?'IMU航向保持':data.source==='camera'?'相机中线':'未选择'} · ${labels[data.phase]||data.phase||'等待'} | 固件PWM ${firmware.pwm||'—'} μs | ${detail||''}`;
         el('independent-observation').textContent=observation?(data.phase==='running'?'最新观测：':data.source==='camera'&&camera.enabled?'检测预览（未控制）：':'历史观测（未控制）：')+(observation.source==='imu'?
             `相对航向 ${formats(observation.relative_heading_deg)}° | 左转正角速度 ${formats(observation.yaw_rate_deg_s)}°/s | 横向位置未知`:

@@ -60,6 +60,9 @@ class IndependentSteeringTests(unittest.TestCase):
         self.service.step();self.assertTrue(self.packets[-1].startswith(f'@A2,{sid},1,-'.encode()))
         before=len(self.packets);self.service.step();self.assertEqual(len(self.packets),before)
         self.now=10.2;self.service.step()
+        self.assertEqual(self.service.phase,'running')
+        self.assertEqual(len(self.packets),before)
+        self.now=10.26;self.service.step()
         self.assertEqual(self.service.phase,'fault');self.assertEqual(self.packets[-1],f'@A3,{sid}\n'.encode())
         observation=camera_observation({'valid':True,'confidence':1.,'lookahead_error_norm':0,'image_angle_deg':0},2,10.2)
         self.service.step();self.assertEqual(self.packets[-1],f'@A3,{sid}\n'.encode())
@@ -259,6 +262,50 @@ class IndependentSteeringTests(unittest.TestCase):
         self.now+=.8
         self.assertIsNone(self.service.preview_jpeg())
         self.assertEqual(self.service.phase,'fault')
+
+    def test_fault_reason_survives_generic_firmware_acknowledgement(self):
+        sid=self.arm('camera')
+        self.service._fail('观测无效：observation_stale')
+        self.service.feed(f'[ASSIST] id={sid} active=1 fault=1 ready=1 reason=host_sensor_invalid')
+        self.assertEqual(self.service.message,'观测无效：observation_stale')
+        self.assertEqual(self.service.snapshot()['fault_detail']['reason'],self.service.message)
+
+    def test_setting_new_confidence_invalidates_old_inflight_classification(self):
+        old=camera_observation({'valid':True,'confidence':.4,'lookahead_error_norm':0,'image_angle_deg':0},1,self.now,.65)
+        self.service.camera_observation=old
+        generation=self.service.camera_generation
+        self.service.configure('camera',{**DEFAULTS['camera'],'confidence_min':.3})
+        self.assertIsNone(self.service.camera_observation)
+        self.assertGreater(self.service.camera_generation,generation)
+
+    def test_slow_camera_uses_new_fresh_results_without_faulting_on_old_repeats(self):
+        sid=self.arm('camera')
+        current=[None]
+        self.service._camera_observation=lambda now:current[0]
+        for seq in range(1,5):
+            # A 104ms detector running at roughly 8Hz, as on the user's device.
+            current[0]=camera_observation({'valid':True,'confidence':.59,'lookahead_error_norm':-.2,'image_angle_deg':5.},seq,self.now-.104,.35)
+            self.service.step()
+            self.assertEqual(self.service.phase,'running')
+            sent=len(self.packets)
+            self.now+=.08;self.service.step() # Last result is now 184ms old, already sent.
+            self.assertEqual(self.service.phase,'running')
+            self.assertEqual(len(self.packets),sent)
+            self.now+=.045
+        self.now+=.26;self.service.step()
+        self.assertEqual(self.service.phase,'fault')
+
+    def test_camera_worker_submits_immediately_after_detection(self):
+        sid=self.arm('camera')
+        def detect_once():
+            read_at=self.now
+            self.now+=.104
+            self.service.camera_observation=camera_observation({'valid':True,'confidence':.59,'lookahead_error_norm':-.2,'image_angle_deg':5.},1,read_at,.35)
+            self.service.camera_shutdown.set()
+        with patch.object(self.service,'camera_step',side_effect=detect_once):
+            self.service._camera_work()
+        self.assertEqual(self.service.phase,'running')
+        self.assertTrue(self.packets[-1].startswith(f'@A2,{sid},'.encode()))
 
 
 if __name__=='__main__':unittest.main()

@@ -56,7 +56,7 @@ class IndependentSteering:
         self.camera_capture=camera_capture or (lambda enabled:None)
         self.camera_enabled=False;self.camera_worker=None;self.camera_shutdown=threading.Event();self.camera_wakeup=threading.Event()
         self.camera_generation=0;self.camera_observation=None;self.camera_error=None;self.jpeg_at=None;self.jpeg_source_at=None;self.camera_processing_ms=None
-        self.zero_status={};self.output_limits=None;self.detector_signature=None;self.camera_toggle_lock=threading.Lock()
+        self.zero_status={};self.fault_detail=None;self.last_target_at=None;self.output_limits=None;self.detector_signature=None;self.camera_toggle_lock=threading.Lock()
         self.lock=threading.RLock();self.settings=copy.deepcopy(DEFAULTS)
         self.owned=False;self.source=None;self.phase='off';self.message='独立转向未开启'
         self.identifier=0;self.sequence=0;self.started=0.;self.received=None
@@ -128,6 +128,11 @@ class IndependentSteering:
         while not self.camera_shutdown.is_set():
             started=self.clock()
             self.camera_step()
+            # Submit a newly computed camera result without waiting another host
+            # control period. CV and serial feed never share the receiver lock.
+            if self.owned and self.source=='camera':
+                try:self.step()
+                except Exception as exc:self._fail(str(exc))
             self.camera_wakeup.wait(max(.005,.04-(self.clock()-started)) if self.camera_enabled else .2)
             self.camera_wakeup.clear()
 
@@ -151,7 +156,11 @@ class IndependentSteering:
                 os.replace(temporary,self.path)
             finally:
                 if temporary.exists():temporary.unlink()
+            changed=source=='camera' and candidate!=self.settings['camera']
             self.settings=profiles;self.error=None
+            if changed:
+                self.camera_generation+=1;self.camera_observation=None;self.camera_error=None
+                self.camera_wakeup.set()
 
     def start(self,source):
         with self.lock:
@@ -165,7 +174,7 @@ class IndependentSteering:
             self.identifier=secrets.randbelow(0x7fffffff)+1
             self.source=source;self.started=self.clock();self.received=None;self.owned=True;self.phase='arming'
             self.observation=self.proposal=None;self.firmware={};self.sequence=0;self.last_imu_ms=None
-            self.timer=DeviceClock();self.last_probe=-100.;self.zero_status={};self.output_limits=None
+            self.timer=DeviceClock();self.last_probe=-100.;self.zero_status={};self.output_limits=None;self.fault_detail=None;self.last_target_at=None
             self.stop_event=threading.Event();self.request={'action':'start','status':'pending','id':self.identifier}
             p=self.settings[source];number=1 if source=='imu' else 2
             self.message='等待固件确认；IMU需保持车身静止完成零偏标定' if source=='imu' else '等待固件确认相机独立模式'
@@ -190,9 +199,16 @@ class IndependentSteering:
             if self.owned:
                 self.phase='fault';self.message=message;self.stop_event.set();self.request['status']='error'
 
-    def _fail(self,message):
+    def _fail(self,message,observation=None):
         with self.lock:
             if not self.owned or self.phase in ('stopping','fault'):return
+            if observation is None:observation=self.camera_observation if self.source=='camera' else self.observation
+            now=self.clock()
+            self.fault_detail={'reason':message,'at':now,
+                'observation_age_ms':(now-observation.observed_at)*1000 if observation else None,
+                'confidence':observation.confidence if observation else None,
+                'confidence_min':self.settings['camera']['confidence_min'] if self.source=='camera' else None,
+                'processing_ms':self.camera_processing_ms}
             self.phase='fault';self.message=message;self.stop_event.set();self.request['status']='error'
             try:self.write(f'@A3,{self.identifier}\n'.encode('ascii'))
             except OSError:pass # Firmware's 250 ms target watchdog remains the final guard.
@@ -256,7 +272,9 @@ class IndependentSteering:
                     if self.phase in ('arming','stopping'):return False
                     self.received=now;self.firmware=f
                     if f.get('active')=='0':self._stopped();return True
-                    if f.get('fault')=='1':self.phase='fault';self.message=f.get('reason','firmware_fault');self.stop_event.set();return True
+                    if f.get('fault')=='1':
+                        if self.phase!='fault':self.message=f.get('reason','firmware_fault')
+                        self.phase='fault';self.stop_event.set();return True
                     if self.phase=='calibrating' and f.get('ready')=='1':self.phase='running';self.message='IMU相对航向保持已确认，当前朝向为0°'
                     return True
                 if line.startswith(('[SERVO]','[MPU]','[LAB],')) or line.startswith('[FOLLOW] mode=LINE'):
@@ -327,11 +345,19 @@ class IndependentSteering:
             # Initial IMU data may await the first clock probe. Gateway watchdog
             # will still stop motion if this wait lasts more than 250 ms.
             return
+        if source=='camera':
+            with self.lock:
+                if self.proposal is not None and observation.sequence==self.proposal.sequence:
+                    # The same already-used result ages while the next frame is
+                    # being computed. Never resubmit it or renew the watchdog.
+                    if self.last_target_at is not None and self.clock()-self.last_target_at>=.25:
+                        self._fail('相机超过250ms未产生新的有效控制目标')
+                    return
         proposal=standalone_proposal(observation,self.settings[source],self.clock())
         if not proposal.valid:
             with self.lock:
                 if identifier==self.identifier:self.observation=observation;self.proposal=proposal
-            self._fail(f'观测无效：{proposal.reason}');return
+            self._fail(f'观测无效：{proposal.reason}',observation);return
         with self.lock:
             if not self.owned or identifier!=self.identifier or self.phase!='running':return
             if self.proposal is not None and proposal.sequence==self.proposal.sequence:return
@@ -339,6 +365,7 @@ class IndependentSteering:
             self.observation=observation;self.proposal=proposal
             self.sequence=self.sequence%0xffffffff+1
             self.write(f'@A2,{identifier},{self.sequence},{demand:.4f}\n'.encode('ascii'))
+            self.last_target_at=self.clock()
 
     def _work(self):
         while not self.stop_event.is_set():
@@ -353,7 +380,7 @@ class IndependentSteering:
             if self.phase=='stopping' and self.request['status']=='pending' and now-self.stop_at>3:
                 self.request['status']='timeout';self.message='未收到退出确认，请检查新版固件和串口，不能确认已退出'
             return {'source':self.source,'blocking':self.owned,'phase':self.phase,'message':self.message,
-                    'request':dict(self.request),'firmware':dict(self.firmware),
+                    'request':dict(self.request),'firmware':dict(self.firmware),'fault_detail':copy.deepcopy(self.fault_detail),
                     'fresh':self.received is not None and 0<=now-self.received<.7,
                     'settings':copy.deepcopy(self.settings),'settings_error':self.error,
                     'observation':serialize(self.observation),'proposal':serialize(self.proposal),
