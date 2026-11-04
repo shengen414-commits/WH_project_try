@@ -1,8 +1,13 @@
+import os
+# Keep tiny vision fits/filters from launching competing math worker pools.
+# Respect explicit numerical-library settings made by the operator.
+for _thread_setting in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS'):
+    os.environ.setdefault(_thread_setting,'1')
 import cv2
+cv2.setNumThreads(max(1,int(os.environ.get('CAR_CV_THREADS','1'))))
 import bisect
 import csv
 import json
-import os
 import time
 import threading
 import re

@@ -49,7 +49,7 @@
         if(data.phase==='fault'&&data.fault_detail){
             const fault=data.fault_detail;
             const why=fault.reason?.startsWith('观测无效：')?`观测无效：${detectionReasons[fault.reason.slice(5)]||fault.reason.slice(5)}`:fault.reason;
-            detail=`${why} | 停机时：年龄${formats(fault.observation_age_ms,0)} ms、置信度${formats(fault.confidence)} / ${formats(fault.confidence_min)}、检测${formats(fault.processing_ms,0)} ms`;
+            detail=`${why} | 停机时：年龄${formats(fault.observation_age_ms,0)} ms、置信度${formats(fault.confidence)} / ${formats(fault.confidence_min)}、检测${formats(fault.processing_ms,0)} ms${fault.timings?`（取帧年龄${formats(fault.timings.input_age_ms,0)} / 算法${formats(fault.timings.detect_ms,0)} / 预览${formats(fault.timings.preview_ms,0)} / 线程CPU${formats(fault.timings.thread_cpu_ms,0)} ms）`:''}`;
         }
         el('independent-status').textContent=`独立转向：${data.source==='imu'?'IMU航向保持':data.source==='camera'?'相机中线':'未选择'} · ${labels[data.phase]||data.phase||'等待'} | 固件PWM ${firmware.pwm||'—'} μs | ${detail||''}`;
         el('independent-observation').textContent=observation?(data.phase==='running'?'最新观测：':data.source==='camera'&&camera.enabled?'检测预览（未控制）：':'历史观测（未控制）：')+(observation.source==='imu'?
@@ -75,7 +75,7 @@
         const detected=camera.observation;
         image.style.opacity=camera.preview_stale?'0.55':'1';
         el('independent-camera-status').textContent=camera.enabled?
-            `检测预览已开启（独立于顶部LeftCam） | ${camera.error|| (detected?detectionReasons[detected.reason]||detected.reason:'等待相机出图')} | 置信度 ${formats(detected?.confidence)} / 门槛 ${formats(cameraSettings?.confidence_min)} | ${camera.preview_stale?'预览延迟/历史帧，禁止用于控制':'预览新鲜'} | 数据年龄 ${formats(camera.observation_age_ms,0)} ms | 检测耗时 ${formats(camera.processing_ms,0)} ms`:'检测预览已关闭；请先开启此开关，等待出图后再开启相机转向。';
+            `检测预览已开启（独立于顶部LeftCam） | ${camera.error|| (detected?detectionReasons[detected.reason]||detected.reason:'等待相机出图')} | 置信度 ${formats(detected?.confidence)} / 门槛 ${formats(cameraSettings?.confidence_min)} | ${camera.preview_stale?'预览延迟/历史帧，禁止用于控制':'预览新鲜'} | 数据年龄 ${formats(camera.observation_age_ms,0)} ms | 检测耗时 ${formats(camera.processing_ms,0)} ms${camera.timings?` | 算法${formats(camera.timings.detect_ms,0)} / 预览${formats(camera.timings.preview_ms,0)} ms | CV线程${camera.timings.cv_threads||'—'}`:''}`:'检测预览已关闭；请先开启此开关，等待出图后再开启相机转向。';
         updatePreview();
 
     }

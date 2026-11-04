@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from camera_line_detector import BlackTapeDetector, DetectorConfig, render_overlay
+from camera_line_detector import BlackTapeDetector, DetectorConfig, render_overlay, small_polyfit
 from camera_line_demo import VisionSession, create_app
 
 
@@ -176,6 +176,16 @@ class CameraDetectorTests(unittest.TestCase):
         too_wide=np.full((240,320),170,np.uint8)
         cv2.rectangle(too_wide,(80,0),(240,239),30,-1)
         self.assertFalse(BlackTapeDetector().detect(too_wide)[0]['valid'])
+
+    def test_bounded_fit_matches_weighted_least_squares_without_svd(self):
+        rng=np.random.default_rng(105)
+        for count in (6,12,18,32):
+            x=np.sort(rng.uniform(-1,0,count))
+            y=150+20*x+7*x*x+rng.normal(0,.2,count)
+            weights=rng.uniform(1,2,count)
+            for degree in (1,2):
+                np.testing.assert_allclose(small_polyfit(x,y,degree,weights),np.polyfit(x,y,degree,w=weights),rtol=1e-9,atol=1e-9)
+                np.testing.assert_allclose(small_polyfit(x,y,degree),np.polyfit(x,y,degree),rtol=1e-9,atol=1e-9)
 
     def test_small_roi_does_not_duplicate_measurement_rows(self):
         detector=BlackTapeDetector(DetectorConfig(roi_top=.6,roi_bottom=.85,bands=32))

@@ -55,7 +55,7 @@ class IndependentSteering:
         self.path=Path(path);self.write=write;self.camera=camera;self.clock=clock;self.probe=probe;self.autostart=autostart
         self.camera_capture=camera_capture or (lambda enabled:None)
         self.camera_enabled=False;self.camera_worker=None;self.camera_shutdown=threading.Event();self.camera_wakeup=threading.Event()
-        self.camera_generation=0;self.camera_observation=None;self.camera_error=None;self.jpeg_at=None;self.jpeg_source_at=None;self.camera_processing_ms=None
+        self.camera_generation=0;self.camera_observation=None;self.camera_error=None;self.jpeg_at=None;self.jpeg_source_at=None;self.camera_processing_ms=None;self.camera_timings={}
         self.zero_status={};self.fault_detail=None;self.last_target_at=None;self.output_limits=None;self.detector_signature=None;self.camera_toggle_lock=threading.Lock()
         self.lock=threading.RLock();self.settings=copy.deepcopy(DEFAULTS)
         self.owned=False;self.source=None;self.phase='off';self.message='独立转向未开启'
@@ -211,7 +211,7 @@ class IndependentSteering:
                 'observation_age_ms':(now-observation.observed_at)*1000 if observation else None,
                 'confidence':observation.confidence if observation else None,
                 'confidence_min':self.settings['camera']['confidence_min'] if self.source=='camera' else None,
-                'processing_ms':self.camera_processing_ms}
+                'processing_ms':self.camera_processing_ms,'timings':dict(self.camera_timings)}
             self.phase='fault';self.message=message;self.stop_event.set();self.request['status']='error'
             try:self.write(f'@A3,{self.identifier}\n'.encode('ascii'))
             except OSError:pass # Firmware's 250 ms target watchdog remains the final guard.
@@ -305,6 +305,8 @@ class IndependentSteering:
         try:from .camera_line_detector import BlackTapeDetector,DetectorConfig,render_overlay
         except ImportError:from camera_line_detector import BlackTapeDetector,DetectorConfig,render_overlay
         import cv2
+        import time as timing
+        total_start=timing.perf_counter();cpu_start=timing.thread_time()
         frame=self.camera()
         # Capture can publish a newer frame after step() took its loop timestamp.
         # Test age after reading the immutable frame tuple, never against that
@@ -317,8 +319,12 @@ class IndependentSteering:
         if self.detector is None or signature!=self.detector_signature:
             self.detector_signature=signature
             self.detector=BlackTapeDetector(DetectorConfig(roi_top=p['roi_top'],target_x=p['target_x'],lookahead=p['lookahead'],threshold_mode=p['threshold_mode'],threshold=p['threshold'],max_width=p['max_width']))
+        input_age=max(0,(self.clock()-read_at)*1000)
+        resize_start=timing.perf_counter()
         image=cv2.resize(image,(256,192))
+        detect_start=timing.perf_counter()
         result,_,_=self.detector.detect(image)
+        detect_end=timing.perf_counter()
         observation=camera_observation(result,sequence,read_at,p['confidence_min'])
         # Publish the overlay together with its observation only if this enable generation still matches.
         jpeg=None
@@ -329,6 +335,11 @@ class IndependentSteering:
             overlay=render_overlay(image,preview_result,self.detector.config,control_label=f'PREVIEW gate={gate}')
             overlay=cv2.resize(overlay,(320,240));ok,encoded=cv2.imencode('.jpg',overlay,[cv2.IMWRITE_JPEG_QUALITY,65])
             if ok:jpeg=encoded.tobytes()
+        end=timing.perf_counter()
+        self.camera_timings={'input_age_ms':input_age,'resize_ms':(detect_start-resize_start)*1000,
+            'detect_ms':(detect_end-detect_start)*1000,'preview_ms':(end-detect_end)*1000,
+            'total_ms':(end-total_start)*1000,'thread_cpu_ms':(timing.thread_time()-cpu_start)*1000,
+            'cv_threads':cv2.getNumThreads(),'work_width':256}
         return observation,jpeg
 
     def _camera_observation(self, now):
@@ -404,7 +415,7 @@ class IndependentSteering:
                     'camera':{'enabled':self.camera_enabled,'error':self.camera_error,
                         'observation':serialize(self.camera_observation),
                         'observation_age_ms':max(0,(now-self.camera_observation.observed_at)*1000) if self.camera_observation else None,
-                        'processing_ms':self.camera_processing_ms,'jpeg_sequence':self.jpeg_sequence,
+                        'processing_ms':self.camera_processing_ms,'timings':dict(self.camera_timings),'jpeg_sequence':self.jpeg_sequence,
                         'preview_age_ms':max(0,(now-self.jpeg_source_at)*1000) if self.jpeg_source_at is not None else None,
                         'preview_stale':self.jpeg_source_at is None or not 0<=now-self.jpeg_source_at<=.15},
                     'clock':self.timer.status(now)}

@@ -90,6 +90,32 @@ def to_gray(frame):
     raise ValueError("Unsupported camera image shape")
 
 
+def small_polyfit(x, y, degree, w=None):
+    """Weighted degree-1/2 fit on the bounded ROI coordinate, without BLAS/SVD.
+
+    Orthogonal centered bases avoid normal-equation solves and worker-pool
+    dispatch for these tiny (at most 32-row) fits. w follows np.polyfit's
+    residual-weight convention, so squared weights enter the sums.
+    """
+    weights=np.ones_like(x) if w is None else w*w
+    total=float(weights.sum())
+    mean_x=float(np.sum(weights*x)/total);mean_y=float(np.sum(weights*y)/total)
+    z=x-mean_x;centered=y-mean_y
+    variance=float(np.sum(weights*z*z))
+    if variance<=1e-14:raise ValueError('Insufficient fit span')
+    slope=float(np.sum(weights*z*centered)/variance)
+    if degree==1:return np.array([slope,mean_y-slope*mean_x])
+    if degree!=2:raise ValueError('Only bounded linear/quadratic fits are supported')
+    mean_square=variance/total
+    skew=float(np.sum(weights*z*z*z)/variance)
+    quadratic=z*z-mean_square-skew*z
+    denominator=float(np.sum(weights*quadratic*quadratic))
+    if denominator<=1e-14:raise ValueError('Insufficient quadratic fit span')
+    a=float(np.sum(weights*quadratic*centered)/denominator)
+    b=slope-a*skew
+    return np.array([a,b-2*a*mean_x,mean_y-a*mean_square-b*mean_x+a*mean_x*mean_x])
+
+
 class BlackTapeDetector:
     def __init__(self, config=None):
         self.config = (config or DetectorConfig()).validate()
@@ -103,7 +129,10 @@ class BlackTapeDetector:
         cfg = self.config
         beam = [((), 0., 0)]
         finished = []
-        per_band = [np.flatnonzero(points[:,2] == band) for band in range(len(centers_y))]
+        # The beam is scalar-heavy: Python floats avoid thousands of NumPy
+        # scalar allocations on small ARM CPUs; fitting remains vectorized.
+        rows=points.tolist()
+        per_band = [[i for i,p in enumerate(rows) if p[2]==band] for band in range(len(centers_y))]
         beam_limit = min(24, max(6, 4*max(map(len,per_band))))
         max_slope = math.tan(math.radians(cfg.max_angle))
         scale = max(4., width * .025)
@@ -112,16 +141,16 @@ class BlackTapeDetector:
             next_states = []
             for indices, cost, gap in beam:
                 for index in candidates:
-                    point = points[index]
+                    point = rows[index]
                     extra = 0.
                     if indices:
-                        last = points[indices[-1]]
+                        last = rows[indices[-1]]
                         slope = (point[0]-last[0])/(point[1]-last[1])
                         if abs(slope) > max_slope:
                             continue
                         previous_slope = 0.
                         if len(indices) > 1:
-                            previous = points[indices[-2]]
+                            previous = rows[indices[-2]]
                             previous_slope = (last[0]-previous[0])/(last[1]-previous[1])
                             if abs(slope-previous_slope) > .8*(gap+1):
                                 continue
@@ -182,7 +211,7 @@ class BlackTapeDetector:
             return None
         t = (points[:, 1]-near_y)/roi_height
         weights = np.sqrt(np.clip(points[:, 3]/cfg.min_contrast, 1., 4.))
-        quadratic = np.polyfit(t, points[:, 0], 2, w=weights)
+        quadratic = small_polyfit(t, points[:, 0], 2, w=weights)
         errors = points[:, 0]-np.polyval(quadratic, t)
         mad = float(np.median(np.abs(errors-np.median(errors))))
         keep = np.abs(errors) <= max(tolerance, 3*1.4826*mad)
@@ -195,9 +224,9 @@ class BlackTapeDetector:
             return None
         if points[0, 1] > ahead_y or near_y-points[-1, 1] > spacing*1.5 or np.ptp(points[:, 1]) < .55*roi_height:
             return None
-        linear = np.polyfit(t, points[:, 0], 1, w=weights)
+        linear = small_polyfit(t, points[:, 0], 1, w=weights)
         if not all_kept:
-            quadratic = np.polyfit(t, points[:, 0], 2, w=weights)
+            quadratic = small_polyfit(t, points[:, 0], 2, w=weights)
         residual_linear = float(np.sqrt(np.mean((points[:, 0]-np.polyval(linear, t))**2)))
         residual_curve = float(np.sqrt(np.mean((points[:, 0]-np.polyval(quadratic, t))**2)))
         curve_norm = abs(float(quadratic[0]))/(4*width)
@@ -211,7 +240,7 @@ class BlackTapeDetector:
                for at in (t[0], t[-1], (ahead_y-near_y)/roi_height)):
             return None
         coverage = len(points)/cfg.bands
-        width_fit = np.polyfit(t, points[:, 4], 1)
+        width_fit = small_polyfit(t, points[:, 4], 1)
         width_noise = float(np.mean(np.abs(points[:, 4]-np.polyval(width_fit, t))))/max(2.,float(np.median(points[:, 4])))
         contrast_quality = min(1.,float(np.median(points[:, 3]))/(2*cfg.min_contrast))
         confidence = coverage*math.exp(-residual/tolerance)*math.exp(-.5*width_noise)*contrast_quality
