@@ -1,5 +1,6 @@
 #include "esc_control.h"
 #include <ESP32Servo.h>
+#include <cstdio>
 
 // --- 模块私有变量 ---
 const int escPin = 14; // 设定电调连接的 GPIO 引脚
@@ -7,6 +8,7 @@ const int rcPin = 27;  // 🚀 新增：遥控器接收机信号线接入 D27
 bool diagnosticsMuted = false;
 bool debugHoldNeutral = false;
 bool steeringHoldNeutral = false;
+bool autonomousESC = false, autonomousStop = false;
 int appliedEscPwm = 1500;
 Servo myESC;           // 实例化 Servo 对象
 
@@ -238,6 +240,13 @@ void initESC()
 // --- 控制函数 ---
 void setESCThrottle(int pwmValue)
 {
+    if (autonomousESC) {
+        if (pwmValue == ESC_NEUTRAL_PWM && currentMode != RC_MODE) {
+            autonomousStop = true;
+            forceEscNeutralOutput();
+        }
+        return;
+    }
     if (debugHoldNeutral || steeringHoldNeutral) { forceEscNeutralOutput(); return; }
     int requestedPwm = constrain(pwmValue, 1000, 2000);
     bool keepCurrentBoost = escBoostActive && requestedPwm == escBoostBasePwm;
@@ -259,6 +268,7 @@ void setESCThrottle(int pwmValue)
 
 void startESCBoost(int pwmValue)
 {
+    if (autonomousESC) return;
     if (debugHoldNeutral || steeringHoldNeutral) { forceEscNeutralOutput(); return; }
     webThrottle = constrain(pwmValue, 1000, 2000);
     lastWebCommandTime = millis();
@@ -320,6 +330,19 @@ void updateESCBoost()
     escBoostActive = false;
     requestEscOutput(escBoostBasePwm);
     if (!diagnosticsMuted) Serial.println(">>> [NUMERIC BOOST] complete, restored base PWM");
+}
+
+void setESCAutonomous(bool active) {
+    autonomousESC = active;
+    autonomousStop = false;
+}
+
+bool escAutonomousStopRequested() { return autonomousStop; }
+
+void writeESCAutonomous(int pwm) {
+    if (!autonomousESC || autonomousStop || currentMode == RC_MODE ||
+        millis() < estopLatchedUntil || debugHoldNeutral || steeringHoldNeutral) return;
+    requestEscOutput(constrain(pwm,1500,1640));
 }
 
 // 🚀 新增：持续监控与接管逻辑
@@ -424,10 +447,11 @@ void updateESC()
     if (millis() - lastDriveStatusTime > 100)
     {
         if (!diagnosticsMuted) {
-            Serial.print("[DRIVE] 模式: ");
-            Serial.print(currentMode == RC_MODE ? "RC" : "WEB");
-            Serial.print(" | 油门: ");
-            Serial.println(currentMode == RC_MODE ? rcPulseWidth : webThrottle);
+            char line[64];
+            const char* mode = currentMode == RC_MODE ? "RC" : autonomousESC ? "FUSION" : "WEB";
+            const int n = snprintf(line,sizeof(line),"[DRIVE] %s pwm=%d\n",mode,appliedEscPwm);
+            if (n>0 && n<(int)sizeof(line) && Serial.availableForWrite()>=n)
+                Serial.write((const uint8_t*)line,n);
         }
         lastDriveStatusTime = millis();
     }

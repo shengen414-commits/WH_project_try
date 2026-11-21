@@ -23,7 +23,7 @@ char digits[21]; // Sllll:hhhh,id, including a ten-digit uint32 request id.
 unsigned int digitCount = 0;
 unsigned long commandStartedAt = 0;
 bool configPending = false;
-char configPacket[64];
+char configPacket[96];
 unsigned int configLength = 0;
 unsigned long lastSampleAt = 0;
 uint32_t sequence = 0;

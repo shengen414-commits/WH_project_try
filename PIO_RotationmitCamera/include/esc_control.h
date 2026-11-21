@@ -21,4 +21,7 @@ struct ESCSteeringState { int pwm; bool rcMode; bool emergency; bool debugNeutra
 ESCSteeringState escSteeringState();
 // A lost/stale steering feedback latches neutral until explicit mode reset.
 void setESCSteeringInhibit(bool holdNeutral);
+void setESCAutonomous(bool active);
+void writeESCAutonomous(int pwm);
+bool escAutonomousStopRequested();
 #endif

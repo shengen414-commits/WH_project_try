@@ -11,12 +11,12 @@
     <div class="top-bar">
         <h1>🚗 CAR</h1>
         <div class="toggle-container">
-            <span>Left Cam</span>
+            <span>左相机 · 中线检测</span>
             <label class="switch">
                 <input type="checkbox" id="cam-toggle-left" onchange="toggleCamera('left')" checked>
                 <span class="slider"></span>
             </label>
-            <span>Right Cam</span>
+            <span>右相机 · 实验录像</span>
             <label class="switch">
                 <input type="checkbox" id="cam-toggle-right" onchange="toggleCamera('right')">
                 <span class="slider"></span>
@@ -85,7 +85,7 @@
     
     <div class="btn-group">
         <button id="snapshot-btn" class="btn-snapshot" onclick="captureSnapshot()">📸 保存当前双目图片</button>
-        <button id="rec-btn" onclick="startRecord()">🔴 记录多源融合数据 (3秒)</button>
+        <button id="rec-btn" onclick="startRecord()">🔴 记录右相机和车速 (3秒)</button>
         <div class="speed-record-status" id="record-status">多源记录: 空闲</div>
         <button id="speed-rec-btn" class="btn-speed-record" onclick="toggleSpeedRecord()">📈 开始速度记录</button>
         <div class="snapshot-status" id="snapshot-status">单张拍摄: 等待</div>
@@ -93,7 +93,7 @@
     </div>
 
     <section class="replay-panel" aria-labelledby="replay-title">
-        <h2 id="replay-title">相机即时回放</h2>
+        <h2 id="replay-title">右相机即时回放</h2>
         <p>开启后持续缓存最近一分钟，保存时采集继续运行。未满一分钟时保存已有画面。</p>
         <div class="replay-controls">
             <label>回放录制帧率 <input id="replay-fps" type="number" value="200" min="1" max="240" step="1"> fps</label>
@@ -103,7 +103,7 @@
         <div id="replay-cameras" class="replay-status">回放未开启</div>
         <div id="replay-job" class="replay-status" role="status" aria-live="polite"></div>
         <div id="replay-files" class="replay-files"></div>
-        <small>默认目标 200fps，可按性能调整，实际保存帧率取决于相机、编码和磁盘速度。每路缓存上限 1GiB，容量不足时历史会缩短。回放保存视频及逐帧时间索引；车速、扫描阀仍需提前开启各自记录。</small>
+        <small>先开启右相机。默认目标 200fps，实际保存帧率取决于相机、编码和磁盘速度。缓存上限 1GiB，容量不足时历史会缩短。回放保存视频及逐帧时间索引；车速和扫描阀需提前开启各自记录。</small>
     </section>
 
     <div class="operation-columns">
@@ -153,13 +153,19 @@
         <div id="line-steering-status" class="sync-hint" role="status">巡线转向：等待固件状态。先归中油门再开启；丢线或反馈超时会停止动力。</div>
         <div id="line-steering-message" class="sync-hint" role="status"></div>
         <section class="independent-steering-panel">
-            <h3>独立传感器转向</h3>
-            <p class="sync-hint">巡线、IMU、相机三种模式互斥。先归中油门再切换；独立参数分别保存，联合决策不直接复用这些测试输出。</p>
+            <h3>传感器转向</h3>
+            <p class="sync-hint">巡线、IMU、相机和联合模式互斥。联合低速测试需先在联合观察台完成标定；开启后保持静止，等待固件就绪。</p>
             <div class="sync-buttons">
                 <button id="independent-imu-on" onclick="startIndependentSteering('imu')">开启 IMU 航向保持</button>
                 <button id="independent-camera-on" onclick="startIndependentSteering('camera')">开启相机中线转向</button>
-                <button id="independent-off" onclick="stopIndependentSteering()">关闭独立转向并归中</button>
+                <button id="fusion-on" onclick="startFusionSteering()">开启联合低速测试</button>
+                <button id="independent-off" onclick="stopIndependentSteering()">关闭转向并归中</button>
             </div>
+            <div class="sync-buttons">
+                <label>联合测试目标车速（m/s）<input id="fusion-speed" type="number" min="0" max="0.8" step="0.01" value="0" disabled></label>
+                <button id="fusion-speed-apply" onclick="applyFusionSpeed()" disabled>应用目标车速</button>
+            </div>
+            <div id="fusion-status" class="sync-hint" role="status"></div>
             <div id="independent-status" class="sync-hint" role="status">独立转向：等待后台状态</div>
             <div id="independent-imu-calibration" class="sync-hint" role="status"></div>
             <div id="independent-observation" class="sync-hint">观测：—</div>
@@ -293,11 +299,11 @@
     </div>
 
     <script src="{{ url_for('static', filename='js/camera_preview.js') }}?v=3-grace"></script>
-    <script src="{{ url_for('static', filename='js/main.js') }}?v=line-prop-3"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}?v=right-recording-4"></script>
     <script src="{{ url_for('static', filename='js/sync_recording.js') }}?v=timing-5"></script>
     <script src="{{ url_for('static', filename='js/camera_replay.js') }}?v=2"></script>
     <script src="{{ url_for('static', filename='js/manual_steering.js') }}?v=6-fixed-1100-1900"></script>
-    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=12-camera-grace"></script>
+    <script src="{{ url_for('static', filename='js/independent_steering.js') }}?v=13-fusion"></script>
     <script src="{{ url_for('static', filename='js/line_response.js') }}?v=4"></script>
     <script src="{{ url_for('static', filename='js/dashboard_polling.js') }}?v=6-independent"></script>
 </body>

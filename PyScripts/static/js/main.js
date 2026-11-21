@@ -332,7 +332,7 @@ function renderRecordStatus(data) {
     const btn = document.getElementById('rec-btn');
     const label = document.getElementById('record-status');
     btn.disabled = !!data.active;
-    btn.innerText = data.active ? (data.status === 'recording' ? '⏳ 正在记录多源数据...' : '💾 正在保存图片和匹配数据...') : '🔴 记录多源融合数据 (3秒)';
+    btn.innerText = data.active ? (data.status === 'recording' ? '⏳ 正在记录右相机和车速...' : '💾 正在保存图片和匹配数据...') : '🔴 记录右相机和车速 (3秒)';
     if (data.status === 'error') label.innerText = `多源记录失败: ${data.message}`;
     else if (data.status === 'saved') label.innerText = `已保存 ${data.sample_count || 0} 条传感器数据 | 缺样 ${data.sequence_gaps || 0} | 写盘丢样 ${data.queue_drops || 0}`;
     else if (data.active) label.innerText = `多源记录: ${data.status === 'recording' ? '记录中' : '保存中'} | ${data.sample_count || 0} samples`;
@@ -352,7 +352,7 @@ async function startRecord() {
         await refreshRecordStatus();
     } catch (error) {
         btn.disabled = false;
-        btn.innerText = '🔴 记录多源融合数据 (3秒)';
+        btn.innerText = '🔴 记录右相机和车速 (3秒)';
         label.innerText = error.message;
     }
 }

@@ -28,6 +28,7 @@ try:
     from .dashboard_runtime import run_dashboard
     from .imu_visualization import ImuVisualization
     from .serial_connection import open_esp32_serial
+    from .serial_worker import SerialWorker
     from .steering_requests import SteeringRequests
     from .camera_recording import AsyncImageRecorder, DiskReplayBuffer
     from .camera_replay import CameraReplay, register_camera_replay_routes
@@ -46,6 +47,7 @@ except ImportError:
     from dashboard_runtime import run_dashboard
     from imu_visualization import ImuVisualization
     from serial_connection import open_esp32_serial
+    from serial_worker import SerialWorker
     from steering_requests import SteeringRequests
     from camera_recording import AsyncImageRecorder, DiskReplayBuffer
     from camera_replay import CameraReplay, register_camera_replay_routes
@@ -96,7 +98,8 @@ sensor_state = {
 }
 
 try:
-    esp32_serial = open_esp32_serial(os.environ.get('ESP32_SERIAL_PORT', '/dev/ttyUSB0'))
+    serial_open = SerialWorker if __name__ == '__main__' and sys.platform.startswith('linux') else open_esp32_serial
+    esp32_serial = serial_open(os.environ.get('ESP32_SERIAL_PORT', '/dev/ttyUSB0'))
     esp32_serial.reset_input_buffer()
     print("已清空启动积压数据！")
     print("✅ 成功连接到 ESP32 霍尔传感器模块！")
@@ -144,12 +147,15 @@ def probe_vehicle_lab_clock(timer):
             raise OSError('串口命令未完整发送')
 
 
-vehicle_lab = VehicleLab(ProfileStore(Path(SAVE_DIR) / 'Vehicle_Calibration' / 'profile.json'),
+vehicle_profile = ProfileStore(Path(SAVE_DIR) / 'Vehicle_Calibration' / 'profile.json')
+vehicle_lab = VehicleLab(vehicle_profile,
                          Path(SAVE_DIR) / 'State_Records', write_vehicle_lab_packet,
                          camera=lambda: cam_left.get_observation_frame(), probe=probe_vehicle_lab_clock)
 independent_steering = IndependentSteering(Path(SAVE_DIR) / 'Vehicle_Calibration' / 'independent_steering.json',
     write_vehicle_lab_packet, lambda: cam_left.get_observation_frame(), probe=probe_vehicle_lab_clock,
-    camera_capture=lambda enabled: cam_left.request_capture('independent', enabled))
+    camera_capture=lambda enabled: cam_left.request_capture('independent', enabled),
+    fusion_profile=vehicle_profile.snapshot,
+    fusion_capture=lambda enabled: cam_left.request_capture('fusion', enabled))
 
 
 def clamp_throttle_value(value, fallback=1500):
@@ -418,7 +424,7 @@ def read_esp32_data():
     """Read complete frames without clearing backlog or writing files here."""
     if esp32_serial is None:
         return
-    drive_pattern = re.compile(r"\[DRIVE\].*?\b(RC|WEB)\b.*?(\d{3,4})")
+    drive_pattern = re.compile(r"\[DRIVE\].*?\b(RC|WEB|FUSION)\b.*?(\d{3,4})")
     pending = bytearray()
     last_debug = 0.0
     while True:
@@ -631,7 +637,7 @@ class HighSpeedCamera:
 
     def start_record(self, session_id, duration_sec=3):
         with self.record_lock:
-            if not self.is_active or not self.available or not self.record_done.is_set():
+            if self.name != 'Right' or not self.is_active or not self.available or not self.record_done.is_set():
                 return False
             self.record_session_id = session_id
             self.record_deadline = time.monotonic() + duration_sec
@@ -674,9 +680,7 @@ class HighSpeedCamera:
                     if not self.available:
                         time.sleep(.05); continue
                 try:
-                    with self.capture_lock:
-                        vision_only = 'independent' in self.capture_consumers
-                    vision_only = vision_only and not self.is_recording and not self.replay.enabled
+                    vision_only = self.name == 'Left'
                     if vision_only:
                         # Drain MJPEG buffers at device speed, decode at 30Hz.
                         # Sleeping here would accumulate stale hardware frames.
@@ -712,7 +716,8 @@ class HighSpeedCamera:
                             self.image_recorder.submit(frame, curr_ns, mono_ns, self.frame_id)
                         else:
                             self._finish_record_locked()
-                self.replay.submit(frame, curr_ns, mono_ns, self.frame_id)
+                if self.name == 'Right':
+                    self.replay.submit(frame, curr_ns, mono_ns, self.frame_id)
                 stat_frame_count += 1
                 if stat_frame_count >= 100:
                     stat_now = time.perf_counter()
@@ -796,9 +801,9 @@ def vehicle_lab_operation(action):
 register_vehicle_lab(app, vehicle_lab, vehicle_lab_operation, lambda: manual_steering.snapshot())
 register_sync_routes(app, sync_coordinator)
 
-cam_left = HighSpeedCamera(src=0, name="Left", fps=210)
-cam_right = HighSpeedCamera(src=2, name="Right", fps=210)
-camera_replay = CameraReplay(SAVE_DIR, lambda: (cam_left, cam_right))
+cam_left = HighSpeedCamera(src=int(os.environ.get('CAR_VISION_CAMERA', '0')), name="Left", fps=210)
+cam_right = HighSpeedCamera(src=int(os.environ.get('CAR_RECORD_CAMERA', '2')), name="Right", fps=210)
+camera_replay = CameraReplay(SAVE_DIR, lambda: (cam_right,))
 register_camera_replay_routes(app, camera_replay)
 
 
@@ -1104,9 +1109,9 @@ def start_record():
             return jsonify({"status": "busy", "message": "上一批记录仍在保存"}), 409
         if not encoder_ready():
             return jsonify({"status": "unavailable", "message": "没有新鲜编码器数据，请连接 ESP32 并烧录无 SD 版本固件"}), 409
-        cameras = [cam_left] + ([cam_right] if cam_right.is_active else [])
+        cameras = [cam_right]
         if any(not cam.is_active or not cam.available or not cam.record_done.is_set() for cam in cameras):
-            return jsonify({"status": "unavailable", "message": "请开启相机并等待其就绪或保存完成"}), 409
+            return jsonify({"status": "unavailable", "message": "请开启右侧实验相机并等待就绪或保存完成"}), 409
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         try:
             recorder = CsvRecorder(os.path.join(SAVE_DIR, session_id, "sensor_data.csv"), 3.0)
@@ -1147,12 +1152,14 @@ def manual_steering_status():
 @app.post('/steering/independent')
 def independent_steering_command():
     data=request.get_json(silent=True)
-    if not isinstance(data,dict) or data.get('action') not in ('start','stop','save'):
-        return jsonify(error='需要 start / stop / save 操作'),400
+    if not isinstance(data,dict) or data.get('action') not in ('start','stop','save','speed'):
+        return jsonify(error='需要 start / stop / save / speed 操作'),400
     action=data['action']
     try:
         if action=='stop':
             independent_steering.stop()
+        elif action=='speed':
+            independent_steering.set_fusion_speed(data.get('speed_m_s'))
         else:
             with vehicle_lab_operation('independent'):
                 if manual_steering.blocking() or vehicle_lab.blocking():raise ValueError('请先退出手动舵机或联合观察模式')
@@ -1330,6 +1337,12 @@ def set_throttle():
         val = int(val_str)
         # 安全断言保护
         if 1000 <= val <= 2000:
+            assist=independent_steering.snapshot()
+            if assist['blocking'] and assist['source']=='fusion':
+                if val!=1500:
+                    return jsonify(status='ignored',message='联合模式请使用目标车速',reason='fusion_owns_throttle'),409
+                independent_steering.stop()
+                return jsonify(status='success',throttle=1500)
             if val != 1500 and independent_steering.blocking() and not independent_steering.can_drive():
                 return jsonify(status='ignored',message='独立转向尚未就绪或已故障，请先关闭重试',reason='independent_not_ready',throttle=1500),409
             if val != 1500 and vehicle_lab.blocking():
@@ -1390,6 +1403,14 @@ def reverse_brake_sequence(token, source_pwm, brake_pwm):
 def e_stop():
     """最高优先级：按当前方向反向小PWM制动2秒后归中。"""
     global estop_ignore_until, brake_sequence_token
+    assist=independent_steering.snapshot()
+    if assist['blocking'] and assist['source']=='fusion':
+        estop_ignore_until=time.monotonic()+1.
+        try:
+            independent_steering.stop(emergency=True)
+        except OSError as error:
+            return jsonify(status='error',message=str(error)),503
+        return jsonify(status='success',throttle=1500,brake_pwm=1500,duration_sec=0)
     if independent_steering.blocking():
         try:independent_steering.stop()
         except OSError:pass
@@ -1443,3 +1464,5 @@ if __name__ == '__main__':
         camera_replay.close()
         for camera in (cam_left, cam_right):
             camera.record_done.wait(3)
+        if esp32_serial is not None:
+            esp32_serial.close()

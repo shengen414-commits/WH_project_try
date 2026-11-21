@@ -7,3 +7,5 @@ YOLOv10-N/*
 .VSCodeCounter
 __pycache__/
 *.py[cod]
+/PyScripts/native/line_detector
+/PyScripts/native/line_detector.exe

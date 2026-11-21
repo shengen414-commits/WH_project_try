@@ -27,13 +27,13 @@ void setup() {
 
 void loop() {
     pollSerialCommands();
-    updateESC();
-    updateSteering();
-    publishEncoder();
     updateLineSensor();
     updateMPU6050Debug();
+    updateESC();
+    updateSteering();
     updateAutomaticSteering();
     updateIndependentSteering();
+    publishEncoder();
     publishLineSensor();
     publishSteeringDebug(true);
     publishMPU6050Debug();

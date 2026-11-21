@@ -5,7 +5,11 @@
     const reasons={imu_init_failed:'IMU初始化失败，请检查接线和I²C读取',imu_zero_timeout:'IMU标定超时，查看下方采样诊断',zero_timeout:'未在4秒内收集到连续稳定窗口',bias_out_of_range:'静止零偏超出允许范围',imu_zero_failed:'IMU标定失败，请保持静止后重试',imu_stale:'IMU读取超时',imu_gap:'IMU采样中断',
         imu_mount_or_tilt:'IMU方向或倾斜不符合X前Y右Z下的平面条件',host_target_stale:'后台目标超过250ms未更新',
         host_sensor_invalid:'后台检测失效，固件已归中停动力',reverse_not_supported:'独立转向只支持前进',
-        control_gap:'固件控制循环超时',rc_takeover:'遥控器已接管',tracking:'正在响应偏差',waiting_target:'等待有效观测',imu_calibrating:'静止标定中'};
+        control_gap:'固件控制循环超时',rc_takeover:'遥控器已接管',tracking:'正在响应偏差',waiting_target:'等待有效观测',imu_calibrating:'静止标定中',
+        fusion_limited:'观测降级，已限制车速',fusion_route_lost:'联合观测中断，已停止动力',
+        fusion_observation_timeout:'未取得可用的相机和巡线联合观测',invalid_fusion_geometry:'联合标定参数超出固件范围',
+        waiting_fusion_observations:'等待新鲜的相机和巡线观测',fusion_speed_out_of_range:'车速超出联合测试范围',
+        fusion_no_motion:'发出动力后没有测到有效车速'};
     const formats=(value,digits=2)=>typeof value==='number'?value.toFixed(digits):'—';
     const detectionReasons={no_line:'未找到黑胶带',low_confidence:'中线置信度不足',ambiguous_lines:'存在多条候选线',
         observation_stale:'观测超过有效期（相机500ms，IMU150ms）',roi_too_short:'当前图像的ROI高度不足以采样',no_consistent_path:'近端或前视区域缺少连续可靠的胶带路径',insufficient_straight_support:'有效直线点不足',poor_fit:'中线拟合不可靠',no_far_support:'前视区域没有有效中线'};
@@ -37,6 +41,17 @@
         const cameraSettings=data.settings?.camera;
         if(cameraSettings)el('independent-camera-travel').textContent=`已保存相机行程：右${cameraSettings.low_us} μs，中位1500 μs，左${cameraSettings.high_us} μs | 最大修正${cameraSettings.max_us} μs | ${data.source==='camera'&&limits?'固件已确认专用行程':'开启相机转向后等待固件确认'}。小偏差响应仍由横向增益和图像方向增益决定。`;
         const blocked=!!data.blocking;
+        const fusionActive=data.source==='fusion';
+        const fusionReady=fusionActive&&data.phase==='running'&&data.fresh&&data.firmware?.ready==='1';
+        el('fusion-on').disabled=busy||blocked||cameraBusy;
+        el('fusion-speed').disabled=busy||!fusionReady;
+        el('fusion-speed-apply').disabled=busy||!fusionReady;
+        if(!fusionReady)el('fusion-speed').value=0;
+        const ground=data.fusion?.ground;
+        el('fusion-status').textContent=fusionActive?
+            `设定 ${formats(data.fusion?.speed_request)} m/s | 固件目标 ${data.firmware?.goal||'—'} m/s | 实测 ${data.firmware?.v||'—'} m/s | 电调 ${data.firmware?.esc||'—'} μs`+
+            (ground?` | C++ 视觉 ${formats(ground.lateral_m,3)} m / ${formats(ground.heading_deg,1)}° | 置信度 ${formats(ground.confidence)} | ${formats(ground.age_ms,0)} ms`:'')+
+            (data.fusion?.vision_error?' | '+data.fusion.vision_error:''):'';
         for(const source of ['imu','camera']){
             el(`independent-${source}-on`).disabled=busy||blocked||cameraBusy;
             el(`independent-${source}-form`).querySelectorAll('input,select,button').forEach(c=>c.disabled=busy||blocked);
@@ -52,7 +67,7 @@
             const why=fault.reason?.startsWith('观测无效：')?`观测无效：${detectionReasons[fault.reason.slice(5)]||fault.reason.slice(5)}`:fault.reason;
             detail=`${why} | 停机时：年龄${formats(fault.observation_age_ms,0)} ms、置信度${formats(fault.confidence)} / ${formats(fault.confidence_min)}、检测${formats(fault.processing_ms,0)} ms${fault.timings?`（取帧年龄${formats(fault.timings.input_age_ms,0)} / 算法${formats(fault.timings.detect_ms,0)} / 预览${formats(fault.timings.preview_ms,0)} / 线程CPU${formats(fault.timings.thread_cpu_ms,0)} ms）`:''}`;
         }
-        el('independent-status').textContent=`独立转向：${data.source==='imu'?'IMU航向保持':data.source==='camera'?'相机中线':'未选择'} · ${labels[data.phase]||data.phase||'等待'} | 固件PWM ${firmware.pwm||'—'} μs | ${detail||''}`;
+        el('independent-status').textContent=`转向：${data.source==='imu'?'IMU航向保持':data.source==='camera'?'相机中线':fusionActive?'联合低速测试':'未选择'} · ${labels[data.phase]||data.phase||'等待'} | 固件PWM ${firmware.pwm||'—'} μs | ${detail||''}`;
         el('independent-observation').textContent=observation?(data.phase==='running'?'最新观测：':data.source==='camera'&&camera.enabled?'检测预览（未控制）：':'历史观测（未控制）：')+(observation.source==='imu'?
             `相对航向 ${formats(observation.relative_heading_deg)}° | 左转正角速度 ${formats(observation.yaw_rate_deg_s)}°/s | 横向位置未知`:
             `画面偏差 ${formats(observation.image_offset_norm,3)} | 图像方向 ${formats(observation.image_heading_deg)}° | 置信度 ${formats(observation.confidence)}`)+` | 数据年龄 ${formats(age,0)} ms`:'观测：等待新鲜数据';
@@ -69,7 +84,7 @@
             el('line-steering-on').disabled=true;el('manual-steering-start').disabled=true;
         }
         const zero=data.imu_calibration||{};
-        el('independent-imu-calibration').textContent=data.source==='imu'&&zero.reason?
+        el('independent-imu-calibration').textContent=(data.source==='imu'||fusionActive)&&zero.reason?
             `标定诊断：${zeroReasons[zero.reason]||zero.reason} | ${zero.samples}/200样本 | 重采 ${zero.restarts} 次 | Z零偏 ${formats(zero.bias)}°/s | 三轴最大波动 ${formats(zero.sd,3)}°/s | 加速度 ${formats(zero.a,3)}g`:'';
         el('independent-camera-toggle').checked=cameraBusy?cameraWanted:!!camera.enabled;
         el('independent-camera-toggle').disabled=cameraBusy||busy;
@@ -119,6 +134,21 @@
         catch(error){el('independent-message').textContent=error.message;}
         finally{busy=false;render(state);if(global.dashboardPolling)global.dashboardPolling.refresh();}
     }
+    async function fusionCommand(body){
+        if(busy)return;
+        busy=true;render(state);
+        try {
+            if(body.action==='start' && typeof global.parkThrottleForManualSteering==='function')
+                global.parkThrottleForManualSteering();
+            await post(body);
+            el('independent-message').textContent=body.action==='start'?'已请求开启联合模式':'已设置联合目标车速';
+        } catch(error) {
+            el('independent-message').textContent=error.message;
+        } finally {
+            busy=false;render(state);if(global.dashboardPolling)global.dashboardPolling.refresh();
+            if(stopQueued){stopQueued=false;await stop();}
+        }
+    }
     for(const source of ['imu','camera'])el(`independent-${source}-form`).addEventListener('submit',event=>{event.preventDefault();execute(source,false);});
     el('independent-camera-toggle').addEventListener('change',async event=>{
         const enabled=event.target.checked;cameraWanted=enabled;cameraBusy=true;render(state);
@@ -131,6 +161,11 @@
         finally{clearTimeout(timeout);cameraBusy=false;render(state);if(global.dashboardPolling)global.dashboardPolling.refresh();}
     });
     global.startIndependentSteering=source=>execute(source,true);
+    global.startFusionSteering=()=>fusionCommand({action:'start',source:'fusion'});
+    global.applyFusionSpeed=()=>{
+        const input=el('fusion-speed');
+        if(input.value!==''&&input.reportValidity())fusionCommand({action:'speed',speed_m_s:Number(input.value)});
+    };
     global.stopIndependentSteering=stop;
     global.independentSteeringBlocking=()=>!!state.blocking;
     global.renderIndependentSteering=render;

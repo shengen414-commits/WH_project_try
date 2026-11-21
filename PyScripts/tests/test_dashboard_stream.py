@@ -303,7 +303,7 @@ class DashboardTests(unittest.TestCase):
         camera = Mock(is_active=True, available=True, record_error=None)
         camera.record_done = threading.Event()
         camera.record_done.set()
-        camera.name = 'Left'
+        camera.name = 'Right'
 
         def start_record(session_id, duration_sec):
             camera.session_id = session_id
@@ -311,14 +311,14 @@ class DashboardTests(unittest.TestCase):
             return True
 
         def finish_record():
-            folder = Path(self.app.SAVE_DIR) / camera.session_id / 'Left'
+            folder = Path(self.app.SAVE_DIR) / camera.session_id / 'Right'
             folder.mkdir(parents=True, exist_ok=True)
             (folder / f'{time.time_ns()}.jpg').write_bytes(b'fake image')
             camera.record_done.set()
         camera.start_record.side_effect = start_record
         camera.finish_record.side_effect = finish_record
         factory = lambda path, duration: CsvRecorder(path, min(duration, 0.2))
-        with patch.object(self.app, 'cam_left', camera), patch.object(self.app, 'CsvRecorder', factory):
+        with patch.object(self.app, 'cam_right', camera), patch.object(self.app, 'CsvRecorder', factory):
             self.assertEqual(self.client.post('/speed_record/start').status_code, 200)
             response = self.client.get('/start_record')
             self.assertEqual(response.status_code, 200)
@@ -335,7 +335,8 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue((Path(self.app.SAVE_DIR) / session / 'sync_meta.json').exists())
             with open(Path(self.app.SAVE_DIR) / session / 'sensor_data_enhanced.csv', newline='', encoding='utf-8') as file:
                 rows = list(csv.DictReader(file))
-            self.assertTrue(rows[0]['left_image'])
+            self.assertTrue(rows[0]['right_image'])
+            self.assertFalse(rows[0]['left_image'])
             self.assertEqual(rows[0]['host_received_time_ns'], rows[0]['python_time_ns_est'])
             self.app.esp32_serial.write.assert_not_called()
 
@@ -474,7 +475,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.client.post('/steering/manual', json={'action': 'stop'}).status_code, 409)
 
     def test_camera_uses_deadline_instead_of_required_frame_count(self):
-        camera = self.app.cam_left
+        camera = self.app.cam_right
         camera.is_active = camera.available = camera.running = True
         camera.record_done.set()
         camera.cap = Mock()
@@ -494,6 +495,7 @@ class DashboardTests(unittest.TestCase):
         recorder.submit.assert_not_called()  # Late frames excluded regardless of frame count.
         recorder.finish.assert_called_once()
         camera.available = False
+        camera.is_active = False
 
 
     def test_detection_drains_capture_without_decoding_every_hardware_frame(self):
@@ -510,12 +512,13 @@ class DashboardTests(unittest.TestCase):
             return True
         cap.grab.side_effect=grab
         cap.retrieve.return_value=(True,object())
-        with patch.object(camera.replay,'submit') as submit, patch.object(camera.replay,'enabled',False), patch.object(self.app.time,'monotonic',return_value=10.):
+        with patch.object(camera.replay,'submit') as submit, patch.object(self.app.time,'monotonic',return_value=10.):
+            self.assertFalse(camera.start_record('must_not_record'))
             camera._update()
         self.assertEqual(len(grabs),3)
         cap.retrieve.assert_called_once()
         cap.read.assert_not_called()
-        submit.assert_called_once()
+        submit.assert_not_called()
 
     def test_independent_capture_owner_survives_top_preview_toggle(self):
         camera=self.app.cam_left

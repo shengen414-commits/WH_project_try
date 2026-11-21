@@ -1,5 +1,6 @@
 """Standalone source controllers sharing the UART, camera and output gateway."""
 import copy
+from binascii import crc_hqx
 import json
 import math
 import os
@@ -12,19 +13,19 @@ try:
     from .steering_control_pipeline import (SteeringObservation, camera_observation,
         standalone_proposal, arbitrate, serialize, IMU_MOUNT_AXES, observation_timeout)
     from .vehicle_state.clock import DeviceClock
+    from .fusion_vision import FusionVision
 except ImportError:
     from steering_control_pipeline import (SteeringObservation, camera_observation,
         standalone_proposal, arbitrate, serialize, IMU_MOUNT_AXES, observation_timeout)
     from vehicle_state.clock import DeviceClock
+    from fusion_vision import FusionVision
 
 
 DEFAULTS={
     'imu':{'kp':4.,'kd':.5,'deadband':1.,'max_us':370,'slew_us_s':400,'direction':1,'low_us':1130,'high_us':1850},
     'camera':{'kp':200.,'kd':.5,'deadband':.03,'max_us':370,'low_us':1130,'high_us':1850,'slew_us_s':400,'direction':1,
               'max_width':.32,'confidence_min':.65,'target_x':.5,'roi_top':.35,'lookahead':.4,'threshold_mode':'otsu','threshold':80},
-    # Reserved deliberately separate from individual test gains. No fusion mode
-    # can be armed until a joint policy and its validation are implemented.
-    'fusion':{'enabled':False,'policy':None}}
+    'fusion':{'max_us':140,'slew_us_s':400,'direction':1,'low_us':1130,'high_us':1850}}
 
 
 def validate_settings(source,data):
@@ -51,9 +52,19 @@ def validate_settings(source,data):
 
 
 class IndependentSteering:
-    def __init__(self,path,write,camera,clock=time.monotonic,probe=None,autostart=True,camera_capture=None):
+    def __init__(self,path,write,camera,clock=time.monotonic,probe=None,autostart=True,camera_capture=None,
+                 fusion_profile=None,fusion_capture=None):
         self.path=Path(path);self.write=write;self.camera=camera;self.clock=clock;self.probe=probe;self.autostart=autostart
         self.camera_capture=camera_capture or (lambda enabled:None)
+        self.fusion_profile=fusion_profile
+        self.fusion_capture=fusion_capture or (lambda enabled:None)
+        self.fusion_vision=None
+        self.speed_request=0.
+        self.fusion_sent_at=None
+        self.fusion_config_sent_at=None
+        self.fusion_geometry=None
+        self.fusion_sequence=0
+        self.fusion_frame=None
         self.camera_enabled=False;self.camera_worker=None;self.camera_shutdown=threading.Event();self.camera_wakeup=threading.Event()
         self.camera_generation=0;self.camera_observation=None;self.camera_error=None;self.jpeg_at=None;self.jpeg_source_at=None;self.camera_processing_ms=None;self.camera_timings={}
         self.zero_status={};self.fault_detail=None;self.last_target_at=None;self.output_limits=None;self.detector_signature=None;self.camera_toggle_lock=threading.Lock()
@@ -149,6 +160,42 @@ class IndependentSteering:
         with self.lock:
             return self.owned and self.phase=='running' and self.camera_invalid_since is None and self.firmware.get('ready')=='1' and self.proposal is not None and self.proposal.valid and 0<=self.clock()-self.proposal.observed_at<=observation_timeout(self.source)
 
+    def set_fusion_speed(self, speed):
+        if type(speed) not in (int,float) or not math.isfinite(speed) or not 0<=speed<=.8:
+            raise ValueError('联合测试目标速度必须在 0～0.8 m/s')
+        with self.lock:
+            if not self.owned or self.source!='fusion' or self.phase!='running':
+                raise ValueError('请等待联合转向就绪')
+            self.speed_request=speed
+            self.fusion_sent_at=None
+
+    def _prepare_fusion(self):
+        if self.fusion_profile is None:
+            raise ValueError('联合模式未配置')
+        profile=self.fusion_profile()
+        geometry=profile['geometry']
+        fields=('line_pitch_m','line_x_m','line_y_m','meters_per_count','encoder_sign','wheelbase_m')
+        if any(geometry.get(key) is None for key in fields) or profile['camera'] is None:
+            raise ValueError('请在联合观察台完成左相机、巡线位置、轴距和编码器标定')
+        if geometry['meters_per_count']>.02 or geometry['wheelbase_m']>1:
+            raise ValueError('联合模式的编码器尺度或轴距超出范围')
+        self.fusion_geometry=(
+            geometry['line_pitch_m'],geometry['line_x_m'],geometry['line_y_m'],
+            geometry['meters_per_count']*geometry['encoder_sign'],geometry['wheelbase_m'])
+        self.fusion_capture(True)
+        try:
+            self.fusion_vision=FusionVision(self.camera,profile['camera'],self.settings['camera'],self.clock)
+        except (OSError,ValueError):
+            self.fusion_capture(False)
+            raise
+
+    def _release_fusion(self):
+        vision,self.fusion_vision=self.fusion_vision,None
+        if vision is not None:
+            self.fusion_capture(False)
+            # The serial receiver must never wait for subprocess cleanup.
+            threading.Thread(target=vision.close,name='fusion-vision-stop',daemon=True).start()
+
     def configure(self,source,data):
         candidate=validate_settings(source,data)
         with self.lock:
@@ -171,9 +218,16 @@ class IndependentSteering:
 
     def start(self,source):
         with self.lock:
-            if source not in ('imu','camera'):raise ValueError('只允许 IMU 或相机独立模式；联合决策尚未启用')
+            if source not in DEFAULTS:raise ValueError('不支持的转向模式')
             if self.owned or self.worker is not None and self.worker.is_alive():raise ValueError('先关闭上一种独立模式')
             if self.error:raise ValueError(self.error)
+            if source=='fusion':
+                self._prepare_fusion()
+                self.speed_request=0.
+                self.fusion_sent_at=None
+                self.fusion_config_sent_at=None
+                self.fusion_sequence=0
+                self.fusion_frame=None
             if source=='camera':
                 if not self.camera_enabled:raise ValueError('请先开启下方相机检测预览，等待新鲜图像后再开启转向')
                 frame=self.camera()
@@ -187,27 +241,35 @@ class IndependentSteering:
             self.timer=DeviceClock();self.last_probe=-100.;self.zero_status={};self.output_limits=None;self.fault_detail=None;self.last_target_at=None
             self.camera_invalid_since=None;self.camera_invalid_reason=None
             self.stop_event=threading.Event();self.request={'action':'start','status':'pending','id':self.identifier}
-            p=self.settings[source];number=1 if source=='imu' else 2
+            p=self.settings[source];number={'imu':1,'camera':2,'fusion':3}[source]
             self.message='等待固件确认；IMU需保持车身静止完成零偏标定' if source=='imu' else '等待固件确认相机独立模式'
+            if source=='fusion':self.message='等待联合模式确认，请保持静止'
             bounds=f",{p['low_us']},{p['high_us']}"
             try:self.write(f"@A1,{number},{self.identifier},{p['max_us']},{p['slew_us_s']},{p['direction']}{bounds}\n".encode('ascii'))
             except Exception as exc:
+                self._release_fusion()
                 self.phase='fault';self.message=str(exc);self.request['status']='error';raise
             if self.autostart:
                 self.worker=threading.Thread(target=self._work,name='independent-steering',daemon=True);self.worker.start()
 
-    def stop(self):
+    def stop(self, emergency=False):
         with self.lock:
             if not self.owned:return
             self.phase='stopping';self.stop_event.set();self.message='已请求归中停动力，等待固件退出确认'
+            self.speed_request=0.
+            self._release_fusion()
             self.stop_at=self.clock()
             self.request={'action':'stop','status':'pending','id':self.identifier}
             # Tagged gateway stop plus old firmware's tagged global OFF fallback.
-            self.write(f'@A0,{self.identifier}\nN0,{self.identifier}\n'.encode('ascii'))
+            if emergency:
+                self.write(b'E\n')
+            else:
+                self.write(f'@A0,{self.identifier}\nN0,{self.identifier}\n'.encode('ascii'))
 
     def invalidate(self,message):
         with self.lock:
             if self.owned:
+                self._release_fusion()
                 self.phase='fault';self.message=message;self.stop_event.set();self.request['status']='error'
 
     def _fail(self,message,observation=None):
@@ -221,6 +283,7 @@ class IndependentSteering:
                 'confidence_min':self.settings['camera']['confidence_min'] if self.source=='camera' else None,
                 'processing_ms':self.camera_processing_ms,'timings':dict(self.camera_timings)}
             self.phase='fault';self.message=message;self.stop_event.set();self.request['status']='error'
+            self._release_fusion()
             try:self.write(f'@A3,{self.identifier}\n'.encode('ascii'))
             except OSError:pass # Firmware's 250 ms target watchdog remains the final guard.
 
@@ -233,7 +296,7 @@ class IndependentSteering:
                     # Optional diagnostics cannot arm control or invalidate valid control feedback.
                     try:
                         f=dict(re.findall(r'(\w+)=([^\s]+)',line))
-                        if int(f['id'])!=self.identifier or self.source!='imu':return False
+                        if int(f['id'])!=self.identifier or self.source not in ('imu','fusion'):return False
                         values={key:float(f[key]) for key in ('bias','sd','a')}
                         samples,restarts=int(f['n']),int(f['reset'])
                         if (not all(math.isfinite(v) for v in values.values()) or
@@ -271,7 +334,7 @@ class IndependentSteering:
                         if self.phase=='stopping' and action==0 and ok==1:self._stopped();return True
                         if self.phase!='arming' or action!=1:return False
                         p=self.settings[self.source]
-                        expected={'source':1 if self.source=='imu' else 2,'lim':p['max_us'],'slew':p['slew_us_s'],
+                        expected={'source':{'imu':1,'camera':2,'fusion':3}[self.source],'lim':p['max_us'],'slew':p['slew_us_s'],
                                   'dir':p['direction'],'low':p['low_us'],'high':p['high_us']}
                         self.request['expected']=dict(expected);self.request['ack']=dict(f)
                         differences=[f"{key}:请求{value}/回包{f.get(key,'缺失')}" for key,value in expected.items() if f.get(key)!=str(value)]
@@ -286,28 +349,62 @@ class IndependentSteering:
                             self.phase='fault';self.message=(f'固件拒绝开启（{cause}）' if ok!=1 else '固件参数确认不一致')
                             if differences:self.message+='；'+'，'.join(differences)
                             if 'low' not in f or 'high' not in f:self.message+='；回包缺少专用行程，请确认已烧录支持相机1130～1850μs行程的新版esp32dev'
-                            self.request['status']='rejected';self.stop_event.set();return True
+                            self.request['status']='rejected';self.stop_event.set();self._release_fusion();return True
                         self.output_limits={'low_us':p['low_us'],'center_us':1500,'high_us':p['high_us']}
-                        self.phase='calibrating' if self.source=='imu' else 'running';self.request['status']='confirmed'
+                        self.phase='calibrating' if self.source in ('imu','fusion') else 'running';self.request['status']='confirmed'
                         self.message='IMU静止标定中，请保持车身不动' if self.source=='imu' else '相机独立转向已确认'
+                        if self.source=='fusion':self.message='静止标定 IMU，等待左相机和巡线观测'
                         self.received=now;return True
+                    if self.phase=='stopping' and f.get('active')=='0':
+                        self._stopped();return True
                     if self.phase in ('arming','stopping'):return False
                     self.received=now;self.firmware=f
                     if f.get('active')=='0':self._stopped();return True
                     if f.get('fault')=='1':
                         if self.phase!='fault':self.message=f.get('reason','firmware_fault')
-                        self.phase='fault';self.stop_event.set();return True
-                    if self.phase=='calibrating' and f.get('ready')=='1':self.phase='running';self.message='IMU相对航向保持已确认，当前朝向为0°'
+                        self.phase='fault';self.stop_event.set();self._release_fusion();return True
+                    if self.phase=='calibrating' and f.get('ready')=='1':
+                        self.phase='running'
+                        self.message=('联合转向已就绪，目标车速由面板设置' if self.source=='fusion'
+                                      else 'IMU相对航向保持已确认，当前朝向为0°')
                     return True
                 if line.startswith(('[SERVO]','[MPU]','[LAB],')) or line.startswith('[FOLLOW] mode=LINE'):
                     self._stopped();self.message='固件已切换到其他模式';return True
             except (KeyError,ValueError,TypeError,OverflowError):
                 # Parsing only: reader never blocks on UART writes or CV work.
                 self.phase='fault';self.message='独立转向反馈无效';self.stop_event.set();self.request['status']='error'
+                self._release_fusion()
             return False
 
     def _stopped(self):
+        self._release_fusion()
         self.owned=False;self.phase='off';self.stop_event.set();self.request['status']='confirmed';self.message='已归中停动力并退出独立模式'
+
+    def _send_fusion(self, now):
+        # Called under the steering lock and on the recurring control worker,
+        # never in the serial receiver or the vision process.
+        if self.phase=='calibrating' and (self.fusion_config_sent_at is None or now-self.fusion_config_sent_at>=.5):
+            fields=','.join(f'{value:.8f}'.rstrip('0').rstrip('.') for value in self.fusion_geometry)
+            self._write_fusion(f'A6,{self.identifier},{fields}')
+            self.fusion_config_sent_at=now
+        if self.fusion_sent_at is None or now-self.fusion_sent_at>=.045:
+            self.sequence=self.sequence%0xffffffff+1
+            self._write_fusion(f'A5,{self.identifier},{self.sequence},{self.speed_request:.3f}')
+            self.fusion_sent_at=now
+        vision=self.fusion_vision
+        observation=vision.latest if vision is not None else None
+        status=self.timer.status(now)
+        if (observation is not None and observation.sequence!=self.fusion_frame and status['valid'] and
+                0<=now-observation.time_s<=.12 and abs(observation.lateral_error_m)<=.5):
+            stamp=int((observation.time_s-status['offset_s'])*1000-status['uncertainty_ms']) & 0xffffffff
+            self.fusion_sequence=self.fusion_sequence%0xffffffff+1
+            self._write_fusion(f'A4,{self.identifier},{self.fusion_sequence},{stamp},{observation.lateral_error_m:.4f},'
+                               f'{observation.heading_error_rad:.4f},{observation.confidence:.3f}')
+            self.fusion_frame=observation.sequence
+
+    def _write_fusion(self, text):
+        body=text.encode('ascii')
+        self.write(b'@'+body+f',{crc_hqx(body,0xffff)}\n'.encode('ascii'))
 
     def _detect_camera(self,now,publish=None):
         try:from .camera_line_detector import BlackTapeDetector,DetectorConfig,render_overlay
@@ -383,13 +480,17 @@ class IndependentSteering:
                 if now-self.started>3:self._fail('3秒内未收到独立转向确认，请烧录新版固件并退出重试')
                 return
             if phase=='calibrating':
-                if now-self.started>6:self._fail('IMU标定超时，请静止后重新开启')
+                if now-self.started>(9 if source=='fusion' else 6):
+                    self._fail('传感器准备超时，请查看观测并重新开启');return
             elif self.received is not None and now-self.received>.7:
                 self._fail('固件状态超时');return
-            if source=='imu' and now-self.last_probe>=.5:
+            if source in ('imu','fusion') and now-self.last_probe>=.5:
                 if self.probe:self.probe(self.timer)
                 else:self.write(self.timer.probe(now))
                 self.last_probe=now
+            if source=='fusion':
+                self._send_fusion(now)
+                return
         # Never hold the receiver lock during CV, JPEG encoding, or image fetch.
         if phase=='calibrating':return
         if source=='camera':
@@ -444,12 +545,19 @@ class IndependentSteering:
     def snapshot(self):
         with self.lock:
             now=self.clock()
+            vision=self.fusion_vision
+            ground=vision.latest if vision is not None else None
             if self.phase=='stopping' and self.request['status']=='pending' and now-self.stop_at>3:
                 self.request['status']='timeout';self.message='未收到退出确认，请检查新版固件和串口，不能确认已退出'
             return {'source':self.source,'blocking':self.owned,'phase':self.phase,'message':self.message,
                     'request':dict(self.request),'firmware':dict(self.firmware),'fault_detail':copy.deepcopy(self.fault_detail),
                     'fresh':self.received is not None and 0<=now-self.received<.7,
                     'settings':copy.deepcopy(self.settings),'settings_error':self.error,
+                    'fusion':{'speed_request':self.speed_request,'vision_error':vision.error if vision else None,
+                              'ground':{'lateral_m':ground.lateral_error_m,
+                                        'heading_deg':math.degrees(ground.heading_error_rad),
+                                        'confidence':ground.confidence,
+                                        'age_ms':max(0,(now-ground.time_s)*1000)} if ground else None},
                     'observation':serialize(self.observation),'proposal':serialize(self.proposal),
                     'observation_age_ms':max(0,(now-self.observation.observed_at)*1000) if self.observation else None,
                     'jpeg_sequence':self.jpeg_sequence,'imu_mount_axes':list(IMU_MOUNT_AXES),
@@ -470,6 +578,7 @@ class IndependentSteering:
         self.camera_capture(False)
         with self.lock:
             self.camera_enabled=False;self.camera_generation+=1;self.jpeg=None;self.jpeg_at=None;self.jpeg_source_at=None
+            self._release_fusion()
         if self.camera_worker and self.camera_worker is not threading.current_thread():self.camera_worker.join(1)
         if self.owned:
             try:self.stop()

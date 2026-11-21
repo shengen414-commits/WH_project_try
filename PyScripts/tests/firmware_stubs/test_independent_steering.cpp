@@ -19,7 +19,13 @@ unsigned long micros(){return clockMs*1000;}
 bool rcHigh=false;
 int digitalRead(int){return rcHigh?HIGH:LOW;}
 extern void rcInterrupt();
-bool readLineSensorFrame(LineSensorFrame&){return false;}
+bool lineAvailable=false;
+long encoderCount=0;
+long readEncoderPosition(){return encoderCount;}
+bool readLineSensorFrame(LineSensorFrame& frame){
+    frame={0,uint32_t(clockMs),0x18,0x18};
+    return lineAvailable;
+}
 bool imuActive=false,imuValid=true,calibrating=false;
 MPU6050Sample sample={};
 void beginMPU6050Sensor(){imuActive=true;sample.calibrated=false;calibrating=false;}
@@ -29,6 +35,14 @@ bool readMPU6050Sample(MPU6050Sample& out){out=sample;return imuActive&&imuValid
 MPU6050SensorStatus mpu6050SensorStatus(){return {imuActive,imuValid,calibrating,0,"test"};}
 void step(int count=1){for(int i=0;i<count;++i){clockMs+=10;sample.timeMs=clockMs;updateESC();updateAutomaticSteering();updateIndependentSteering();}}
 void packet(const char* p){assert(handleIndependentSteeringPacket(p));}
+void checkedPacket(const std::string& body){
+    uint16_t crc=0xffff;
+    for(unsigned char c:body) {
+        crc^=uint16_t(c)<<8;
+        for(int i=0;i<8;++i) crc=uint16_t((crc<<1)^((crc&0x8000)?0x1021:0));
+    }
+    packet((body+","+std::to_string(crc)).c_str());
+}
 
 int main(){
     initESC();sample.azG=-1;sample.valid=true;
@@ -95,6 +109,30 @@ int main(){
     packet("A1,2,105,80,400,1");packet("A2,105,1,1");step(3);
     for(int i=0;i<4;++i){rcHigh=true;rcInterrupt();clockMs+=2;rcHigh=false;rcInterrupt();clockMs+=18;updateESC();updateIndependentSteering();}
     assert(!independentSteeringBlocking()&&pwmOutputs[12]==1500&&pwmOutputs[14]==2000);
+    // Calibrate and arm fusion at zero propulsion. Authored motion needs
+    // two fresh vision frames, a valid local scan, valid CRC and fresh lease.
+    setESCSteeringInhibit(false); lineAvailable=true; sample.correctedGzDps=0;
+    packet("A1,3,110,140,400,1,1130,1850");
+    assert(independentSteeringBlocking());
+    checkedPacket("A6,110,0.012,0.25,0,0.001,0.30");
+    checkedPacket("A5,110,1,0.500");
+    step();sample.calibrated=true;calibrating=false;step(3);
+    checkedPacket("A4,110,1,"+std::to_string(clockMs-10)+",0.01,0,0.95");
+    step(2);
+    checkedPacket("A4,110,2,"+std::to_string(clockMs-10)+",0.01,0,0.95");
+    step(2);
+    assert(pwmOutputs[14]==1500);
+    packet("A5,110,2,0.500,123");
+    packet("A2,110,2,1");
+    setESCThrottle(1800);step();
+    assert(pwmOutputs[14]==1500);
+    checkedPacket("A5,110,2,0.500");step();
+    assert(pwmOutputs[14]>1500&&pwmOutputs[14]<=1640);
+    lineAvailable=false;step(16);
+    assert(pwmOutputs[12]==1500&&pwmOutputs[14]==1500);
+    checkedPacket("A5,110,3,0.500");step();
+    assert(pwmOutputs[14]==1500);
+    packet("A0,110");
 }
 
 MPU6050CalibrationStatus mpu6050CalibrationStatus(){return {0,0,0,0,1,"zero_timeout"};}

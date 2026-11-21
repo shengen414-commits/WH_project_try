@@ -2,9 +2,11 @@ import copy
 import tempfile
 import json
 import unittest
+from binascii import crc_hqx
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock,patch
 from PyScripts.independent_steering import IndependentSteering,DEFAULTS,validate_settings
+from PyScripts.vehicle_state.contracts import VisionObservation
 from PyScripts.steering_control_pipeline import (SteeringObservation,camera_observation,
     standalone_proposal,arbitrate,line_observation)
 
@@ -340,6 +342,41 @@ class IndependentSteeringTests(unittest.TestCase):
             if valid:arbitrate(source,p,10.+age)
             else:
                 with self.assertRaises(ValueError):arbitrate(source,p,10.+age)
+
+    def test_fusion_sends_clocked_observations_without_host_pwm_targets(self):
+        self.service.fusion_profile=lambda:{
+            'geometry':dict(line_pitch_m=.012,line_x_m=.25,line_y_m=0,
+                            meters_per_count=.001,encoder_sign=1,wheelbase_m=.30),
+            'camera':{}}
+        vision=Mock(latest=None)
+        self.service.fusion_capture=Mock()
+        with patch('PyScripts.independent_steering.FusionVision',return_value=vision):
+            self.service.start('fusion')
+        sid=self.service.identifier
+        self.service.feed(f'[ASSIST_ACK] id={sid} action=1 ok=1 source=3 lim=140 slew=400 dir=1 low=1130 high=1850')
+        with self.assertRaises(ValueError):self.service.set_fusion_speed(.4)
+        self.service.step()
+        self.assertTrue(any(p.startswith(f'@A5,{sid},1,0.000,'.encode()) for p in self.packets))
+        vision.latest=VisionObservation(self.now-.04,1,.03,.02,(.01,0,0,.01),.9)
+        with patch.object(self.service.timer,'status',return_value={'valid':True,'offset_s':1.,'uncertainty_ms':3.}):
+            self.service.step()
+            self.service.step()
+            vision.latest=VisionObservation(self.now-.3,2,.03,.02,(.01,0,0,.01),.9)
+            self.service.step()
+        observations=[p for p in self.packets if p.startswith(b'@A4,')]
+        self.assertEqual(len(observations),1)
+        body,crc=observations[0][1:].strip().rsplit(b',',1)
+        self.assertEqual(int(crc),crc_hqx(body,0xffff))
+        self.assertEqual(int(body.split(b',')[3]),8957)
+        self.assertFalse(any(p.startswith(b'@A2,') for p in self.packets))
+        self.service.feed(f'[ASSIST] id={sid} source=3 active=1 fault=0 ready=1')
+        self.service.set_fusion_speed(.4)
+        self.service.step()
+        self.assertTrue(self.packets[-1].startswith(f'@A5,{sid},2,0.400,'.encode()))
+        self.service.stop(emergency=True)
+        self.assertEqual(self.packets[-1],b'E\n')
+        self.service.feed(f'[ASSIST] id={sid} source=3 active=0 fault=0 ready=0')
+        self.assertFalse(self.service.blocking())
 
     def test_camera_loss_sends_neutral_and_recovers_without_rearming(self):
         sid=self.arm('camera')
